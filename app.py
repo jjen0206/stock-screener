@@ -15,6 +15,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src import config, database as db, indicators as ind
+from src.backtester import backtest_short
 from src.data_fetcher import (
     FinMindAPIError,
     fetch_daily_price,
@@ -26,7 +27,7 @@ from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
 
-PAGES = ["短線推薦", "長線口袋名單", "個股查詢", "設定"]
+PAGES = ["短線推薦", "長線口袋名單", "📈 簡易回測", "個股查詢", "設定"]
 
 _CACHE_TABLES = [
     "stocks", "daily_prices", "institutional",
@@ -123,12 +124,14 @@ def main() -> None:
 
     st.sidebar.title("📈 個人選股工具")
     st.sidebar.caption("台股 · 短線 + 長線")
-    page = st.sidebar.radio("選擇功能", PAGES, index=2)
+    page = st.sidebar.radio("選擇功能", PAGES, index=3)
 
     if page == "短線推薦":
         _page_short()
     elif page == "長線口袋名單":
         _page_long()
+    elif page == "📈 簡易回測":
+        _page_backtest()
     elif page == "個股查詢":
         _page_stock_query()
     elif page == "設定":
@@ -601,6 +604,164 @@ def _make_rsi_chart(df: pd.DataFrame, rsi14: pd.Series) -> go.Figure:
         legend=dict(font=dict(size=16)),
     )
     fig.update_xaxes(type="category")
+    return fig
+
+
+# === 回測頁 ===
+
+def _page_backtest() -> None:
+    st.header("📈 簡易回測")
+    st.caption("把目前的短線策略套到歷史資料,看勝率與累積報酬。**不含交易成本/滑價/資金管理**。")
+
+    # sidebar 參數(與短線頁同名,共用值)
+    st.sidebar.markdown("### 短線參數(回測共用)")
+    vol_mult = st.sidebar.number_input(
+        "均量倍數", min_value=1.0, max_value=5.0,
+        value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+        key="bt_vol_mult",
+    )
+    kd_low = st.sidebar.number_input(
+        "KD 門檻 K_low", min_value=0.0, max_value=80.0,
+        value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+        key="bt_kd_low",
+    )
+    inst_days = st.sidebar.number_input(
+        "法人連續買超天數", min_value=1, max_value=10,
+        value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+        key="bt_inst_days",
+    )
+
+    today = date.today()
+    cols = st.columns([2, 2, 2, 1])
+    start = cols[0].date_input(
+        "回測起始", value=today - timedelta(days=180), key="bt_start"
+    )
+    end = cols[1].date_input("回測結束", value=today, key="bt_end")
+    hold_days = cols[2].selectbox(
+        "持有天數", [1, 3, 5, 10, 20], index=2,
+        help="每筆入選收盤買進,持有 N 個交易日後收盤賣出",
+    )
+    cols[3].markdown("&nbsp;", unsafe_allow_html=True)
+    submit = cols[3].button(
+        "執行回測", type="primary", use_container_width=True
+    )
+
+    if not submit:
+        st.info(
+            "選好參數與期間後按「執行回測」。\n\n"
+            "**建議先按 sidebar『更新 50 檔大型股』補足歷史資料**(尤其雲端容器睡眠醒來後 cache 是空的)。"
+            "首次跑半年期間約需 1–2 分鐘。"
+        )
+        return
+
+    if start > end:
+        st.error("回測起始不能晚於結束。")
+        return
+
+    universe = TW_TOP_50
+    params = {
+        "volume_multiplier": float(vol_mult),
+        "kd_threshold_low": float(kd_low),
+        "inst_buy_days": int(inst_days),
+    }
+
+    progress = st.progress(0.0, text="準備...")
+
+    def cb(idx: int, total: int, d: str) -> None:
+        progress.progress(idx / total, text=f"回測中 {idx}/{total}: {d}")
+
+    with st.spinner("執行回測..."):
+        try:
+            result = backtest_short(
+                start.isoformat(), end.isoformat(),
+                params=params,
+                hold_days=int(hold_days),
+                universe=universe,
+                on_progress=cb,
+            )
+        except Exception as e:  # noqa: BLE001
+            progress.empty()
+            st.error(f"回測失敗:{type(e).__name__}: {e}")
+            return
+    progress.empty()
+
+    summary = result["summary"]
+    if summary["trades"] == 0:
+        st.info(
+            "📭 期間內無入選個股(或無歷史資料)。可放寬參數、拉長期間,"
+            "或先按 sidebar『更新 50 檔大型股』補資料。"
+        )
+        return
+
+    # 6 格 metric
+    cols = st.columns(6)
+    cols[0].metric("交易次數", f"{summary['trades']}")
+    cols[1].metric("勝率", f"{summary['win_rate']:.1f}%")
+    cols[2].metric("平均報酬", f"{summary['avg_return']:.2f}%")
+    cols[3].metric(
+        "總報酬(複利)", f"{summary['total_return']:.2f}%",
+        delta=f"vs 0050 待算" if False else None,
+    )
+    cols[4].metric(
+        "最大單筆",
+        f"{summary['max_win']:.2f}%",
+        delta=f"最差 {summary['max_loss']:.2f}%",
+        delta_color="off",
+    )
+    cols[5].metric("夏普比率", f"{summary['sharpe']:.2f}")
+
+    # 累積報酬曲線(含 0050 對比,失敗就不畫)
+    st.markdown("### 📈 累積報酬曲線")
+    st.plotly_chart(
+        _make_equity_chart(result["equity_curve"], start.isoformat(), end.isoformat()),
+        use_container_width=True,
+    )
+
+    # 交易明細
+    st.markdown(f"### 📋 交易明細({len(result['trades'])} 筆)")
+    st.dataframe(
+        result["trades"].sort_values("buy_date", ascending=False),
+        use_container_width=True, hide_index=True,
+    )
+
+
+def _make_equity_chart(
+    equity_curve: pd.Series,
+    start: str,
+    end: str,
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=list(equity_curve.index), y=equity_curve.values,
+        name="策略累積報酬",
+        line=dict(color="#d62728", width=2.5),
+    ))
+
+    # 嘗試疊上 0050 大盤對比(抓不到優雅降級)
+    try:
+        bench = fetch_daily_price("0050", start, end)
+        if not bench.empty and len(bench) >= 2:
+            base = float(bench["close"].iloc[0])
+            if base > 0:
+                bench_returns = (bench["close"] / base - 1) * 100
+                fig.add_trace(go.Scatter(
+                    x=bench["date"].tolist(),
+                    y=bench_returns.tolist(),
+                    name="0050 台灣 50",
+                    line=dict(color="#1f77b4", width=2, dash="dot"),
+                ))
+    except Exception:  # noqa: BLE001 — 抓不到大盤就不畫
+        pass
+
+    fig.add_hline(y=0, line_color="gray", opacity=0.5)
+    fig.update_layout(
+        height=400,
+        margin=dict(t=20, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=16)),
+        font=dict(size=16),
+        xaxis=dict(tickfont=dict(size=14), type="category"),
+        yaxis=dict(tickfont=dict(size=14), title="累積報酬 (%)"),
+    )
     return fig
 
 

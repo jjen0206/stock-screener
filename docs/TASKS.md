@@ -118,7 +118,7 @@
 
 - [ ] G1.1 Telegram Bot 整合,每日收盤後 push 短線推薦(LINE Notify 已停服)
 - [ ] G2.1 自選股清單(SQLite 存使用者標記)
-- [ ] G3.1 簡易回測(過去 1 年策略勝率 + 報酬)
+- [x] G3.1 簡易回測(過去 1 年策略勝率 + 報酬) — 2026-04-27,新檔 src/backtester.py + Streamlit「📈 簡易回測」分頁,含 6 metric + 累積報酬曲線(疊 0050 對比) + 交易明細;**簡易版,無交易成本/滑價/資金管理**;11 個新測試
 - [ ] G4.1 大盤情緒儀表板(加權、外資買賣超、VIX)
 
 ---
@@ -147,3 +147,5 @@
 - 2026-04-27 部署到 Streamlit Cloud,網址 https://jjen-stock-screener.streamlit.app;GitHub repo https://github.com/jjen0206/stock-screener
 - 2026-04-27 T4-B 完成:短線推薦頁 + 長線占位頁 + sidebar「更新 50 檔大型股」按鈕;新增 src/universe.py(50 大型股清單);AppTest 4 個 smoke pass
 - 2026-04-27 解 T1.5 卡點:實作 fetch_dividend + fetch_long_term_data,sidebar 加「📊 更新財報資料」按鈕;意外發現 dividend dataset 無 token 也能用;87 passed
+- 2026-04-27 介面字體放大兩輪(1.25x → 1.4x),老花友善;CSS 注入 + Plotly font/tickfont 同步放大
+- 2026-04-27 G3 簡易回測完成:src/backtester.py + 「📈 簡易回測」分頁;98 passed(新增 11 個測試);實機 0 筆是預期(cache 缺 institutional)

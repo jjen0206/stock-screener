@@ -50,12 +50,14 @@ class _SkipStock(Exception):
 def screen_short(
     date: str,
     params: dict | None = None,
+    stock_ids: list[str] | None = None,
 ) -> pd.DataFrame:
     """短線選股。
 
     參數:
         date: 'YYYY-MM-DD' — 視為「當日收盤」的選股基準日
         params: 覆蓋 DEFAULT_SHORT_PARAMS 的參數;None 用全部預設
+        stock_ids: 限縮選股範圍(只跑這些股號);None = 跑 stocks 表所有 TW 股
 
     回傳:
         DataFrame[stock_id, name, close, volume, ma_volume_5,
@@ -65,9 +67,17 @@ def screen_short(
     p = {**DEFAULT_SHORT_PARAMS, **(params or {})}
 
     with db.get_conn() as conn:
-        stocks = conn.execute(
-            "SELECT stock_id, name FROM stocks WHERE market='TW'"
-        ).fetchall()
+        if stock_ids:
+            placeholders = ",".join(["?"] * len(stock_ids))
+            stocks = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE market='TW' AND stock_id IN ({placeholders})",
+                stock_ids,
+            ).fetchall()
+        else:
+            stocks = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
 
     if not stocks:
         logger.warning("[SCREEN_SHORT] stocks 表為空,無法選股")
