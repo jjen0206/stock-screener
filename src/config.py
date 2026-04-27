@@ -1,6 +1,10 @@
 """
 設定載入模組。
-從專案根目錄的 .env 載入環境變數,提供統一存取的常數。
+
+讀取優先順序:
+  1) Streamlit Secrets (st.secrets) — Streamlit Cloud 部署用
+  2) 環境變數 / .env — 本機開發用
+
 未設定的 token 會印 warning 但不拋例外(走無 token / 未啟用模式)。
 """
 from __future__ import annotations
@@ -14,13 +18,33 @@ from dotenv import load_dotenv
 # 專案根目錄(本檔位於 src/config.py,往上一層即為專案根)
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
-# 載入 .env(若存在)
+# 載入 .env(若存在);本機開發用,雲端部署不需要
 _ENV_PATH: Path = PROJECT_ROOT / ".env"
 load_dotenv(_ENV_PATH)
 
 
+def _from_secrets(name: str) -> str | None:
+    """嘗試從 st.secrets 讀取;雲端有值則回字串,否則回 None。
+
+    本機沒有 .streamlit/secrets.toml 時 st.secrets 訪問會 raise,我們吃掉。
+    pytest / 純 Python 腳本(非 Streamlit context)也會走 except 分支。
+    """
+    try:
+        import streamlit as st
+        v = st.secrets.get(name)
+    except Exception:
+        return None
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
 def _get(name: str, default: str = "") -> str:
-    """讀取環境變數,去除前後空白。"""
+    """先讀 st.secrets,再 fallback 到環境變數 / .env;前後空白會被去除。"""
+    from_secrets = _from_secrets(name)
+    if from_secrets is not None:
+        return from_secrets
     return os.getenv(name, default).strip()
 
 

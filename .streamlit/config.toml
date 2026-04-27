@@ -1,0 +1,17 @@
+# Streamlit 伺服器與主題設定(本機 + Streamlit Cloud 共用)
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# 台股慣例:紅漲綠跌
+primaryColor = "#d62728"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"

@@ -102,6 +102,18 @@ streamlit run app.py
 手機要使用,先把電腦 IP 加上 port(`http://192.168.x.x:8501`),
 在 Safari/Chrome 開啟 → 加到主畫面。
 
+## 部署到 Streamlit Community Cloud(免費)
+
+1. 確認專案已推上 GitHub(public 或 private 皆可)。
+2. 到 [share.streamlit.io](https://share.streamlit.io) 用 GitHub 帳號登入。
+3. 點 **Create app** → 選 repo → branch `main` → **Main file path: `app.py`**。
+4. **Advanced settings → Python version: 3.11**(雲端目前最高支援 3.11)。
+5. **Settings → Secrets** 貼上 `.streamlit/secrets.toml.example` 的內容(FinMind 留空即無 token 模式)。
+6. 點 **Deploy**,1–3 分鐘後拿到 `https://stock-screener-XXXXX.streamlit.app` 網址。
+
+> 升級 FinMind token 後不必重新部署,只要回 Settings → Secrets 改 `FINMIND_TOKEN` 並 reboot app 即可。
+> 雲端容器重啟會清空 SQLite cache,首次查詢會重抓。
+
 ## 常見問題
 
 **Q: Claude Code 改了我不想改的檔案怎麼辦?**
