@@ -116,7 +116,7 @@
 
 ## 第 6 階段:選做功能
 
-- [ ] G1.1 Telegram Bot 整合,每日收盤後 push 短線推薦(LINE Notify 已停服)
+- [x] G1.1 Telegram Bot 整合,每日收盤後 push 短線推薦(LINE Notify 已停服) — 2026-04-27,新檔 src/notifier.py + scripts/daily_notify.py;Streamlit sidebar 加「📲 測試 Telegram」按鈕(只在 secrets 有 token 時顯示);設定頁加 BotFather → /newbot → getUpdates 教學;README 加 GitHub Actions yaml 範本(每日 14:00 UTC = 22:00 台北時區);14 個新測試
 - [ ] G2.1 自選股清單(SQLite 存使用者標記)
 - [x] G3.1 簡易回測(過去 1 年策略勝率 + 報酬) — 2026-04-27,新檔 src/backtester.py + Streamlit「📈 簡易回測」分頁,含 6 metric + 累積報酬曲線(疊 0050 對比) + 交易明細;**簡易版,無交易成本/滑價/資金管理**;11 個新測試
 - [ ] G4.1 大盤情緒儀表板(加權、外資買賣超、VIX)
@@ -149,3 +149,6 @@
 - 2026-04-27 解 T1.5 卡點:實作 fetch_dividend + fetch_long_term_data,sidebar 加「📊 更新財報資料」按鈕;意外發現 dividend dataset 無 token 也能用;87 passed
 - 2026-04-27 介面字體放大兩輪(1.25x → 1.4x),老花友善;CSS 注入 + Plotly font/tickfont 同步放大
 - 2026-04-27 G3 簡易回測完成:src/backtester.py + 「📈 簡易回測」分頁;98 passed(新增 11 個測試);實機 0 筆是預期(cache 缺 institutional)
+- 2026-04-27 修 backtest 兩個 bug:夏普 √(252/hold_days) 年化、累積報酬曲線改 date 軸 + 加直方圖;summary 加年化報酬/波動率欄位
+- 2026-04-27 修 KeyError(雲端 module cache 落後場景):UI 全改 .get() 防呆
+- 2026-04-27 G1 Telegram 推播完成:notifier 模組 + CLI 腳本 + sidebar 按鈕 + 設定頁教學 + README GitHub Actions 範本;115 passed

@@ -866,6 +866,38 @@ def _page_settings() -> None:
         "或 Streamlit Cloud Settings → Secrets(雲端)後重啟。"
     )
 
+    # === Telegram 設定教學 ===
+    st.markdown("---")
+    st.markdown("### 📲 Telegram 推播設定")
+    with st.expander("怎麼設定 Telegram Bot?", expanded=False):
+        st.markdown(
+            """
+**1. 建立 Bot 拿 token**
+1. 在 Telegram 找 [@BotFather](https://t.me/BotFather)
+2. 傳 `/newbot`,依指示取名
+3. BotFather 回一段 token,類似 `1234567890:AAH...........`
+
+**2. 拿你的 chat_id**
+1. 先傳「任何訊息」給你新建的 bot(讓他看得到你)
+2. 在瀏覽器開 `https://api.telegram.org/bot<你的 token>/getUpdates`
+3. 在 JSON 內找 `result[0].message.chat.id`,例如 `123456789`
+
+**3. 寫進 Secrets**
+- 雲端:Streamlit Cloud → Settings → Secrets,加兩行:
+    ```
+    TELEGRAM_BOT_TOKEN = "1234567890:AAH..."
+    TELEGRAM_CHAT_ID = "123456789"
+    ```
+- 本機:編 `.env`(同樣兩行,值不要加引號)
+- Reboot app 後 sidebar 會自動出現「📲 測試 Telegram」按鈕
+
+**4. 排程每日推播**
+Streamlit Cloud 沒有定時任務功能,要靠:
+- GitHub Actions(推薦,免費)— 範本看 README「Telegram 推播」章節
+- 自家 Linux 主機 cron / Windows 工作排程器
+            """
+        )
+
 
 def _get_table_counts() -> dict[str, object]:
     db.init_db()
@@ -893,6 +925,20 @@ def _render_sidebar_update() -> None:
     st.sidebar.caption(
         "📊 財報需要 FinMind token,無 token 模式可能拿不到。"
     )
+
+    # 只在 token 有設定時顯示測試按鈕
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+        st.sidebar.markdown("---")
+        if st.sidebar.button("📲 測試 Telegram", use_container_width=True):
+            from src.notifier import send_telegram_message
+            ok = send_telegram_message(
+                "👋 Hello from Stock Screener!設定成功。"
+            )
+            if ok:
+                st.toast("✅ Telegram 已通", icon="✅")
+            else:
+                # 不要把 token / API 回應塞進 toast,避免曝露
+                st.toast("❌ Telegram 發送失敗,看 console 日誌", icon="❌")
 
 
 # 50 檔大型股抓取的回望天數(過去 1 年,讓回測有足夠歷史)

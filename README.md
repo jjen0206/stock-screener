@@ -114,6 +114,56 @@ streamlit run app.py
 > 升級 FinMind token 後不必重新部署,只要回 Settings → Secrets 改 `FINMIND_TOKEN` 並 reboot app 即可。
 > 雲端容器重啟會清空 SQLite cache,首次查詢會重抓。
 
+## Telegram 推播(每日選股自動傳)
+
+### 1. 建 Bot 拿 token + chat_id
+- 找 [@BotFather](https://t.me/BotFather) → `/newbot` → 拿 token
+- 先傳一句話給你新 bot,再開 `https://api.telegram.org/bot<token>/getUpdates` 看 `result[0].message.chat.id`
+
+### 2. 寫進 Streamlit Secrets / `.env`
+```
+TELEGRAM_BOT_TOKEN = "1234567890:AAH..."
+TELEGRAM_CHAT_ID = "123456789"
+```
+雲端要 Reboot app;本機重啟 streamlit。Sidebar 出現「📲 測試 Telegram」按下確認通。
+
+### 3. 設定每日排程(GitHub Actions,免費)
+
+新增 `.github/workflows/daily-notify.yml`:
+
+```yaml
+name: Daily Telegram Push
+
+on:
+  schedule:
+    # 14:00 UTC = 22:00 Asia/Taipei (台股 13:30 收盤後 8.5 小時)
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch:  # 也允許手動觸發測試
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python scripts/daily_notify.py
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+```
+
+到 GitHub repo → **Settings → Secrets and variables → Actions** 加上面 3 個 secrets,即可開啟每日排程。
+
+### 4. 主機 cron(替代方案)
+```
+0 22 * * 1-5  cd /path/to/stock-screener && .venv/bin/python scripts/daily_notify.py
+```
+Windows 用「工作排程器」綁同樣指令。
+
 ## 常見問題
 
 **Q: Claude Code 改了我不想改的檔案怎麼辦?**
