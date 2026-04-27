@@ -259,3 +259,51 @@ def test_twse_session_singleton():
     assert s1 is s2
     # UA 應該被設成偽裝瀏覽器
     assert "Mozilla" in s1.headers.get("User-Agent", "")
+
+
+def test_fetch_metrics_empty_list_raises_hard(tmp_db, monkeypatch):
+    """雲端常見的『200 但回空 list』要被視為失敗 → batch 函式回 error。"""
+    def empty(url, timeout=30):
+        return _mock_response([])  # 空 list = 雲端被擋的典型症狀
+
+    monkeypatch.setattr(ff, "_twse_get", empty)
+    result = ff.update_long_term_data_free(["2330"])
+    assert result["success_metrics"] == []
+    assert "2330" in result["failed"]
+    # error 該被填(而不是 None,讓 UI 能顯示具體訊息)
+    assert result["error"] is not None
+    assert "格式異常" in str(result["error"])
+
+
+def test_twse_get_falls_back_to_httpx(monkeypatch):
+    """requests 失敗 → 自動試 httpx → 成功。"""
+    fake_resp = _mock_response(_FAKE_BWIBBU)
+
+    # 讓 requests session 失敗
+    def failing_session():
+        s = Mock()
+        s.get.side_effect = requests.ConnectionError("requests boom")
+        return s
+    monkeypatch.setattr(ff, "_twse_session", failing_session)
+
+    # 讓 httpx fallback 成功
+    monkeypatch.setattr(ff, "_twse_get_via_httpx", lambda url, t=30: fake_resp)
+
+    r = ff._twse_get(ff.TWSE_BWIBBU_URL)
+    assert r is fake_resp
+
+
+def test_twse_get_both_clients_fail_raises(monkeypatch):
+    """兩個 client 都失敗 → raise 第一個 exception(requests 的)。"""
+    def failing_session():
+        s = Mock()
+        s.get.side_effect = requests.ConnectionError("requests boom")
+        return s
+    monkeypatch.setattr(ff, "_twse_session", failing_session)
+
+    def httpx_boom(url, t=30):
+        raise RuntimeError("httpx boom")
+    monkeypatch.setattr(ff, "_twse_get_via_httpx", httpx_boom)
+
+    with pytest.raises(requests.ConnectionError, match="requests boom"):
+        ff._twse_get(ff.TWSE_BWIBBU_URL)

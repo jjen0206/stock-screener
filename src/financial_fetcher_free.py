@@ -84,17 +84,66 @@ def _twse_session() -> requests.Session:
     return _session
 
 
-def _twse_get(url: str, timeout: int = 30) -> requests.Response:
-    """所有 TWSE OpenAPI 呼叫走這裡;失敗會印詳細 error 到 stderr/log。"""
+def _twse_get_via_httpx(url: str, timeout: int = 30):
+    """Fallback HTTP client (httpx 對舊 SSL / cipher 比 requests 寬鬆)。
+
+    Streamlit Cloud 上有時 requests 抓 TWSE 回 200 但內容空,httpx 卻能拿到正常資料。
+    回的 response 物件有 .json() 方法,介面與 requests.Response 兼容。
+    """
+    import httpx
+    with httpx.Client(
+        verify=False, timeout=timeout, follow_redirects=True,
+    ) as c:
+        r = c.get(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 stock-screener/1.0"
+            ),
+            "Accept": "application/json, text/plain, */*",
+        })
+        r.raise_for_status()
+        return r
+
+
+def _twse_get(url: str, timeout: int = 30):
+    """先試 requests + _LegacySSLAdapter,失敗 fallback 到 httpx,兩個都失敗才 raise。
+
+    回 response-like 物件(`.json()` 可呼叫),caller 不用區分 client。
+    每次成敗都印一行到 stderr/log,雲端 logs 可看出走哪條路徑。
+    """
+    errors: list[tuple[str, Exception]] = []
+    # try 1: requests + custom adapter
     try:
         r = _twse_session().get(url, timeout=timeout, verify=False)
         r.raise_for_status()
         return r
-    except Exception as e:  # noqa: BLE001 — 統一在 caller 處理
-        msg = f"[TWSE-ERROR] GET {url} failed ({type(e).__name__}): {str(e)[:300]}"
+    except Exception as e:  # noqa: BLE001
+        errors.append(("requests", e))
+        msg = (
+            f"[TWSE-WARN-REQUESTS] {url}: "
+            f"({type(e).__name__}) {str(e)[:200]} — 試 httpx fallback"
+        )
+        logger.warning(msg)
+        print(msg, file=sys.stderr, flush=True)
+
+    # try 2: httpx fallback
+    try:
+        r = _twse_get_via_httpx(url, timeout)
+        msg = f"[TWSE-OK-HTTPX] {url} via httpx fallback"
+        logger.info(msg)
+        print(msg, file=sys.stderr, flush=True)
+        return r
+    except Exception as e:  # noqa: BLE001
+        errors.append(("httpx", e))
+        msg = (
+            f"[TWSE-ERROR-HTTPX] {url}: "
+            f"({type(e).__name__}) {str(e)[:200]}"
+        )
         logger.error(msg)
         print(msg, file=sys.stderr, flush=True)
-        raise
+
+    # 兩個都失敗 → 拋第一個 exception(通常是 requests 的,主公比較熟)
+    raise errors[0][1]
 
 # 全市場資料記憶體 cache(5 分鐘 TTL,避免 batch 50 檔重複拉)
 _metrics_cache: dict | None = None
@@ -146,7 +195,19 @@ def _fetch_all_metrics(force_refresh: bool = False) -> dict[str, dict]:
     logger.info("[FREE] 拉 TWSE BWIBBU_d 全市場...")
     r = _twse_get(TWSE_BWIBBU_URL, timeout=30)
     raw = r.json()
+    # 防雲端「靜默失敗」:HTTP 200 但回空 list / 非 list
+    if not isinstance(raw, list) or len(raw) == 0:
+        sample = str(raw)[:200]
+        raise RuntimeError(
+            f"TWSE BWIBBU_d 回傳格式異常: type={type(raw).__name__} "
+            f"len={len(raw) if hasattr(raw, '__len__') else '?'} — "
+            f"前 200 字: {sample}"
+        )
     _metrics_cache = {x["Code"]: x for x in raw if x.get("Code")}
+    if not _metrics_cache:
+        raise RuntimeError(
+            f"TWSE BWIBBU_d 回了 {len(raw)} 筆但都沒 'Code' 欄位"
+        )
     _metrics_cache_time = now
     logger.info("[FREE] BWIBBU_d 拿到 %d 檔", len(_metrics_cache))
     return _metrics_cache
@@ -165,6 +226,13 @@ def _fetch_all_eps(force_refresh: bool = False) -> dict[str, dict]:
     logger.info("[FREE] 拉 TWSE t187ap14_L 全市場(綜損/EPS)...")
     r = _twse_get(TWSE_INC_URL, timeout=60)
     raw = r.json()
+    if not isinstance(raw, list) or len(raw) == 0:
+        sample = str(raw)[:200]
+        raise RuntimeError(
+            f"TWSE t187ap14_L 回傳格式異常: type={type(raw).__name__} "
+            f"len={len(raw) if hasattr(raw, '__len__') else '?'} — "
+            f"前 200 字: {sample}"
+        )
     _eps_cache = {x["公司代號"]: x for x in raw if x.get("公司代號")}
     _eps_cache_time = now
     logger.info("[FREE] t187ap14_L 拿到 %d 檔", len(_eps_cache))

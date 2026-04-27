@@ -5,6 +5,7 @@ streamlit>=1.32.0
 finmind>=1.9.0
 yfinance>=0.2.40
 tqdm>=4.66.0  # finmind 1.9.x 漏寫的依賴,需補上
+httpx>=0.27.0  # TWSE OpenAPI fallback HTTP client(雲端 SSL 比 requests 寬鬆)
 
 # 資料處理
 pandas>=2.2.0
