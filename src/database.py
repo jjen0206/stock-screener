@@ -13,6 +13,7 @@ SQLite 快取資料庫模組。
 - financials     財報(月營收 + 季 EPS / ROE,以 period_type 區分)
 - dividend       年度配息(現金股利 + 股票股利 + 除息日,長線選股用)
 - daily_metrics  當日 PE / PB / 殖利率(TWSE OpenAPI 免費版)
+- watchlist      使用者自選關注股(代號 / 加入時間 / 備註)
 - sync_log       各股票各 dataset 的已同步日期區間,用於快取判斷
 
 DB 路徑來源:
@@ -130,6 +131,13 @@ SCHEMA: list[str] = [
         pb             REAL,
         dividend_yield REAL,
         PRIMARY KEY (stock_id, date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS watchlist (
+        stock_id TEXT PRIMARY KEY,
+        added_at TEXT NOT NULL,
+        note     TEXT
     )
     """,
     """
@@ -379,6 +387,60 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
     return len(rows_list)
 
 
+# === watchlist helpers(自選股清單) ===
+
+def add_to_watchlist(
+    stock_id: str,
+    note: str | None = None,
+    db_path: str | Path | None = None,
+) -> None:
+    """加入關注;若已存在則更新 note(added_at 不變)。"""
+    with get_conn(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO watchlist (stock_id, added_at, note)
+            VALUES (?, ?, ?)
+            ON CONFLICT(stock_id) DO UPDATE SET note=excluded.note
+            """,
+            (stock_id, _now_iso(), note),
+        )
+
+
+def remove_from_watchlist(
+    stock_id: str,
+    db_path: str | Path | None = None,
+) -> bool:
+    """從關注移除;回 True 表示真的移掉,False 表示原本就不在。"""
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM watchlist WHERE stock_id=?", (stock_id,)
+        )
+        return cur.rowcount > 0
+
+
+def is_in_watchlist(
+    stock_id: str,
+    db_path: str | Path | None = None,
+) -> bool:
+    """是否已在關注清單。"""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM watchlist WHERE stock_id=? LIMIT 1",
+            (stock_id,),
+        ).fetchone()
+    return row is not None
+
+
+def get_watchlist(db_path: str | Path | None = None) -> list[dict]:
+    """取整個關注清單(按 added_at 倒序)。"""
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT stock_id, added_at, note FROM watchlist "
+            "ORDER BY added_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # === sync_log helpers(快取核心) ===
 
 def get_synced_range(
@@ -432,6 +494,10 @@ __all__ = [
     "upsert_financials",
     "upsert_dividend",
     "upsert_daily_metrics",
+    "add_to_watchlist",
+    "remove_from_watchlist",
+    "is_in_watchlist",
+    "get_watchlist",
     "get_synced_range",
     "update_synced_range",
     "SCHEMA",

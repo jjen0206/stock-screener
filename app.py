@@ -28,7 +28,10 @@ from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
 
-PAGES = ["短線推薦", "長線口袋名單", "📈 簡易回測", "個股查詢", "設定"]
+PAGES = [
+    "短線推薦", "長線口袋名單", "📈 簡易回測",
+    "個股查詢", "⭐ 我的關注", "設定",
+]
 
 _CACHE_TABLES = [
     "stocks", "daily_prices", "institutional",
@@ -135,6 +138,8 @@ def main() -> None:
         _page_backtest()
     elif page == "個股查詢":
         _page_stock_query()
+    elif page == "⭐ 我的關注":
+        _page_watchlist()
     elif page == "設定":
         _page_settings()
 
@@ -359,8 +364,28 @@ def _has_long_data() -> bool:
 def _page_stock_query() -> None:
     st.header("🔍 個股查詢")
 
-    # 短線頁可以 push stock_id 進來
+    # 短線 / 關注頁可以 push stock_id 進來
     default_stock = st.session_state.pop("query_stock_id", "2330")
+
+    # ⭐ Toggle 關注按鈕(放標題下,以「上次查詢的」或預設股號為對象)
+    db.init_db()
+    starred = db.is_in_watchlist(default_stock.strip())
+    star_col, info_col = st.columns([1, 5])
+    if star_col.button(
+        f"{'⭐' if starred else '☆'} {'已關注' if starred else '加入關注'}",
+        key="star_toggle",
+        help=f"切換 {default_stock} 是否在關注清單",
+    ):
+        if starred:
+            db.remove_from_watchlist(default_stock.strip())
+            st.toast(f"已從關注移除 {default_stock}", icon="☆")
+        else:
+            db.add_to_watchlist(default_stock.strip())
+            st.toast(f"已加入關注 {default_stock}", icon="⭐")
+        st.rerun()
+    info_col.caption(
+        f"目前關注對象:**{default_stock}**(改下方代號後再切換才會對到新代號)"
+    )
 
     cols = st.columns([2, 2, 2, 1])
     stock_id = cols[0].text_input("股票代碼", value=default_stock, help="例:2330(台積電)")
@@ -827,6 +852,96 @@ def _make_returns_histogram(trades_df: pd.DataFrame) -> go.Figure:
         showlegend=False,
     )
     return fig
+
+
+# === ⭐ 我的關注頁 ===
+
+def _page_watchlist() -> None:
+    st.header("⭐ 我的關注")
+    db.init_db()
+
+    items = db.get_watchlist()
+    if not items:
+        st.info(
+            "目前沒有關注的個股。\n\n"
+            "到「個股查詢」頁,輸入代號查詢後按 ☆ 圖示即可加入關注。"
+        )
+        return
+
+    # 把關注清單組成 DataFrame:代號 / 名稱 / 收盤 / 漲跌% / MA5 / 備註
+    rows = []
+    sids = [it["stock_id"] for it in items]
+    placeholders = ",".join(["?"] * len(sids))
+    with db.get_conn() as conn:
+        # 名稱
+        name_rows = conn.execute(
+            f"SELECT stock_id, name FROM stocks WHERE stock_id IN ({placeholders})",
+            sids,
+        ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in name_rows}
+
+    for it in items:
+        sid = it["stock_id"]
+        # 取最新兩日 close 算漲跌 + 最近 5 日 MA5
+        with db.get_conn() as conn:
+            recent = conn.execute(
+                "SELECT date, close FROM daily_prices "
+                "WHERE stock_id=? ORDER BY date DESC LIMIT 5",
+                (sid,),
+            ).fetchall()
+        if recent:
+            close = float(recent[0]["close"]) if recent[0]["close"] else None
+            prev_close = (
+                float(recent[1]["close"])
+                if len(recent) > 1 and recent[1]["close"] else None
+            )
+            change_pct = (
+                (close - prev_close) / prev_close * 100.0
+                if (close and prev_close) else None
+            )
+            ma5 = (
+                sum(float(r["close"]) for r in recent if r["close"]) / len(recent)
+                if recent else None
+            )
+        else:
+            close = prev_close = change_pct = ma5 = None
+        rows.append({
+            "代號": sid,
+            "名稱": name_map.get(sid, "—"),
+            "收盤": f"{close:.2f}" if close else "—",
+            "漲跌%": f"{change_pct:+.2f}%" if change_pct is not None else "—",
+            "MA5": f"{ma5:.2f}" if ma5 else "—",
+            "備註": it.get("note") or "",
+            "加入時間": it["added_at"][:10] if it["added_at"] else "—",
+        })
+    df = pd.DataFrame(rows)
+
+    selection = st.dataframe(
+        df, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+    )
+    if selection and selection.selection.rows:
+        idx = selection.selection.rows[0]
+        sid = items[idx]["stock_id"]
+        st.session_state["query_stock_id"] = sid
+        st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
+
+    st.markdown("---")
+    st.markdown("### 編輯")
+    c1, c2 = st.columns(2)
+    edit_sid = c1.selectbox(
+        "選個股", [it["stock_id"] for it in items], key="wl_edit_sid",
+    )
+    new_note = c2.text_input("新備註", key="wl_new_note")
+    bcols = st.columns(3)
+    if bcols[0].button("💾 更新備註", use_container_width=True):
+        db.add_to_watchlist(edit_sid, note=new_note)
+        st.toast(f"{edit_sid} 備註已更新", icon="💾")
+        st.rerun()
+    if bcols[1].button("🗑️ 從關注移除", use_container_width=True):
+        if db.remove_from_watchlist(edit_sid):
+            st.toast(f"已移除 {edit_sid}", icon="🗑️")
+            st.rerun()
 
 
 # === 設定頁 ===
