@@ -821,6 +821,7 @@ def _render_sidebar_update() -> None:
     st.sidebar.markdown("### 🔄 資料更新")
     if st.sidebar.button("更新 50 檔大型股", use_container_width=True):
         _run_update_top_50()
+    st.sidebar.caption("📅 每檔抓過去 1 年(供回測用),首次約 4–6 分鐘。")
     if st.sidebar.button("📊 更新財報資料", use_container_width=True):
         _run_update_long_term()
     st.sidebar.caption(
@@ -828,28 +829,50 @@ def _render_sidebar_update() -> None:
     )
 
 
+# 50 檔大型股抓取的回望天數(過去 1 年,讓回測有足夠歷史)
+_TOP_50_LOOKBACK_DAYS = 365
+
+
 def _run_update_top_50() -> None:
-    """對 TW_TOP_50 跑一次增量抓取(已有的不重抓)。"""
+    """對 TW_TOP_50 跑一次增量抓取(已有的不重抓)。
+
+    抓過去 _TOP_50_LOOKBACK_DAYS 天的 daily_price + institutional,
+    讓「📈 簡易回測」有足夠歷史資料。
+    """
     today = date.today()
     today_iso = today.isoformat()
-    start_iso = (today - timedelta(days=90)).isoformat()
+    start_iso = (today - timedelta(days=_TOP_50_LOOKBACK_DAYS)).isoformat()
 
-    progress = st.progress(0.0, text="準備...")
+    progress = st.progress(0.0, text="準備抓取 50 檔過去 1 年的資料...")
     n = len(TW_TOP_50)
     success = 0
     for i, (sid, name) in enumerate(TW_TOP_50):
+        # 進度條:每檔顯示兩個子步驟(price → institutional),會更新兩次
         progress.progress(
-            (i + 1) / n, text=f"更新 {i + 1}/{n}: {sid} {name}",
+            (i + 0.3) / n,
+            text=f"[{i + 1}/{n}] 抓取 {sid} {name} daily_price...",
         )
+        ok_any = False
         try:
             db.upsert_stocks([{"stock_id": sid, "name": name, "market": "TW"}])
             fetch_daily_price(sid, start_iso, today_iso)
-            fetch_institutional(sid, start_iso, today_iso)
-            success += 1
+            ok_any = True
         except Exception:  # noqa: BLE001
-            continue
+            pass
+        progress.progress(
+            (i + 0.7) / n,
+            text=f"[{i + 1}/{n}] 抓取 {sid} {name} institutional...",
+        )
+        try:
+            fetch_institutional(sid, start_iso, today_iso)
+            ok_any = True
+        except Exception:  # noqa: BLE001
+            pass
+        if ok_any:
+            success += 1
+        progress.progress((i + 1) / n)
     progress.empty()
-    st.toast(f"已更新 {success} / {n} 檔資料", icon="✅")
+    st.toast(f"已更新 {success} / {n} 檔(過去 1 年)", icon="✅")
 
 
 def _run_update_long_term() -> None:
