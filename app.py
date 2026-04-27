@@ -694,25 +694,27 @@ def _page_backtest() -> None:
         return
 
     # 8 格 metric (兩列 × 四欄)
+    # 用 .get() 防禦式取值,避免後端 cache 落後或新增欄位時 UI 炸 KeyError
+    g = summary.get
+    hd = int(g("hold_days", 5) or 5)
     row1 = st.columns(4)
-    row1[0].metric("交易次數", f"{summary['trades']}")
-    row1[1].metric("勝率", f"{summary['win_rate']:.1f}%")
-    row1[2].metric("平均報酬/筆", f"{summary['avg_return']:.2f}%")
-    row1[3].metric("總報酬(複利)", f"{summary['total_return']:.2f}%")
+    row1[0].metric("交易次數", f"{g('trades', 0)}")
+    row1[1].metric("勝率", f"{g('win_rate', 0.0):.1f}%")
+    row1[2].metric("平均報酬/筆", f"{g('avg_return', 0.0):.2f}%")
+    row1[3].metric("總報酬(複利)", f"{g('total_return', 0.0):.2f}%")
 
     row2 = st.columns(4)
-    row2[0].metric("年化報酬", f"{summary['annual_return']:.2f}%")
-    row2[1].metric("年化波動率", f"{summary['annual_volatility']:.2f}%")
+    row2[0].metric("年化報酬", f"{g('annual_return', 0.0):.2f}%")
+    row2[1].metric("年化波動率", f"{g('annual_volatility', 0.0):.2f}%")
     row2[2].metric(
         "夏普比率",
-        f"{summary['sharpe']:.2f}",
-        help=f"年化基準 √(252/{summary['hold_days']}) = "
-             f"{(252 / max(summary['hold_days'], 1)) ** 0.5:.2f}",
+        f"{g('sharpe', 0.0):.2f}",
+        help=f"年化基準 √(252/{hd}) = {(252 / max(hd, 1)) ** 0.5:.2f}",
     )
     row2[3].metric(
         "最大單筆",
-        f"{summary['max_win']:.2f}%",
-        delta=f"最差 {summary['max_loss']:.2f}%",
+        f"{g('max_win', 0.0):.2f}%",
+        delta=f"最差 {g('max_loss', 0.0):.2f}%",
         delta_color="off",
     )
 
