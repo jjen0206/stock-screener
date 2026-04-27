@@ -20,12 +20,15 @@ ROE 算法(Du Pont 簡化):
 from __future__ import annotations
 
 import logging
+import ssl
+import sys
 import time
 from typing import Any, Callable
 
 import pandas as pd
 import requests
 import urllib3
+from requests.adapters import HTTPAdapter
 
 from src import database as db
 
@@ -37,6 +40,61 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TWSE_BWIBBU_URL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
 TWSE_INC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
+
+
+# === Robust HTTP 客戶端 ===
+# 為什麼要這層:
+# - TWSE 的 SSL 憑證缺 Subject Key Identifier,新版 OpenSSL 拒絕 → verify=False
+# - Streamlit Cloud (Debian 12 + OpenSSL 3.x) 預設 SECLEVEL=2,某些 cipher 被擋
+#   → set_ciphers('DEFAULT@SECLEVEL=1') 開放更舊的 cipher
+# - 部分 CDN 對 python-requests 預設 UA 擋 → 設成像瀏覽器的 UA
+
+class _LegacySSLAdapter(HTTPAdapter):
+    """處理 TWSE 舊 SSL 憑證 / cipher,雲端 OpenSSL 較新環境也能連。"""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+        except ssl.SSLError:
+            # 某些 OpenSSL build 不支援這個 cipher 字串,忽略繼續
+            pass
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+
+_session: requests.Session | None = None
+
+
+def _twse_session() -> requests.Session:
+    """共用 session(robust SSL adapter + 偽裝 UA)。"""
+    global _session
+    if _session is None:
+        s = requests.Session()
+        s.mount("https://", _LegacySSLAdapter())
+        s.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 stock-screener/1.0"
+            ),
+            "Accept": "application/json, text/plain, */*",
+        })
+        _session = s
+    return _session
+
+
+def _twse_get(url: str, timeout: int = 30) -> requests.Response:
+    """所有 TWSE OpenAPI 呼叫走這裡;失敗會印詳細 error 到 stderr/log。"""
+    try:
+        r = _twse_session().get(url, timeout=timeout, verify=False)
+        r.raise_for_status()
+        return r
+    except Exception as e:  # noqa: BLE001 — 統一在 caller 處理
+        msg = f"[TWSE-ERROR] GET {url} failed ({type(e).__name__}): {str(e)[:300]}"
+        logger.error(msg)
+        print(msg, file=sys.stderr, flush=True)
+        raise
 
 # 全市場資料記憶體 cache(5 分鐘 TTL,避免 batch 50 檔重複拉)
 _metrics_cache: dict | None = None
@@ -86,8 +144,7 @@ def _fetch_all_metrics(force_refresh: bool = False) -> dict[str, dict]:
     ):
         return _metrics_cache
     logger.info("[FREE] 拉 TWSE BWIBBU_d 全市場...")
-    r = requests.get(TWSE_BWIBBU_URL, timeout=30, verify=False)
-    r.raise_for_status()
+    r = _twse_get(TWSE_BWIBBU_URL, timeout=30)
     raw = r.json()
     _metrics_cache = {x["Code"]: x for x in raw if x.get("Code")}
     _metrics_cache_time = now
@@ -106,8 +163,7 @@ def _fetch_all_eps(force_refresh: bool = False) -> dict[str, dict]:
     ):
         return _eps_cache
     logger.info("[FREE] 拉 TWSE t187ap14_L 全市場(綜損/EPS)...")
-    r = requests.get(TWSE_INC_URL, timeout=60, verify=False)
-    r.raise_for_status()
+    r = _twse_get(TWSE_INC_URL, timeout=60)
     raw = r.json()
     _eps_cache = {x["公司代號"]: x for x in raw if x.get("公司代號")}
     _eps_cache_time = now
@@ -116,12 +172,14 @@ def _fetch_all_eps(force_refresh: bool = False) -> dict[str, dict]:
 
 
 def _reset_caches() -> None:
-    """測試用:清空記憶體 cache,確保每個測試獨立。"""
+    """測試用:清空記憶體 cache + session,確保每個測試獨立。"""
     global _metrics_cache, _metrics_cache_time, _eps_cache, _eps_cache_time
+    global _session
     _metrics_cache = None
     _metrics_cache_time = 0.0
     _eps_cache = None
     _eps_cache_time = 0.0
+    _session = None
 
 
 # === 公開 API ===
@@ -259,7 +317,10 @@ def update_long_term_data_free(
                 except Exception:  # noqa: BLE001
                     pass
         return {
-            "success_metrics": [], "success_eps": [], "failed": failed,
+            "success_metrics": [],
+            "success_eps": [],
+            "failed": failed,
+            "error": e,  # ← 給 UI 顯示具體 error type + 訊息
         }
 
     eps_available = True
@@ -351,6 +412,7 @@ def update_long_term_data_free(
         "success_metrics": success_metrics,
         "success_eps": success_eps,
         "failed": failed,
+        "error": None,
     }
 
 

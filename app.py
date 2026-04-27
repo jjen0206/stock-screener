@@ -1027,10 +1027,19 @@ def _run_update_long_term_free() -> None:
     )
     st.toast(msg, icon="📊")
     if n_metrics == 0:
-        st.warning(
-            "⚠️ TWSE OpenAPI 全失敗 — 可能 SSL / 網路問題,"
-            "雲端 Streamlit Cloud 環境通常正常。"
-        )
+        err = result.get("error")
+        if err is not None:
+            st.error(
+                f"❌ TWSE OpenAPI 全失敗 ({type(err).__name__}): "
+                f"{str(err)[:300]}\n\n"
+                "雲端環境的 SSL / cipher / UA 不相容?"
+                "右下 **Manage app → Logs** 可看完整 traceback。"
+            )
+        else:
+            st.error(
+                "❌ TWSE OpenAPI 全失敗(無具體 error 訊息),"
+                "請看 Manage app → Logs。"
+            )
 
 
 # === 頁尾 ===
