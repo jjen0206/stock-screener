@@ -11,6 +11,7 @@ SQLite 快取資料庫模組。
 - daily_prices 日線價格(OHLCV + 成交金額 / 筆數 / 漲跌)
 - institutional 三大法人買賣超(已 pivot 成單筆/股/日)
 - financials   財報(月營收 + 季 EPS / ROE,以 period_type 區分)
+- dividend     年度配息(現金股利 + 股票股利 + 除息日,長線選股用)
 - sync_log     各股票各 dataset 的已同步日期區間,用於快取判斷
 
 DB 路徑來源:
@@ -107,6 +108,16 @@ SCHEMA: list[str] = [
         eps         REAL,
         roe         REAL,
         PRIMARY KEY (stock_id, period_type, period)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dividend (
+        stock_id         TEXT NOT NULL,
+        year             INTEGER NOT NULL,
+        cash_dividend    REAL DEFAULT 0,
+        stock_dividend   REAL DEFAULT 0,
+        ex_dividend_date TEXT,
+        PRIMARY KEY (stock_id, year)
     )
     """,
     """
@@ -252,6 +263,40 @@ def upsert_institutional(rows: Iterable[dict], db_path: str | Path | None = None
     return len(rows_list)
 
 
+def upsert_dividend(rows: Iterable[dict], db_path: str | Path | None = None) -> int:
+    """寫入 / 更新年度配息。
+
+    rows 每筆需有 stock_id, year;cash_dividend / stock_dividend / ex_dividend_date 可選。
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO dividend
+                (stock_id, year, cash_dividend, stock_dividend, ex_dividend_date)
+            VALUES
+                (:stock_id, :year, :cash_dividend, :stock_dividend, :ex_dividend_date)
+            ON CONFLICT(stock_id, year) DO UPDATE SET
+                cash_dividend=excluded.cash_dividend,
+                stock_dividend=excluded.stock_dividend,
+                ex_dividend_date=excluded.ex_dividend_date
+            """,
+            [
+                {
+                    "stock_id": r["stock_id"],
+                    "year": int(r["year"]),
+                    "cash_dividend": r.get("cash_dividend") or 0,
+                    "stock_dividend": r.get("stock_dividend") or 0,
+                    "ex_dividend_date": r.get("ex_dividend_date"),
+                }
+                for r in rows_list
+            ],
+        )
+    return len(rows_list)
+
+
 def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -> int:
     """寫入 / 更新財報(月營收 + 季 EPS/ROE)。"""
     rows_list = list(rows)
@@ -337,6 +382,7 @@ __all__ = [
     "upsert_daily_prices",
     "upsert_institutional",
     "upsert_financials",
+    "upsert_dividend",
     "get_synced_range",
     "update_synced_range",
     "SCHEMA",

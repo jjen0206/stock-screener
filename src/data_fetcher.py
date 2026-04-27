@@ -17,6 +17,10 @@
 - fetch_quarterly_financials(stock_id, s, e) 季財報(無 token 可能失效)
 
 注意: 任何呼叫 FinMind 的函式內,日期格式皆為 'YYYY-MM-DD' 字串。
+
+資料來源差異 / 已知限制請見 docs/DATA_NOTES.md
+(重點:不要把 yfinance 拿來抓台股,實測 yfinance 與 TWSE 官方收盤有差,
+ 例 2330 2024-03-29:TWSE/FinMind=779.0、yfinance=776)。
 """
 from __future__ import annotations
 

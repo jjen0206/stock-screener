@@ -31,6 +31,7 @@
 
 ### T1.5 卡點記錄
 - [!] T1.5-S 季財報實測:`fetch_quarterly_financials` 在無 token 模式是否能成功?需主公申請 FinMind token 後實打驗證,並對照 EPS/ROE 欄位名稱(目前先假設 type='EPS' / type='ROE')。**P3 待實測**。
+- [!] T1.5-D 配息抓取(`fetch_dividend`)尚未實作:T3.2 長線選股目前一律回空 + warning。需要新增函式 + 對應 dataset(FinMind `TaiwanStockDividend`,可能也需 token)。schema(`dividend` 表)已就位。**P3**。
 
 ---
 
@@ -67,15 +68,17 @@
 
 ## 第 3 階段:選股邏輯 (預估 2 天)
 
-- [ ] T3.1 寫 `src/screener_short.py`:短線選股
-  - [ ] 預設策略:量 > 5 日均量 1.5 倍 + KD 黃金交叉 + 法人連 3 日買超
-  - [ ] 函式簽名 `screen_short(date, params: dict) -> pd.DataFrame`
-  - [ ] 參數可調(均量倍數、KD 門檻、買超天數)
-- [ ] T3.2 寫 `src/screener_long.py`:長線選股
-  - [ ] 預設策略:近 3 年 ROE > 15% + PE < 產業平均 + 連 5 年配息 + 殖利率 > 4%
-  - [ ] 函式簽名 `screen_long(params: dict) -> pd.DataFrame`
-- [ ] T3.3 寫 `tests/test_screener.py`,用模擬資料驗證選股邏輯
+- [x] T3.1 寫 `src/screener_short.py`:短線選股 — 2026-04-27
+  - [x] 預設策略:量 > 5 日均量 1.5 倍 + KD 黃金交叉 + 法人連 3 日買超
+  - [x] 函式簽名 `screen_short(date, params: dict) -> pd.DataFrame`
+  - [x] 參數可調(`DEFAULT_SHORT_PARAMS` 集中,UI 可直接讀)
+- [x] T3.2 寫 `src/screener_long.py`:長線選股 — 2026-04-27
+  - [x] 預設策略:近 3 年 ROE > 15% + PE < 產業平均/pe_max + 連 5 年配息 + 殖利率 > 4%
+  - [x] 函式簽名 `screen_long(params: dict) -> pd.DataFrame`
+  - [x] 防呆:financials/dividend 缺資料時回空 DF + stderr warning,不拋例外
+- [x] T3.3 寫 `tests/test_screener.py`,用模擬資料驗證選股邏輯 — 2026-04-27,18 個新測試
 - **驗收**:跑短線選股,輸出 5–20 檔股票;跑長線選股,輸出 10–30 檔股票
+  - 程式驗收 ✅(78 passed);實機驗收待 stocks/financials/dividend 抓取就位後重做
 
 ---
 
@@ -128,3 +131,6 @@
 - 2026-04-27 T1.1~T1.4、T1.7、T1.8 完成;T1.5 月營收完成、季財報程式就位但未實測(標 [!]);T1.6 暫緩
 - 2026-04-27 真實打 FinMind 無 token API 取台積電 2024 Q1 日線成功(56 筆),快取第二次完全不打 API
 - 2026-04-27 T2.1 + T2.2 完成,六個指標自刻,60 passed(新增 27 個測試),最後一日數值待主公手動對拍券商 App
+- 2026-04-27 T2 對拍通過:K/D/MA 用 TWSE 官方資料 0 誤差,RSI 差 0.083 < 容差 0.5
+- 2026-04-27 觀察:yfinance 抓台股 OHLC 與 TWSE 有差(2330 2024-03-29 yf=776 vs TWSE=779),記錄於 docs/DATA_NOTES.md
+- 2026-04-27 T3.1~T3.3 完成,加 dividend 表 schema,長線選股目前缺資料時防呆回空,78 passed
