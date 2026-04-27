@@ -19,9 +19,10 @@ from src.backtester import backtest_short
 from src.data_fetcher import (
     FinMindAPIError,
     fetch_daily_price,
+    fetch_dividend,
     fetch_institutional,
-    fetch_long_term_data,
 )
+from src.financial_fetcher_free import update_long_term_data_free
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
@@ -293,52 +294,48 @@ def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
 def _page_long() -> None:
     st.header("💎 長線口袋名單")
 
-    st.warning(
-        "⚠️ 此功能需 **FinMind 升級會員 token** 才能用,需要季財報、ROE、配息資料。\n\n"
-        "目前版本走無 token 模式,長線選股會回空清單。"
+    st.info(
+        "📊 用台灣證交所(TWSE)官方免費資料 + FinMind 免費配息歷史,"
+        "**不需任何付費 token**。\n\n"
+        "按 sidebar **「📊 更新財報資料(免費版)」** 抓資料(約 1–2 分鐘),"
+        "再點下方「執行選股」。"
     )
 
-    st.markdown("### 預設策略")
+    st.markdown("### 預設策略(四條件 AND)")
     st.markdown(
         """
-- **高 ROE**:近 3 年平均季 ROE > 15%
+- **高 ROE**:近 3 年平均季 ROE > 15%(用 PB 反推:ROE ≈ PB / PE × 100)
 - **低 PE**:當日本益比 < 20,或 < 該股票所屬產業平均 PE
 - **連續配息**:近 5 年每年都有現金股利
-- **殖利率**:近 1 年現金殖利率 > 4%
+- **殖利率**:近 1 年殖利率 > 4%(TWSE 官方欄位)
         """
     )
 
     st.markdown("---")
-    cols = st.columns(2)
-    cols[0].link_button(
-        "📝 申請 FinMind Token",
-        "https://finmindtrade.com/",
-        use_container_width=True,
-    )
-    test_btn = cols[1].button(
-        "🧪 我已升級 token,立即試用",
+    test_btn = st.button(
+        "🚀 執行長線選股",
         type="primary",
         use_container_width=True,
     )
 
     if test_btn:
-        if not _has_long_data():
-            st.warning(
-                "📊 還沒抓任何財報 / 配息資料。\n\n"
-                "請點 **sidebar → 「📊 更新財報資料」**,等抓完(約 2–3 分鐘)後再回此頁試用。"
-            )
-        else:
-            with st.spinner("執行長線選股..."):
-                result = screen_long()
-            if result.empty:
+        with st.spinner("執行長線選股 (資料缺會自動從 TWSE 補)..."):
+            result = screen_long()
+        if result.empty:
+            if not _has_long_data():
+                st.warning(
+                    "📊 仍缺資料。請點 **sidebar →「📊 更新財報資料(免費版)」** "
+                    "把財報 + 配息抓進 SQLite 後再試。"
+                )
+            else:
                 st.info(
                     "📭 資料齊全但無入選 → 可能真的沒有符合條件的個股,或可放寬參數。"
                 )
-            else:
-                st.success(f"✅ 共 {len(result)} 檔符合長線條件")
-                st.dataframe(
-                    result, use_container_width=True, hide_index=True
-                )
+        else:
+            st.success(f"✅ 共 {len(result)} 檔符合長線條件")
+            st.dataframe(
+                result, use_container_width=True, hide_index=True
+            )
 
 
 def _has_long_data() -> bool:
@@ -920,10 +917,11 @@ def _render_sidebar_update() -> None:
     if st.sidebar.button("更新 50 檔大型股", use_container_width=True):
         _run_update_top_50()
     st.sidebar.caption("📅 每檔抓過去 1 年(供回測用),首次約 4–6 分鐘。")
-    if st.sidebar.button("📊 更新財報資料", use_container_width=True):
-        _run_update_long_term()
+    if st.sidebar.button("📊 更新財報資料(免費版)", use_container_width=True):
+        _run_update_long_term_free()
     st.sidebar.caption(
-        "📊 財報需要 FinMind token,無 token 模式可能拿不到。"
+        "📊 用 TWSE OpenAPI + FinMind 免費版,**不需 token**;"
+        "PE/PB/殖利率/EPS 來自證交所,ROE 用 PB 反推(Du Pont 簡化)。"
     )
 
     # 只在 token 有設定時顯示測試按鈕
@@ -987,33 +985,51 @@ def _run_update_top_50() -> None:
     st.toast(f"已更新 {success} / {n} 檔(過去 1 年)", icon="✅")
 
 
-def _run_update_long_term() -> None:
-    """對 TW_TOP_50 跑季財報 + 配息抓取。"""
+def _run_update_long_term_free() -> None:
+    """對 TW_TOP_50 跑免費版長線資料(TWSE OpenAPI + FinMind dividend)。"""
     sids = [sid for sid, _ in TW_TOP_50]
-    # 確保 stocks 表有這 50 檔(產業欄位為空也沒關係,有就更新)
     db.upsert_stocks(
         [{"stock_id": sid, "name": name, "market": "TW"} for sid, name in TW_TOP_50]
     )
 
-    progress = st.progress(0.0, text="準備...")
+    progress = st.progress(0.0, text="抓 TWSE 全市場 PE / EPS...")
     n = len(sids)
 
     def on_progress(idx: int, total: int, sid: str, err: Exception | None) -> None:
         suffix = " (失敗)" if err else ""
-        progress.progress(idx / total, text=f"更新財報 {idx}/{total}: {sid}{suffix}")
+        progress.progress(
+            idx / total, text=f"[{idx}/{total}] {sid}{suffix}"
+        )
 
-    result = fetch_long_term_data(sids, on_progress=on_progress)
+    # Step 1: TWSE OpenAPI(PE/PB/殖利率/EPS + PB 反推 ROE)
+    result = update_long_term_data_free(sids, on_progress=on_progress)
+    n_metrics = len(result["success_metrics"])
+    n_eps = len(result["success_eps"])
+
+    # Step 2: FinMind dividend(無 token 也能用)
+    progress.progress(0.0, text="抓 FinMind 歷年配息...")
+    div_ok = 0
+    for i, sid in enumerate(sids):
+        progress.progress(
+            (i + 1) / n, text=f"[{i + 1}/{n}] {sid} 配息..."
+        )
+        try:
+            df = fetch_dividend(sid)
+            if not df.empty:
+                div_ok += 1
+        except Exception:  # noqa: BLE001
+            continue
     progress.empty()
 
-    n_fin = len(result["success_financials"])
-    n_div = len(result["success_dividend"])
-    n_fail = len(result["failed"])
-    msg = f"季財報 {n_fin} 檔、配息 {n_div} 檔已更新;{n_fail} 檔無資料"
+    msg = (
+        f"免費版完成:daily_metrics {n_metrics}/{n}、"
+        f"EPS {n_eps}/{n}、配息 {div_ok}/{n}"
+    )
     st.toast(msg, icon="📊")
-    if n_fin == 0 and n_div == 0:
+    if n_metrics == 0:
         st.warning(
-            "⚠️ 全部 50 檔都沒拿到資料 — FinMind token 可能未設定,"
-            "或免費版不支援這兩個 dataset。"
+            "⚠️ TWSE OpenAPI 全失敗 — 可能 SSL / 網路問題,"
+            "雲端 Streamlit Cloud 環境通常正常。"
         )
 
 

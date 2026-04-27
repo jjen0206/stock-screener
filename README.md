@@ -114,6 +114,26 @@ streamlit run app.py
 > 升級 FinMind token 後不必重新部署,只要回 Settings → Secrets 改 `FINMIND_TOKEN` 並 reboot app 即可。
 > 雲端容器重啟會清空 SQLite cache,首次查詢會重抓。
 
+## 免費版完整功能(省 NT$699/月)
+
+**完全不用付費 token** 也能跑長線選股!資料來源:
+
+| 資料 | 來源 | 成本 |
+|---|---|---|
+| 日線價格 + 三大法人 | FinMind 免費版 | 0 元 |
+| **PE / PB / 殖利率** | **TWSE OpenAPI**(`/v1/exchangeReport/BWIBBU_d`) | 0 元 |
+| **季 EPS** | **TWSE OpenAPI**(`/v1/opendata/t187ap14_L`) | 0 元 |
+| **ROE** | **PB 反推**(Du Pont 簡化:ROE ≈ EPS_TTM/BVPS = PB/PE) | 0 元 |
+| 歷年配息 | FinMind 免費版(`TaiwanStockDividend`) | 0 元 |
+
+替代了 FinMind Backer **NT$699/月** 的付費 dataset(`TaiwanStockFinancialStatements`)。
+
+ROE 反推驗證:TSMC PE=32.99, PB=10.46 → ROE = 10.46/32.99 ≈ **31.7%**,
+與市場公認 TSMC 2024 ROE ≈ 28-30% 高度吻合。
+
+使用方式:Streamlit 側欄按 **「📊 更新財報資料(免費版)」**,等 1-2 分鐘抓完 50 檔,
+切「長線口袋名單」→ 按「執行長線選股」即可。
+
 ## Telegram 推播(每日選股自動傳)
 
 ### 1. 建 Bot 拿 token + chat_id

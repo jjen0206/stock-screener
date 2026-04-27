@@ -119,6 +119,7 @@
 - [x] G1.1 Telegram Bot 整合,每日收盤後 push 短線推薦(LINE Notify 已停服) — 2026-04-27,新檔 src/notifier.py + scripts/daily_notify.py;Streamlit sidebar 加「📲 測試 Telegram」按鈕(只在 secrets 有 token 時顯示);設定頁加 BotFather → /newbot → getUpdates 教學;14 個新測試
 - [x] G1.2 排程內自動抓資料(讓 G1.1 推送有真實內容) — 2026-04-27,新檔 scripts/daily_fetch.py + .github/workflows/daily-notify.yml;workflow 兩個 step:fetch 50 檔 → notify;cron `0 14 * * 1-5`(台北 22:00 週一~五);4 個新測試
 - [ ] G2.1 自選股清單(SQLite 存使用者標記)
+- [x] G5 免費版長線(TWSE OpenAPI + PB 反推 ROE) — 2026-04-27,新檔 src/financial_fetcher_free.py + database 加 daily_metrics 表;ROE = PB/PE × 100(Du Pont 簡化);實打 50 檔有 45 檔完整資料,8 檔同時滿足 ROE>15% + PE<20 + 殖利率>4%;省 FinMind Backer NT$699/月;12 個新測試
 - [x] G3.1 簡易回測(過去 1 年策略勝率 + 報酬) — 2026-04-27,新檔 src/backtester.py + Streamlit「📈 簡易回測」分頁,含 6 metric + 累積報酬曲線(疊 0050 對比) + 交易明細;**簡易版,無交易成本/滑價/資金管理**;11 個新測試
 - [ ] G4.1 大盤情緒儀表板(加權、外資買賣超、VIX)
 

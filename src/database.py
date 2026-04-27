@@ -7,12 +7,13 @@ SQLite 快取資料庫模組。
 - 用 PRIMARY KEY 防重複,寫入一律 upsert(INSERT ... ON CONFLICT DO UPDATE)。
 
 資料表:
-- stocks       股票主表(代號 / 名稱 / 市場 / 產業)
-- daily_prices 日線價格(OHLCV + 成交金額 / 筆數 / 漲跌)
-- institutional 三大法人買賣超(已 pivot 成單筆/股/日)
-- financials   財報(月營收 + 季 EPS / ROE,以 period_type 區分)
-- dividend     年度配息(現金股利 + 股票股利 + 除息日,長線選股用)
-- sync_log     各股票各 dataset 的已同步日期區間,用於快取判斷
+- stocks         股票主表(代號 / 名稱 / 市場 / 產業)
+- daily_prices   日線價格(OHLCV + 成交金額 / 筆數 / 漲跌)
+- institutional  三大法人買賣超(已 pivot 成單筆/股/日)
+- financials     財報(月營收 + 季 EPS / ROE,以 period_type 區分)
+- dividend       年度配息(現金股利 + 股票股利 + 除息日,長線選股用)
+- daily_metrics  當日 PE / PB / 殖利率(TWSE OpenAPI 免費版)
+- sync_log       各股票各 dataset 的已同步日期區間,用於快取判斷
 
 DB 路徑來源:
 - 預設讀 src.config.DATABASE_PATH(由 .env 載入)
@@ -118,6 +119,17 @@ SCHEMA: list[str] = [
         stock_dividend   REAL DEFAULT 0,
         ex_dividend_date TEXT,
         PRIMARY KEY (stock_id, year)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_metrics (
+        stock_id       TEXT NOT NULL,
+        date           TEXT NOT NULL,
+        close          REAL,
+        pe             REAL,
+        pb             REAL,
+        dividend_yield REAL,
+        PRIMARY KEY (stock_id, date)
     )
     """,
     """
@@ -263,6 +275,42 @@ def upsert_institutional(rows: Iterable[dict], db_path: str | Path | None = None
     return len(rows_list)
 
 
+def upsert_daily_metrics(
+    rows: Iterable[dict],
+    db_path: str | Path | None = None,
+) -> int:
+    """寫入 / 更新當日 PE / PB / 殖利率(來源 TWSE OpenAPI BWIBBU_d)。"""
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO daily_metrics
+                (stock_id, date, close, pe, pb, dividend_yield)
+            VALUES
+                (:stock_id, :date, :close, :pe, :pb, :dividend_yield)
+            ON CONFLICT(stock_id, date) DO UPDATE SET
+                close=excluded.close,
+                pe=excluded.pe,
+                pb=excluded.pb,
+                dividend_yield=excluded.dividend_yield
+            """,
+            [
+                {
+                    "stock_id": r["stock_id"],
+                    "date": r["date"],
+                    "close": r.get("close"),
+                    "pe": r.get("pe"),
+                    "pb": r.get("pb"),
+                    "dividend_yield": r.get("dividend_yield"),
+                }
+                for r in rows_list
+            ],
+        )
+    return len(rows_list)
+
+
 def upsert_dividend(rows: Iterable[dict], db_path: str | Path | None = None) -> int:
     """寫入 / 更新年度配息。
 
@@ -383,6 +431,7 @@ __all__ = [
     "upsert_institutional",
     "upsert_financials",
     "upsert_dividend",
+    "upsert_daily_metrics",
     "get_synced_range",
     "update_synced_range",
     "SCHEMA",

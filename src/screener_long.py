@@ -52,15 +52,20 @@ OUTPUT_COLUMNS = [
 
 _NO_DATA_MSG = (
     "[SCREEN_LONG] 缺財報/配息資料,回空結果。"
-    "請升級 FinMind token 後重試。"
+    "請按 sidebar『📊 更新財報資料(免費版)』後重試。"
 )
 
 
-def screen_long(params: dict | None = None) -> pd.DataFrame:
+def screen_long(
+    params: dict | None = None,
+    auto_fetch: bool = True,
+) -> pd.DataFrame:
     """長線選股。
 
     參數:
         params: 覆蓋 DEFAULT_LONG_PARAMS 的參數;None 用全部預設
+        auto_fetch: True(預設)→ financials 缺時自動跑免費版抓取一次;
+                    False = 只查既有 cache(測試 / 排程用)
 
     回傳:
         DataFrame[stock_id, name, industry, close, avg_roe, pe,
@@ -70,8 +75,19 @@ def screen_long(params: dict | None = None) -> pd.DataFrame:
     p = {**DEFAULT_LONG_PARAMS, **(params or {})}
     db.init_db()
 
-    # 防呆檢查:必要資料是否就位
     fin_count, div_count = _data_availability()
+
+    # 自動 fallback:financials 缺 → 跑免費版 (TWSE OpenAPI) 補
+    if auto_fetch and fin_count == 0:
+        try:
+            from src.financial_fetcher_free import update_long_term_data_free
+            from src.universe import TW_TOP_50
+            logger.info("[SCREEN_LONG] financials 為空,自動跑免費版抓取一次...")
+            update_long_term_data_free([s for s, _ in TW_TOP_50])
+            fin_count, div_count = _data_availability()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[SCREEN_LONG] 自動補資料失敗: %s", e)
+
     if fin_count == 0 or div_count == 0:
         msg = (
             f"{_NO_DATA_MSG} "
@@ -150,7 +166,11 @@ def _data_availability() -> tuple[int, int]:
 
 
 def _evaluate_long(stock_id: str, p: dict) -> dict | None:
-    """算單檔長線指標。資料任一缺失則回 None。"""
+    """算單檔長線指標。資料任一缺失則回 None。
+
+    PE / 殖利率優先用 daily_metrics(TWSE 官方);無則 fallback 到自算。
+    ROE 用 financials 表(免費版 PB 反推已寫進去,跟付費版同一欄)。
+    """
     with db.get_conn() as conn:
         roe_rows = conn.execute(
             """SELECT period, roe FROM financials
@@ -169,23 +189,45 @@ def _evaluate_long(stock_id: str, p: dict) -> dict | None:
                WHERE stock_id=? ORDER BY year DESC""",
             (stock_id,),
         ).fetchall()
+        # 優先用 TWSE 官方的 PE / 殖利率(免費版有寫進來)
+        try:
+            metrics_row = conn.execute(
+                """SELECT close, pe, dividend_yield FROM daily_metrics
+                   WHERE stock_id=? ORDER BY date DESC LIMIT 1""",
+                (stock_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            metrics_row = None
         price_row = conn.execute(
             """SELECT close FROM daily_prices
                WHERE stock_id=? ORDER BY date DESC LIMIT 1""",
             (stock_id,),
         ).fetchone()
 
-    if not roe_rows or not eps_rows or not div_rows or not price_row:
+    if not roe_rows or not div_rows:
         return None
 
     avg_roe = sum(r["roe"] for r in roe_rows) / len(roe_rows)
-    ttm_eps = sum(r["eps"] for r in eps_rows)
-    if ttm_eps <= 0:
+
+    # 取 close + PE:優先 daily_metrics 的官方數值
+    close: float | None = None
+    pe: float | None = None
+    if metrics_row and metrics_row["pe"] and metrics_row["pe"] > 0:
+        close = float(metrics_row["close"]) if metrics_row["close"] else None
+        pe = float(metrics_row["pe"])
+    if close is None or close <= 0:
+        if price_row:
+            close = float(price_row["close"])
+    if close is None or close <= 0:
         return None
-    close = float(price_row["close"])
-    if close <= 0:
-        return None
-    pe = close / ttm_eps
+    if pe is None or pe <= 0:
+        # fallback:用 EPS 自算
+        if not eps_rows:
+            return None
+        ttm_eps = sum(r["eps"] for r in eps_rows)
+        if ttm_eps <= 0:
+            return None
+        pe = close / ttm_eps
 
     # 連續配息(從最近年往回算未中斷的年數)
     div_by_year = {int(r["year"]): float(r["cash_dividend"] or 0) for r in div_rows}
@@ -196,10 +238,17 @@ def _evaluate_long(stock_id: str, p: dict) -> dict | None:
         else:
             break
 
-    # 近 1 年現金殖利率(用最新一年 cash_dividend)
-    latest_year = max(div_by_year.keys())
-    last_year_div = div_by_year[latest_year]
-    yield_pct = last_year_div / close * 100.0
+    # 近 1 年殖利率:優先 TWSE 官方;fallback 用 cash_dividend / close 自算
+    if (
+        metrics_row
+        and metrics_row["dividend_yield"] is not None
+        and metrics_row["dividend_yield"] > 0
+    ):
+        yield_pct = float(metrics_row["dividend_yield"])
+    else:
+        latest_year = max(div_by_year.keys())
+        last_year_div = div_by_year[latest_year]
+        yield_pct = last_year_div / close * 100.0
 
     return {
         "close": close,

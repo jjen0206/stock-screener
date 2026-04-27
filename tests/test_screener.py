@@ -291,19 +291,21 @@ def test_long_low_yield_excluded(tmp_db):
 
 
 def test_long_empty_financials_returns_empty_with_warning(tmp_db, capsys):
-    """financials 空表 → 回空 DataFrame + stderr warning。"""
-    # 只灌 dividend 不灌 financials
+    """financials 空表 → 回空 DataFrame + stderr warning。
+
+    用 auto_fetch=False 避免測試打真網路(免費版自動補機制)。
+    """
     _add_stock("2330", "台積電")
     _add_dividend("2330", [
         {"year": y, "cash_dividend": 10.0, "stock_dividend": 0.0,
          "ex_dividend_date": None}
         for y in (2025, 2024, 2023, 2022, 2021)
     ])
-    result = screen_long()
+    result = screen_long(auto_fetch=False)
     assert result.empty
     captured = capsys.readouterr()
     assert "缺財報" in captured.err
-    assert "升級 FinMind token" in captured.err
+    assert "更新財報資料" in captured.err
 
 
 def test_long_empty_dividend_returns_empty_with_warning(tmp_db, capsys):
