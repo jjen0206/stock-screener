@@ -34,6 +34,83 @@ _CACHE_TABLES = [
 ]
 
 
+# === 全域 CSS:介面字體放大 1.25x(老花友善) ===
+
+_GLOBAL_CSS = """
+<style>
+/* 全域字體放大 — 給老花使用者 */
+html, body, [class*="css"] {
+    font-size: 18px !important;
+}
+
+/* 主標題 */
+h1 { font-size: 2.5rem !important; }
+h2 { font-size: 2.0rem !important; }
+h3 { font-size: 1.6rem !important; }
+
+/* sidebar 文字放大 */
+section[data-testid="stSidebar"] {
+    font-size: 17px;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    font-size: 1.4rem !important;
+}
+
+/* radio / checkbox 標籤 */
+[data-baseweb="radio"] label,
+[data-baseweb="checkbox"] label {
+    font-size: 17px !important;
+}
+
+/* 按鈕文字放大 */
+button[kind="primary"], button[kind="secondary"], .stButton button {
+    font-size: 17px !important;
+    padding: 0.55rem 1.1rem !important;
+}
+
+/* input / selectbox / date input */
+.stTextInput input, .stDateInput input, .stSelectbox div[role="combobox"], .stNumberInput input {
+    font-size: 17px !important;
+}
+
+/* metric (st.metric) 數值放大 */
+[data-testid="stMetricValue"] {
+    font-size: 2.0rem !important;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 1.0rem !important;
+}
+
+/* DataFrame 字體 */
+[data-testid="stDataFrame"] {
+    font-size: 16px;
+}
+
+/* tab 標題 */
+[data-baseweb="tab"] {
+    font-size: 17px !important;
+}
+
+/* alert / info / warning 訊息 */
+[data-testid="stAlert"] {
+    font-size: 17px;
+}
+
+/* footer 風險警語維持小字(不放大) */
+.footer-warning {
+    font-size: 13px !important;
+    color: #888;
+}
+</style>
+"""
+
+
+def _inject_global_css() -> None:
+    st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
+
+
 # === 主程式 ===
 
 def main() -> None:
@@ -42,6 +119,7 @@ def main() -> None:
         page_icon="📈",
         layout="wide",
     )
+    _inject_global_css()
 
     st.sidebar.title("📈 個人選股工具")
     st.sidebar.caption("台股 · 短線 + 長線")
@@ -445,12 +523,15 @@ def _make_candlestick(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
         xaxis_rangeslider_visible=False,
         showlegend=True,
         margin=dict(t=20, b=20, l=20, r=20),
-        legend=dict(orientation="h", y=1.02, x=0),
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=14)),
+        font=dict(size=14),
     )
-    fig.update_xaxes(type="category", row=1, col=1)
-    fig.update_xaxes(type="category", row=2, col=1)
-    fig.update_yaxes(title_text="股價", row=1, col=1)
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
+    fig.update_xaxes(type="category", tickfont=dict(size=12), row=1, col=1)
+    fig.update_xaxes(type="category", tickfont=dict(size=12), row=2, col=1)
+    fig.update_yaxes(title_text="股價", tickfont=dict(size=12),
+                     title_font=dict(size=14), row=1, col=1)
+    fig.update_yaxes(title_text="成交量", tickfont=dict(size=12),
+                     title_font=dict(size=14), row=2, col=1)
     return fig
 
 
@@ -466,7 +547,10 @@ def _make_kd_chart(df: pd.DataFrame, kd_df: pd.DataFrame) -> go.Figure:
     fig.add_hline(y=20, line_dash="dot", line_color="gray", opacity=0.5)
     fig.update_layout(
         height=320, margin=dict(t=20, b=20, l=20, r=20),
-        yaxis=dict(range=[0, 100]),
+        yaxis=dict(range=[0, 100], tickfont=dict(size=12)),
+        xaxis=dict(tickfont=dict(size=12)),
+        font=dict(size=14),
+        legend=dict(font=dict(size=14)),
     )
     fig.update_xaxes(type="category")
     return fig
@@ -488,7 +572,13 @@ def _make_macd_chart(df: pd.DataFrame, macd_df: pd.DataFrame) -> go.Figure:
         marker_color=hist_colors, opacity=0.6,
     ))
     fig.add_hline(y=0, line_color="gray", opacity=0.5)
-    fig.update_layout(height=320, margin=dict(t=20, b=20, l=20, r=20))
+    fig.update_layout(
+        height=320, margin=dict(t=20, b=20, l=20, r=20),
+        xaxis=dict(tickfont=dict(size=12)),
+        yaxis=dict(tickfont=dict(size=12)),
+        font=dict(size=14),
+        legend=dict(font=dict(size=14)),
+    )
     fig.update_xaxes(type="category")
     return fig
 
@@ -505,7 +595,10 @@ def _make_rsi_chart(df: pd.DataFrame, rsi14: pd.Series) -> go.Figure:
     fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.4)
     fig.update_layout(
         height=320, margin=dict(t=20, b=20, l=20, r=20),
-        yaxis=dict(range=[0, 100]),
+        yaxis=dict(range=[0, 100], tickfont=dict(size=12)),
+        xaxis=dict(tickfont=dict(size=12)),
+        font=dict(size=14),
+        legend=dict(font=dict(size=14)),
     )
     fig.update_xaxes(type="category")
     return fig
@@ -632,8 +725,10 @@ def _run_update_long_term() -> None:
 
 def _render_footer() -> None:
     st.markdown("---")
-    st.caption(
-        "⚠️ 本工具僅供個人研究使用,不構成任何投資建議。投資請自行評估風險。"
+    st.markdown(
+        '<p class="footer-warning">⚠️ 本工具僅供個人研究使用,不構成任何投資建議。'
+        "投資請自行評估風險。</p>",
+        unsafe_allow_html=True,
     )
 
 
