@@ -3,9 +3,11 @@ name: Daily Telegram Push
 # 排程 + 手動觸發
 on:
   schedule:
-    # 14:00 UTC = 22:00 Asia/Taipei (台股 13:30 收盤後 8.5 小時)
+    # 13:13 UTC = 21:13 Asia/Taipei (台股 13:30 收盤後 7 小時 43 分)
     # 週一到週五跑(週末台股不開)
-    - cron: "0 14 * * 1-5"
+    # 故意選 :13 不是 :00 — GitHub Actions 整點是全球高峰,
+    # 排程容易延遲 5–30+ 分鐘甚至漏跑;偏移到非整點延遲機率小很多。
+    - cron: "13 13 * * 1-5"
   workflow_dispatch:
     inputs:
       date:
