@@ -36,15 +36,32 @@
 
 ## 第 2 階段:技術指標 (預估 1–2 天)
 
-- [ ] T2.1 寫 `src/indicators.py`,實作以下函式(輸入 DataFrame,輸出 Series 或 DataFrame):
-  - [ ] `sma(df, period)` — 簡單移動平均
-  - [ ] `ema(df, period)` — 指數移動平均
-  - [ ] `kd(df, n=9)` — KD 隨機指標
-  - [ ] `macd(df, fast=12, slow=26, signal=9)` — MACD
-  - [ ] `rsi(df, period=14)` — RSI
-  - [ ] `bollinger(df, period=20, num_std=2)` — 布林通道
-- [ ] T2.2 寫 `tests/test_indicators.py`:用已知資料驗證指標數值正確
-- **驗收**:對台積電 2330 計算 KD,結果與券商 App 顯示誤差 < 0.5
+- [x] T2.1 寫 `src/indicators.py`,實作以下函式(輸入 DataFrame,輸出 Series 或 DataFrame): — 2026-04-27,自刻不依賴 ta library
+  - [x] `sma(df, period)` — 簡單移動平均
+  - [x] `ema(df, period)` — 指數移動平均(adjust=False,從第 1 日有值)
+  - [x] `kd(df, n=9)` — KD 隨機指標(台股 9-3-3,起始值 50)
+  - [x] `macd(df, fast=12, slow=26, signal=9)` — MACD(HIST 採台股慣例 ×2)
+  - [x] `rsi(df, period=14)` — RSI(Wilder 平滑,首期用 SMA)
+  - [x] `bollinger(df, period=20, num_std=2)` — 布林通道(σ 採 ddof=0,對齊 TA-Lib)
+- [x] T2.2 寫 `tests/test_indicators.py`:用已知資料驗證指標數值正確 — 2026-04-27,27 個測試,共 60 passed
+- **驗收**:對台積電 2330 計算 KD,結果與券商 App 顯示誤差 < 0.5 — ✅ 程式驗收通過(資料 2024-Q1 56 筆),**待主公手動對拍券商 App**
+
+### T2 對拍數值(2330,2024-03-29 收盤 779.0,共 56 筆 cache)
+| 指標 | 數值 |
+|------|------|
+| K(9) | 63.363 |
+| D(9) | 65.102 |
+| RSI14 | 63.698 |
+| DIF | 24.009 |
+| DEA | 27.861 |
+| HIST | -7.703 |
+| MA5 | 777.800 |
+| MA20 | 766.400 |
+| BB 上 | 802.568 |
+| BB 中 | 766.400 |
+| BB 下 | 730.232 |
+
+⚠️ MACD 因 EMA 是漸近收斂,僅 56 筆樣本下與券商 App(通常用上百筆以上)可能誤差 > 0.5;KD/RSI/SMA/BB 在 56 筆下已穩定。
 
 ---
 
@@ -110,3 +127,4 @@
 - 2026-04-27 環境:Python 3.14 + venv,tqdm 已加進 requirements(finmind 1.9.x 漏依賴)
 - 2026-04-27 T1.1~T1.4、T1.7、T1.8 完成;T1.5 月營收完成、季財報程式就位但未實測(標 [!]);T1.6 暫緩
 - 2026-04-27 真實打 FinMind 無 token API 取台積電 2024 Q1 日線成功(56 筆),快取第二次完全不打 API
+- 2026-04-27 T2.1 + T2.2 完成,六個指標自刻,60 passed(新增 27 個測試),最後一日數值待主公手動對拍券商 App
