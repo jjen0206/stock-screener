@@ -24,7 +24,7 @@
 - [ ] T1.3 在 data_fetcher 加入快取邏輯:先查 DB,沒有才打 API
 - [ ] T1.4 加入三大法人買賣超抓取
 - [ ] T1.5 加入財報資料(月營收、季 EPS、ROE)抓取
-- [ ] T1.6 加入 yfinance 美股資料抓取(基本款)
+- [ ] T1.6 加入 yfinance 美股資料抓取(基本款) — **P2 / 暫緩**(首版只做台股,跑通整條鏈路後再啟用)
 - [ ] T1.7 寫 `tests/test_database.py` 測試基本 CRUD
 - [ ] T1.8 寫 `tests/test_data_fetcher.py` 測試快取行為(用 mock)
 - **驗收**:能用 Python REPL 取得 2330 (台積電) 過去 60 日資料,第二次呼叫不再打 API
@@ -84,7 +84,7 @@
 
 ## 第 6 階段:選做功能
 
-- [ ] G1.1 LINE Notify 整合,每日收盤後 push 短線推薦
+- [ ] G1.1 Telegram Bot 整合,每日收盤後 push 短線推薦(LINE Notify 已停服)
 - [ ] G2.1 自選股清單(SQLite 存使用者標記)
 - [ ] G3.1 簡易回測(過去 1 年策略勝率 + 報酬)
 - [ ] G4.1 大盤情緒儀表板(加權、外資買賣超、VIX)
@@ -94,8 +94,8 @@
 ## 已知問題 / 待澄清
 
 - [ ] Q1:使用者是否已有 FinMind 帳號?需先註冊取得 token。
-- [ ] Q2:LINE Notify 在 2025 年 4 月已停止服務,改用 Telegram Bot 或 Discord Webhook。
-- [ ] Q3:首版專注台股還是同時做美股?(建議先台股,跑通再加美股)
+- [x] Q2:已決定 — 改用 **Telegram Bot**(LINE Notify 在 2025/04 停服)。
+- [x] Q3:已決定 — **首版只做台股**,跑通整條鏈路後再加美股(T1.6 已標 P2)。
 
 ---
 

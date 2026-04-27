@@ -19,7 +19,7 @@
 - **資料來源**:FinMind(台股主力)+ yfinance(美股)
 - **資料庫**:SQLite(本機快取)
 - **圖表**:plotly(K 線圖)+ Streamlit 原生元件
-- **通知**:LINE Notify(可選)
+- **通知**:Telegram Bot(可選；LINE Notify 已於 2025/04 停服)
 - **依賴管理**:uv(優先)或 pip + requirements.txt
 
 ## 行為準則
@@ -75,7 +75,7 @@
 │   ├── indicators.py     # KD / MACD / RSI 等指標
 │   ├── screener_short.py # 短線選股邏輯
 │   ├── screener_long.py  # 長線選股邏輯
-│   └── notifier.py       # LINE Notify(可選)
+│   └── notifier.py       # Telegram Bot(可選)
 ├── tests/
 │   └── test_*.py
 ├── data/

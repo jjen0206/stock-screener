@@ -29,8 +29,8 @@
 
 ### 3.2 替代流程(懶得開介面時)
 
-- 排程每天收盤後自動跑,結果 push 到 LINE
-- 直接在 LINE 訊息中看到「今日符合 XXX 策略的 5 檔股票」
+- 排程每天收盤後自動跑,結果 push 到 Telegram
+- 直接在 Telegram 訊息中看到「今日符合 XXX 策略的 5 檔股票」
 
 ## 4. 功能規格
 
@@ -68,8 +68,9 @@
 
 ### 4.2 選做 (Nice-to-have)
 
-#### G1. LINE Notify 通知
-- 每日收盤後排程跑,結果 push 到 LINE 群組
+#### G1. Telegram Bot 通知
+- 每日收盤後排程跑,結果 push 到 Telegram 群組或私訊
+- (LINE Notify 已於 2025/04 停服,改用 Telegram Bot)
 
 #### G2. 自選股清單
 - 使用者標記關注股票,首頁顯示其當日表現
