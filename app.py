@@ -23,6 +23,12 @@ from src.data_fetcher import (
     fetch_institutional,
 )
 from src.financial_fetcher_free import update_long_term_data_free
+from src.market_sentiment import (
+    fetch_institutional_total,
+    fetch_margin_balance,
+    fetch_taiex,
+    fetch_vix,
+)
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
@@ -30,7 +36,7 @@ from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
 PAGES = [
     "短線推薦", "長線口袋名單", "📈 簡易回測",
-    "個股查詢", "⭐ 我的關注", "設定",
+    "個股查詢", "⭐ 我的關注", "📊 大盤情緒", "設定",
 ]
 
 _CACHE_TABLES = [
@@ -140,6 +146,8 @@ def main() -> None:
         _page_stock_query()
     elif page == "⭐ 我的關注":
         _page_watchlist()
+    elif page == "📊 大盤情緒":
+        _page_market_sentiment()
     elif page == "設定":
         _page_settings()
 
@@ -942,6 +950,161 @@ def _page_watchlist() -> None:
         if db.remove_from_watchlist(edit_sid):
             st.toast(f"已移除 {edit_sid}", icon="🗑️")
             st.rerun()
+
+
+# === 📊 大盤情緒頁 ===
+
+def _page_market_sentiment() -> None:
+    st.header("📊 大盤情緒")
+    st.caption("資料 60 秒 cache;失敗區塊不影響其他指標。")
+
+    c1, c2 = st.columns(2)
+
+    # 加權指數
+    with c1:
+        st.markdown("### 加權指數 (TAIEX)")
+        df = fetch_taiex(days=90)
+        if df.empty:
+            st.warning("加權指數抓取失敗(可能 FinMind 限流)")
+        else:
+            last_close = float(df["close"].iloc[-1])
+            prev_close = (
+                float(df["close"].iloc[-2]) if len(df) >= 2 else last_close
+            )
+            delta = last_close - prev_close
+            delta_pct = delta / prev_close * 100 if prev_close else 0
+            st.metric(
+                f"當日收盤 {df['date'].iloc[-1]}",
+                f"{last_close:,.2f}",
+                f"{delta:+.2f} ({delta_pct:+.2f}%)",
+            )
+            fig = go.Figure(go.Scatter(
+                x=df["date"], y=df["close"],
+                mode="lines", line=dict(color="#1f77b4", width=2),
+            ))
+            fig.update_layout(
+                height=250, margin=dict(t=10, b=10, l=10, r=10),
+                font=dict(size=14),
+                xaxis=dict(tickfont=dict(size=12)),
+                yaxis=dict(tickfont=dict(size=12)),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            # 短評
+            short = "短期偏多" if delta > 0 else "短期偏空"
+            st.caption(f"💬 當日 {short}")
+
+    # VIX
+    with c2:
+        st.markdown("### VIX 恐慌指數 (美股)")
+        df = fetch_vix(days=90)
+        if df.empty:
+            st.warning("VIX 抓取失敗")
+        else:
+            last = float(df["Close"].iloc[-1])
+            st.metric("當前 VIX", f"{last:.2f}",
+                      help="高於 25 = 市場恐慌;低於 15 = 樂觀")
+            fig = go.Figure(go.Scatter(
+                x=df["Date"], y=df["Close"],
+                mode="lines", line=dict(color="#9467bd", width=2),
+            ))
+            fig.add_hline(y=25, line_dash="dash", line_color="#d62728",
+                          annotation_text="恐慌 25")
+            fig.add_hline(y=15, line_dash="dash", line_color="#2ca02c",
+                          annotation_text="樂觀 15")
+            fig.update_layout(
+                height=250, margin=dict(t=10, b=10, l=10, r=10),
+                font=dict(size=14),
+                xaxis=dict(tickfont=dict(size=12)),
+                yaxis=dict(tickfont=dict(size=12)),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            zone = (
+                "市場恐慌" if last > 25
+                else "市場樂觀" if last < 15
+                else "中性"
+            )
+            st.caption(f"💬 {zone}")
+
+    # 三大法人
+    st.markdown("### 三大法人合計買賣超(全市場,近 30 日)")
+    df = fetch_institutional_total(days=30)
+    if df.empty:
+        st.warning("法人總額抓取失敗(FinMind 限流或 dataset 受限)")
+    else:
+        # FinMind 此 dataset 每天每法人別一筆,需 pivot 取 buy-sell
+        if "buy" in df.columns and "sell" in df.columns:
+            df["net"] = (df["buy"].fillna(0) - df["sell"].fillna(0)) / 1e8  # 億元
+            agg = df.groupby("date")["net"].sum().reset_index()
+            colors = ["#d62728" if v > 0 else "#2ca02c" for v in agg["net"]]
+            fig = go.Figure(go.Bar(
+                x=agg["date"], y=agg["net"],
+                marker_color=colors, name="買賣超(億元)",
+            ))
+            fig.add_hline(y=0, line_color="gray", opacity=0.5)
+            fig.update_layout(
+                height=300, margin=dict(t=10, b=10, l=10, r=10),
+                font=dict(size=14),
+                xaxis=dict(tickfont=dict(size=12)),
+                yaxis=dict(tickfont=dict(size=12), title="億元"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            recent_buy = (agg["net"].tail(5) > 0).sum()
+            st.caption(
+                f"💬 近 5 日法人合計買超天數:**{recent_buy}/5** "
+                f"({'偏多' if recent_buy >= 3 else '偏空'})"
+            )
+        else:
+            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
+            st.caption(
+                f"💬 dataset 欄位:{list(df.columns)} "
+                "— 與預期不同,請看 raw data"
+            )
+
+    # 融資融券
+    st.markdown("### 融資 / 融券餘額(全市場,近 30 日)")
+    df = fetch_margin_balance(days=30)
+    if df.empty:
+        st.warning("融資券抓取失敗")
+    else:
+        # FinMind 通常給 MarginPurchaseTodayBalance / ShortSaleTodayBalance
+        # 欄位名隨版本可能不同,defensive 處理
+        margin_col = next(
+            (c for c in df.columns if "Margin" in c and "Balance" in c),
+            None,
+        )
+        short_col = next(
+            (c for c in df.columns if "Short" in c and "Balance" in c),
+            None,
+        )
+        if margin_col and short_col:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df["date"], y=df[margin_col] / 1e8,
+                name="融資餘額(億)", line=dict(color="#d62728"),
+            ))
+            fig.add_trace(go.Scatter(
+                x=df["date"], y=df[short_col] / 1e8,
+                name="融券餘額(億)", line=dict(color="#2ca02c"),
+                yaxis="y2",
+            ))
+            fig.update_layout(
+                height=300, margin=dict(t=10, b=10, l=10, r=10),
+                font=dict(size=14),
+                xaxis=dict(tickfont=dict(size=12)),
+                yaxis=dict(tickfont=dict(size=12), title="融資(億)"),
+                yaxis2=dict(
+                    tickfont=dict(size=12), title="融券(億)",
+                    overlaying="y", side="right",
+                ),
+                legend=dict(font=dict(size=14), orientation="h"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
+            st.caption(f"💬 dataset 欄位:{list(df.columns)}")
 
 
 # === 設定頁 ===
