@@ -364,8 +364,9 @@ def _page_stock_query() -> None:
 
     cols = st.columns([2, 2, 2, 1])
     stock_id = cols[0].text_input("股票代碼", value=default_stock, help="例:2330(台積電)")
-    start = cols[1].date_input("起始日", value=date(2024, 1, 1))
-    end = cols[2].date_input("結束日", value=date(2024, 3, 31))
+    today = date.today()
+    start = cols[1].date_input("起始日", value=today - timedelta(days=90))
+    end = cols[2].date_input("結束日", value=today)
     cols[3].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[3].button("查詢", use_container_width=True, type="primary")
 
@@ -373,8 +374,8 @@ def _page_stock_query() -> None:
         st.info(
             "輸入股票代碼與日期區間後按「查詢」。\n\n"
             "**首次查詢的區間若不在 cache 內**,會打 FinMind API 抓取(無 token 模式較慢);"
-            "之後同樣區間都直接從 SQLite 取。\n\n"
-            "預設區間 2024-01-01 ~ 2024-03-31(2330 已在 cache)可立即顯示。"
+            "之後同樣的區間都直接從 SQLite 取。\n\n"
+            "💡 預設為過去 90 日,首次查詢約 5–10 秒抓取最新資料。"
         )
         return
 
