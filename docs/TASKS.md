@@ -30,8 +30,8 @@
 - **驗收**:能用 Python REPL 取得 2330 (台積電) 過去 60 日資料,第二次呼叫不再打 API ✅ 已通過(2024 Q1 共 56 筆;第二次走 [CACHE])
 
 ### T1.5 卡點記錄
-- [!] T1.5-S 季財報實測:`fetch_quarterly_financials` 在無 token 模式是否能成功?需主公申請 FinMind token 後實打驗證,並對照 EPS/ROE 欄位名稱(目前先假設 type='EPS' / type='ROE')。**P3 待實測**。
-- [!] T1.5-D 配息抓取(`fetch_dividend`)尚未實作:T3.2 長線選股目前一律回空 + warning。需要新增函式 + 對應 dataset(FinMind `TaiwanStockDividend`,可能也需 token)。schema(`dividend` 表)已就位。**P3**。
+- [~] T1.5-S 季財報實測:程式已實作 + UI「📊 更新財報資料」按鈕已就位;主公升級 token 後在雲端按按鈕即可實打驗證。
+- [x] T1.5-D 配息抓取(`fetch_dividend`)已實作 — 2026-04-27,**意外發現無 token 模式也能用**(2330 實打成功,2015~2026 共 12 筆配息),含 sync_log 快取 + 同年多筆加總邏輯。
 
 ---
 
@@ -146,3 +146,4 @@
 - 2026-04-27 T4-A 完成:sidebar 路由 + 個股查詢頁(K 線/MA/BB + KD/MACD/RSI 分頁 + 摘要) + 設定頁(token 狀態+cache 內容);AppTest 5 個 smoke pass
 - 2026-04-27 部署到 Streamlit Cloud,網址 https://jjen-stock-screener.streamlit.app;GitHub repo https://github.com/jjen0206/stock-screener
 - 2026-04-27 T4-B 完成:短線推薦頁 + 長線占位頁 + sidebar「更新 50 檔大型股」按鈕;新增 src/universe.py(50 大型股清單);AppTest 4 個 smoke pass
+- 2026-04-27 解 T1.5 卡點:實作 fetch_dividend + fetch_long_term_data,sidebar 加「📊 更新財報資料」按鈕;意外發現 dividend dataset 無 token 也能用;87 passed

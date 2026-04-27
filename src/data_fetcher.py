@@ -10,11 +10,13 @@
   函式會 raise FinMindAPIError 或 log warn 後回空 DataFrame。
 
 提供:
-- list_tw_stocks()                   取得台股清單
-- fetch_daily_price(stock_id, s, e)  日線(含快取)
-- fetch_institutional(stock_id, s, e) 三大法人(含快取)
-- fetch_monthly_revenue(stock_id, s, e) 月營收(含快取)
-- fetch_quarterly_financials(stock_id, s, e) 季財報(無 token 可能失效)
+- list_tw_stocks()                       取得台股清單
+- fetch_daily_price(stock_id, s, e)      日線(含快取)
+- fetch_institutional(stock_id, s, e)    三大法人(含快取)
+- fetch_monthly_revenue(stock_id, s, e)  月營收(含快取)
+- fetch_quarterly_financials(stock_id, s, e)  季財報(EPS/ROE,需 token)
+- fetch_dividend(stock_id, start, end)   年度配息(需 token)
+- fetch_long_term_data(stock_ids, on_progress) 批次抓季財報 + 配息(長線選股用)
 
 注意: 任何呼叫 FinMind 的函式內,日期格式皆為 'YYYY-MM-DD' 字串。
 
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import requests
@@ -45,6 +47,7 @@ DATASET_INFO = "TaiwanStockInfo"
 DATASET_INST = "TaiwanStockInstitutionalInvestorsBuySell"
 DATASET_REVENUE = "TaiwanStockMonthRevenue"
 DATASET_FINANCIAL = "TaiwanStockFinancialStatements"
+DATASET_DIVIDEND = "TaiwanStockDividend"
 
 
 class FinMindAPIError(RuntimeError):
@@ -371,6 +374,192 @@ def fetch_quarterly_financials(stock_id: str, start: str, end: str) -> pd.DataFr
     return pd.DataFrame([dict(r) for r in rows])
 
 
+def fetch_dividend(
+    stock_id: str,
+    start: str = "2015-01-01",
+    end: str | None = None,
+) -> pd.DataFrame:
+    """取得年度配息(含快取)。
+
+    使用 FinMind `TaiwanStockDividend` dataset。每年可能 1–2 筆(中間配息 + 期末配息),
+    本函式會按 (stock_id, year) 加總現金股利與股票股利。
+
+    ⚠️ 已知限制(2026-04 觀察):
+      此 dataset 在無 token 模式可能被 FinMind 限制或拒絕。
+      遇到 FinMindAPIError 會 log warning 並回空 DataFrame,讓上層降級。
+
+    參數:
+        stock_id: 例 '2330'
+        start, end: 'YYYY-MM-DD';預設抓 2015-01-01 ~ 今日(夠 5 年配息檢查)
+    """
+    db.init_db()
+    if end is None:
+        end = date.today().isoformat()
+
+    synced = db.get_synced_range(stock_id, DATASET_DIVIDEND)
+    missing = _missing_ranges(start, end, synced)
+
+    if not missing:
+        logger.info("[CACHE] dividend 命中: %s [%s ~ %s]", stock_id, start, end)
+        print(f"[CACHE] dividend 命中: {stock_id} [{start} ~ {end}]", flush=True)
+    else:
+        for s, e in missing:
+            try:
+                raw = _api_call(
+                    DATASET_DIVIDEND, data_id=stock_id, start_date=s, end_date=e,
+                )
+            except FinMindAPIError as ex:
+                logger.warning(
+                    "配息抓取失敗(可能需要 FinMind token):%s", ex
+                )
+                return pd.DataFrame()
+            normalized = _normalize_dividend_rows(stock_id, raw)
+            db.upsert_dividend(normalized)
+        db.update_synced_range(stock_id, DATASET_DIVIDEND, start, end)
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dividend WHERE stock_id=? ORDER BY year",
+            (stock_id,),
+        ).fetchall()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def _normalize_dividend_rows(stock_id: str, raw: list[dict]) -> list[dict]:
+    """把 FinMind dividend 多筆(年中 + 年末)按 year 加總成單筆/年。
+
+    欄位名容錯:嘗試 FinMind 官方 (CashEarningsDistribution / StockEarningsDistribution)
+    與口語化備援 (cash_dividend / stock_dividend / cash / stock)。
+    """
+    by_year: dict[int, dict] = {}
+    for r in raw:
+        year = _extract_dividend_year(r)
+        if year is None:
+            continue
+        cash = _first_numeric(r, [
+            "CashEarningsDistribution",
+            "cash_dividend",
+            "cash",
+        ])
+        stock = _first_numeric(r, [
+            "StockEarningsDistribution",
+            "stock_dividend",
+            "stock",
+        ])
+        ex_date = (
+            r.get("CashExDividendTradingDate")
+            or r.get("StockExDividendTradingDate")
+            or r.get("date")
+        )
+        agg = by_year.setdefault(year, {
+            "stock_id": stock_id,
+            "year": year,
+            "cash_dividend": 0.0,
+            "stock_dividend": 0.0,
+            "ex_dividend_date": None,
+        })
+        agg["cash_dividend"] += float(cash or 0)
+        agg["stock_dividend"] += float(stock or 0)
+        # 取最近的除息日
+        if ex_date:
+            cur = agg["ex_dividend_date"]
+            if cur is None or str(ex_date) > str(cur):
+                agg["ex_dividend_date"] = ex_date
+    return list(by_year.values())
+
+
+def _extract_dividend_year(r: dict) -> int | None:
+    """從 FinMind dividend row 取「配息所屬年度」(int)。
+
+    FinMind 的 year 欄位有時是字串、有時是 'YYYYQn'、有時不存在;若不存在用 date 推。
+    """
+    for key in ("year", "Year", "data_year"):
+        v = r.get(key)
+        if v is None or v == "":
+            continue
+        try:
+            return int(str(v)[:4])
+        except (ValueError, TypeError):
+            continue
+    d = r.get("date")
+    if d:
+        try:
+            return int(str(d)[:4])
+        except ValueError:
+            pass
+    return None
+
+
+def _first_numeric(r: dict, keys: list[str]) -> float | None:
+    """依序嘗試多個 key,回第一個能轉 float 的值。"""
+    for k in keys:
+        v = r.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+# === 批次:長線資料 (季財報 + 配息) ===
+
+ProgressCallback = Callable[[int, int, str, "Exception | None"], None]
+
+
+def fetch_long_term_data(
+    stock_ids: list[str],
+    on_progress: ProgressCallback | None = None,
+    financial_start: str = "2015-01-01",
+) -> dict[str, list[str]]:
+    """批次抓多檔股票的季財報 + 配息(長線選股用)。
+
+    容錯:單檔失敗(FinMindAPIError 或其他例外)不中斷整批,記入 failed 清單。
+    on_progress callback 簽名: (idx_1based, total, stock_id, error_or_None) -> None
+
+    回傳:
+        {
+            "success_financials": [stock_id, ...],  # 季財報拿到資料的
+            "success_dividend":   [stock_id, ...],  # 配息拿到資料的
+            "failed":             [stock_id, ...],  # 兩者都空 / raise 的
+        }
+    """
+    today = date.today().isoformat()
+    success_fin: list[str] = []
+    success_div: list[str] = []
+    failed: list[str] = []
+    n = len(stock_ids)
+
+    for i, sid in enumerate(stock_ids):
+        err: Exception | None = None
+        got_any = False
+        try:
+            fin_df = fetch_quarterly_financials(sid, financial_start, today)
+            div_df = fetch_dividend(sid, financial_start, today)
+            if not fin_df.empty:
+                success_fin.append(sid)
+                got_any = True
+            if not div_df.empty:
+                success_div.append(sid)
+                got_any = True
+        except Exception as e:  # noqa: BLE001 — 容錯,任何例外都記 failed
+            err = e
+        if not got_any:
+            failed.append(sid)
+        if on_progress is not None:
+            try:
+                on_progress(i + 1, n, sid, err)
+            except Exception:  # noqa: BLE001 — callback 自己出錯不能影響主流程
+                pass
+
+    return {
+        "success_financials": success_fin,
+        "success_dividend": success_div,
+        "failed": failed,
+    }
+
+
 __all__ = [
     "FinMindAPIError",
     "list_tw_stocks",
@@ -378,9 +567,12 @@ __all__ = [
     "fetch_institutional",
     "fetch_monthly_revenue",
     "fetch_quarterly_financials",
+    "fetch_dividend",
+    "fetch_long_term_data",
     "DATASET_PRICE",
     "DATASET_INFO",
     "DATASET_INST",
     "DATASET_REVENUE",
     "DATASET_FINANCIAL",
+    "DATASET_DIVIDEND",
 ]

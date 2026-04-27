@@ -256,6 +256,165 @@ def test_fetch_quarterly_financials_parses_eps_roe(tmp_db):
     assert q1["roe"] == pytest.approx(27.3)
 
 
+# === fetch_dividend ===
+
+def _fake_div_rows(stock_id: str = "2330") -> list[dict]:
+    """模擬 FinMind TaiwanStockDividend 回傳(同年中間配 + 期末配兩筆)。"""
+    return [
+        {
+            "date": "2024-07-15", "stock_id": stock_id, "year": "2024",
+            "CashEarningsDistribution": 3.0,
+            "StockEarningsDistribution": 0.0,
+            "CashExDividendTradingDate": "2024-07-15",
+        },
+        {
+            "date": "2024-12-15", "stock_id": stock_id, "year": "2024",
+            "CashEarningsDistribution": 1.5,
+            "StockEarningsDistribution": 0.0,
+            "CashExDividendTradingDate": "2024-12-15",
+        },
+        {
+            "date": "2023-08-15", "stock_id": stock_id, "year": "2023",
+            "CashEarningsDistribution": 11.0,
+            "StockEarningsDistribution": 0.5,
+            "CashExDividendTradingDate": "2023-08-15",
+        },
+    ]
+
+
+def test_fetch_dividend_first_call_hits_api(tmp_db):
+    with patch.object(fetcher, "_api_call", return_value=_fake_div_rows()) as m:
+        df = fetcher.fetch_dividend("2330")
+    assert m.call_count == 1
+    # 兩個年度,2024 加總 4.5,2023 是 11.0
+    assert set(df["year"]) == {2023, 2024}
+    y2024 = df[df["year"] == 2024].iloc[0]
+    y2023 = df[df["year"] == 2023].iloc[0]
+    assert y2024["cash_dividend"] == pytest.approx(4.5)
+    assert y2023["cash_dividend"] == pytest.approx(11.0)
+    assert y2023["stock_dividend"] == pytest.approx(0.5)
+
+
+def test_fetch_dividend_second_call_uses_cache(tmp_db):
+    with patch.object(fetcher, "_api_call", return_value=_fake_div_rows()) as m:
+        fetcher.fetch_dividend("2330")
+        assert m.call_count == 1
+        df2 = fetcher.fetch_dividend("2330")
+    assert m.call_count == 1, "第二次相同請求不該打 API"
+    assert len(df2) == 2
+
+
+def test_fetch_dividend_graceful_on_api_error(tmp_db):
+    """FinMind 拒絕 dividend dataset → 回空 DataFrame,不拋例外。"""
+    with patch.object(
+        fetcher, "_api_call",
+        side_effect=FinMindAPIError("status=402, msg=token required"),
+    ):
+        df = fetcher.fetch_dividend("2330")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+def test_fetch_dividend_year_fallback_from_date(tmp_db):
+    """row 沒 year 欄位時,應從 date 推年份。"""
+    fake = [
+        {
+            "date": "2025-08-01", "stock_id": "2330",
+            "CashEarningsDistribution": 5.0,
+            "StockEarningsDistribution": 0.0,
+        },
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_dividend("2330")
+    assert df.iloc[0]["year"] == 2025
+
+
+def test_fetch_dividend_skips_rows_without_year(tmp_db):
+    """連 date 都沒有的 row 應被跳過,不炸。"""
+    fake = [
+        {"stock_id": "2330", "CashEarningsDistribution": 5.0},  # 沒 year 沒 date
+        {"date": "2024-08-01", "stock_id": "2330",
+         "CashEarningsDistribution": 3.0, "StockEarningsDistribution": 0.0},
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_dividend("2330")
+    assert len(df) == 1
+    assert df.iloc[0]["year"] == 2024
+
+
+# === fetch_long_term_data ===
+
+def test_fetch_long_term_data_calls_both_datasets(tmp_db):
+    """確認 fetch_long_term_data 對每檔都會呼叫財報 + 配息兩個 dataset。"""
+    fin_fake = [
+        {"date": "2024-03-31", "stock_id": "2330", "type": "EPS", "value": 8.5},
+        {"date": "2024-03-31", "stock_id": "2330", "type": "ROE", "value": 27.3},
+    ]
+    div_fake = _fake_div_rows("2330")
+
+    def side_effect(dataset, **params):
+        if dataset == fetcher.DATASET_FINANCIAL:
+            return fin_fake
+        if dataset == fetcher.DATASET_DIVIDEND:
+            return div_fake
+        return []
+
+    with patch.object(fetcher, "_api_call", side_effect=side_effect) as m:
+        result = fetcher.fetch_long_term_data(["2330"])
+
+    # 每檔該打 2 次(financial + dividend),共 1 檔 = 2 次
+    assert m.call_count == 2
+    assert "2330" in result["success_financials"]
+    assert "2330" in result["success_dividend"]
+    assert result["failed"] == []
+
+
+def test_fetch_long_term_data_progress_callback(tmp_db):
+    """on_progress callback 該被叫 N 次,參數正確。"""
+    calls: list[tuple[int, int, str, object]] = []
+
+    def cb(idx, total, sid, err):
+        calls.append((idx, total, sid, err))
+
+    with patch.object(fetcher, "_api_call", return_value=[]):
+        fetcher.fetch_long_term_data(["2330", "2454"], on_progress=cb)
+
+    assert len(calls) == 2
+    assert calls[0][0] == 1 and calls[0][1] == 2 and calls[0][2] == "2330"
+    assert calls[1][0] == 2 and calls[1][1] == 2 and calls[1][2] == "2454"
+
+
+def test_fetch_long_term_data_continues_on_failure(tmp_db):
+    """單檔財報抓 raise → 該檔記 failed,但其他檔仍處理。"""
+    div_fake = _fake_div_rows("2454")
+
+    def side_effect(dataset, data_id=None, **params):
+        if data_id == "2330":
+            raise FinMindAPIError("simulated network error")
+        if data_id == "2454" and dataset == fetcher.DATASET_DIVIDEND:
+            return div_fake
+        return []
+
+    result = None
+    with patch.object(fetcher, "_api_call", side_effect=side_effect):
+        result = fetcher.fetch_long_term_data(["2330", "2454"])
+
+    assert "2330" in result["failed"]
+    assert "2454" in result["success_dividend"]
+
+
+def test_fetch_long_term_data_callback_error_does_not_stop_loop(tmp_db):
+    """callback 自己 raise 不該影響主流程。"""
+    def bad_cb(idx, total, sid, err):
+        raise RuntimeError("callback boom")
+
+    with patch.object(fetcher, "_api_call", return_value=[]):
+        result = fetcher.fetch_long_term_data(["2330", "2454"], on_progress=bad_cb)
+
+    # 兩檔都因為 _api_call 回空,記為 failed,但流程沒中斷
+    assert len(result["failed"]) == 2
+
+
 # === _missing_ranges 邏輯單元測試 ===
 
 @pytest.mark.parametrize("synced, start, end, expected", [

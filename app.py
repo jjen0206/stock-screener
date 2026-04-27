@@ -19,6 +19,7 @@ from src.data_fetcher import (
     FinMindAPIError,
     fetch_daily_price,
     fetch_institutional,
+    fetch_long_term_data,
 )
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
@@ -240,18 +241,39 @@ def _page_long() -> None:
     )
 
     if test_btn:
-        with st.spinner("執行長線選股..."):
-            result = screen_long()
-        if result.empty:
-            st.error(
-                "仍然回空清單。可能原因:\n\n"
-                "- FinMind token 仍未設定(請編輯 `.env` 或 Streamlit Secrets 填 `FINMIND_TOKEN`)\n"
-                "- 季財報 / 配息資料尚未抓取(`fetch_quarterly_financials` / `fetch_dividend` 待實作)\n"
-                "- 真的沒有符合條件的個股"
+        if not _has_long_data():
+            st.warning(
+                "📊 還沒抓任何財報 / 配息資料。\n\n"
+                "請點 **sidebar → 「📊 更新財報資料」**,等抓完(約 2–3 分鐘)後再回此頁試用。"
             )
         else:
-            st.success(f"✅ 共 {len(result)} 檔")
-            st.dataframe(result, use_container_width=True, hide_index=True)
+            with st.spinner("執行長線選股..."):
+                result = screen_long()
+            if result.empty:
+                st.info(
+                    "📭 資料齊全但無入選 → 可能真的沒有符合條件的個股,或可放寬參數。"
+                )
+            else:
+                st.success(f"✅ 共 {len(result)} 檔符合長線條件")
+                st.dataframe(
+                    result, use_container_width=True, hide_index=True
+                )
+
+
+def _has_long_data() -> bool:
+    """檢查 financials.quarterly 與 dividend 表是否都有資料。"""
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            fin = conn.execute(
+                "SELECT COUNT(*) AS c FROM financials WHERE period_type='quarterly'"
+            ).fetchone()["c"]
+            div = conn.execute(
+                "SELECT COUNT(*) AS c FROM dividend"
+            ).fetchone()["c"]
+        except sqlite3.OperationalError:
+            return False
+    return fin > 0 and div > 0
 
 
 # === 個股查詢頁 ===
@@ -545,6 +567,11 @@ def _render_sidebar_update() -> None:
     st.sidebar.markdown("### 🔄 資料更新")
     if st.sidebar.button("更新 50 檔大型股", use_container_width=True):
         _run_update_top_50()
+    if st.sidebar.button("📊 更新財報資料", use_container_width=True):
+        _run_update_long_term()
+    st.sidebar.caption(
+        "📊 財報需要 FinMind token,無 token 模式可能拿不到。"
+    )
 
 
 def _run_update_top_50() -> None:
@@ -569,6 +596,36 @@ def _run_update_top_50() -> None:
             continue
     progress.empty()
     st.toast(f"已更新 {success} / {n} 檔資料", icon="✅")
+
+
+def _run_update_long_term() -> None:
+    """對 TW_TOP_50 跑季財報 + 配息抓取。"""
+    sids = [sid for sid, _ in TW_TOP_50]
+    # 確保 stocks 表有這 50 檔(產業欄位為空也沒關係,有就更新)
+    db.upsert_stocks(
+        [{"stock_id": sid, "name": name, "market": "TW"} for sid, name in TW_TOP_50]
+    )
+
+    progress = st.progress(0.0, text="準備...")
+    n = len(sids)
+
+    def on_progress(idx: int, total: int, sid: str, err: Exception | None) -> None:
+        suffix = " (失敗)" if err else ""
+        progress.progress(idx / total, text=f"更新財報 {idx}/{total}: {sid}{suffix}")
+
+    result = fetch_long_term_data(sids, on_progress=on_progress)
+    progress.empty()
+
+    n_fin = len(result["success_financials"])
+    n_div = len(result["success_dividend"])
+    n_fail = len(result["failed"])
+    msg = f"季財報 {n_fin} 檔、配息 {n_div} 檔已更新;{n_fail} 檔無資料"
+    st.toast(msg, icon="📊")
+    if n_fin == 0 and n_div == 0:
+        st.warning(
+            "⚠️ 全部 50 檔都沒拿到資料 — FinMind token 可能未設定,"
+            "或免費版不支援這兩個 dataset。"
+        )
 
 
 # === 頁尾 ===
