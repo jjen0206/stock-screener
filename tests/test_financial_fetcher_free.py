@@ -293,6 +293,70 @@ def test_twse_get_falls_back_to_httpx(monkeypatch):
     assert r is fake_resp
 
 
+# === fetch_industry_classification ===
+
+_FAKE_BASIC = [
+    {"公司代號": "2330", "公司名稱": "台積電", "產業別": "24"},
+    {"公司代號": "2317", "公司名稱": "鴻海", "產業別": "31"},
+    {"公司代號": "2881", "公司名稱": "富邦金", "產業別": "17"},
+    {"公司代號": "BAD", "公司名稱": "未知", "產業別": "99"},  # 未對應的代碼
+    {"公司代號": "", "公司名稱": "空代號"},  # 該被跳過
+]
+
+
+def test_fetch_industry_classification_translates_codes(monkeypatch):
+    def get(url, timeout=30):
+        if "t187ap03" in url:
+            return _mock_response(_FAKE_BASIC)
+        return _mock_response([])
+    monkeypatch.setattr(ff, "_twse_get", get)
+    out = ff.fetch_industry_classification()
+    assert out["2330"] == "半導體業"
+    assert out["2317"] == "其他電子業"
+    assert out["2881"] == "金融保險"
+    # 未對應代碼 fallback "其他"
+    assert out["BAD"] == "其他"
+    # 空 stock_id 該被跳過
+    assert "" not in out
+
+
+def test_fetch_industry_classification_api_failure_returns_empty(monkeypatch):
+    def boom(url, timeout=30):
+        raise requests.ConnectionError("boom")
+    monkeypatch.setattr(ff, "_twse_get", boom)
+    out = ff.fetch_industry_classification()
+    assert out == {}
+
+
+def test_update_long_term_data_free_writes_industry(tmp_db, monkeypatch):
+    """update_long_term_data_free 該把 industry 寫進 stocks 表。"""
+    # 先 seed stocks 表(實際 app 在按按鈕時也會 upsert_stocks 一遍)
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "2317", "name": "鴻海", "market": "TW"},
+    ])
+
+    def get(url, timeout=30):
+        if "BWIBBU" in url:
+            return _mock_response(_FAKE_BWIBBU)
+        if "t187ap14" in url:
+            return _mock_response(_FAKE_INC)
+        if "t187ap03" in url:
+            return _mock_response(_FAKE_BASIC)
+        return _mock_response([])
+    monkeypatch.setattr(ff, "_twse_get", get)
+
+    ff.update_long_term_data_free(["2330", "2317"])
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id, industry FROM stocks WHERE stock_id IN ('2330','2317')"
+        ).fetchall()
+    by_id = {r["stock_id"]: r["industry"] for r in rows}
+    assert by_id["2330"] == "半導體業"
+    assert by_id["2317"] == "其他電子業"
+
+
 def test_twse_get_both_clients_fail_raises(monkeypatch):
     """兩個 client 都失敗 → raise 第一個 exception(requests 的)。"""
     def failing_session():

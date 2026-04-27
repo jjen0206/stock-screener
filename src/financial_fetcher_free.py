@@ -40,6 +40,23 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TWSE_BWIBBU_URL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
 TWSE_INC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
+TWSE_BASIC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+
+# TWSE 產業別代碼 → 中文(依 TWSE 公開分類)
+INDUSTRY_CODE_MAP: dict[str, str] = {
+    "01": "水泥工業", "02": "食品工業", "03": "塑膠工業",
+    "04": "紡織纖維", "05": "電機機械", "06": "電器電纜",
+    "08": "玻璃陶瓷", "09": "造紙工業", "10": "鋼鐵工業",
+    "11": "橡膠工業", "12": "汽車工業", "14": "建材營造",
+    "15": "航運業", "16": "觀光餐旅", "17": "金融保險",
+    "18": "貿易百貨", "19": "綜合", "20": "其他",
+    "21": "化學工業", "22": "生技醫療", "23": "油電燃氣",
+    "24": "半導體業", "25": "電腦及週邊設備業", "26": "光電業",
+    "27": "通信網路業", "28": "電子零組件業", "29": "電子通路業",
+    "30": "資訊服務業", "31": "其他電子業", "32": "文化創意業",
+    "33": "農業科技業", "34": "電子商務", "35": "綠能環保",
+    "36": "數位雲端", "37": "運動休閒", "38": "居家生活",
+}
 
 
 # === Robust HTTP 客戶端 ===
@@ -150,6 +167,8 @@ _metrics_cache: dict | None = None
 _metrics_cache_time: float = 0.0
 _eps_cache: dict | None = None
 _eps_cache_time: float = 0.0
+_industry_cache: dict | None = None
+_industry_cache_time: float = 0.0
 _CACHE_TTL_SECS = 300
 
 
@@ -242,12 +261,53 @@ def _fetch_all_eps(force_refresh: bool = False) -> dict[str, dict]:
 def _reset_caches() -> None:
     """測試用:清空記憶體 cache + session,確保每個測試獨立。"""
     global _metrics_cache, _metrics_cache_time, _eps_cache, _eps_cache_time
-    global _session
+    global _industry_cache, _industry_cache_time, _session
     _metrics_cache = None
     _metrics_cache_time = 0.0
     _eps_cache = None
     _eps_cache_time = 0.0
+    _industry_cache = None
+    _industry_cache_time = 0.0
     _session = None
+
+
+def fetch_industry_classification() -> dict[str, str]:
+    """從 TWSE t187ap03_L 拉所有上市公司的產業別,翻譯成中文。
+
+    回 {stock_id: industry_zh},例 {"2330": "半導體業", "2317": "其他電子業", ...}。
+    抓取失敗 / 代碼找不到對照 → 該檔 industry 為 "其他"。
+    記憶體 5 分鐘 cache。
+    """
+    global _industry_cache, _industry_cache_time
+    now = time.time()
+    if (
+        _industry_cache is not None
+        and now - _industry_cache_time < _CACHE_TTL_SECS
+    ):
+        return _industry_cache
+
+    logger.info("[FREE] 拉 TWSE t187ap03_L 全市場(產業別)...")
+    try:
+        r = _twse_get(TWSE_BASIC_URL, timeout=60)
+        raw = r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[FREE] 產業別抓取失敗: %s", e)
+        return {}
+    if not isinstance(raw, list) or len(raw) == 0:
+        logger.warning("[FREE] 產業別回空清單")
+        return {}
+
+    out: dict[str, str] = {}
+    for r in raw:
+        sid = r.get("公司代號")
+        code = (r.get("產業別") or "").strip().zfill(2)
+        if not sid:
+            continue
+        out[sid] = INDUSTRY_CODE_MAP.get(code, "其他")
+    _industry_cache = out
+    _industry_cache_time = now
+    logger.info("[FREE] 產業別拿到 %d 檔", len(out))
+    return out
 
 
 # === 公開 API ===
@@ -400,6 +460,23 @@ def update_long_term_data_free(
         )
         eps_available = False
 
+    # 一次拉產業別,寫進 stocks 表
+    industry_map = fetch_industry_classification()
+    if industry_map:
+        rows_to_update = []
+        for sid in stock_ids:
+            ind = industry_map.get(sid)
+            if ind:
+                rows_to_update.append({"stock_id": sid, "industry": ind})
+        if rows_to_update:
+            with db.get_conn() as conn:
+                conn.executemany(
+                    "UPDATE stocks SET industry=:industry "
+                    "WHERE stock_id=:stock_id",
+                    rows_to_update,
+                )
+            logger.info("[FREE] 更新 %d 檔的 industry", len(rows_to_update))
+
     n = len(stock_ids)
     for i, sid in enumerate(stock_ids):
         err: Exception | None = None
@@ -488,5 +565,7 @@ __all__ = [
     "fetch_daily_metrics",
     "fetch_quarterly_eps",
     "compute_roe",
+    "fetch_industry_classification",
     "update_long_term_data_free",
+    "INDUSTRY_CODE_MAP",
 ]
