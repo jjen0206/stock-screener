@@ -19,15 +19,18 @@
 
 ## 第 1 階段:資料層 (預估 2–3 天)
 
-- [ ] T1.1 寫 `src/database.py`:SQLite 初始化、建表(stocks, daily_prices, financials, institutional)
-- [ ] T1.2 寫 `src/data_fetcher.py` 的 FinMind 介接:取得台股清單、日線資料
-- [ ] T1.3 在 data_fetcher 加入快取邏輯:先查 DB,沒有才打 API
-- [ ] T1.4 加入三大法人買賣超抓取
-- [ ] T1.5 加入財報資料(月營收、季 EPS、ROE)抓取
+- [x] T1.1 寫 `src/database.py`:SQLite 初始化、建表(stocks, daily_prices, financials, institutional, sync_log) — 2026-04-27
+- [x] T1.2 寫 `src/data_fetcher.py` 的 FinMind 介接:取得台股清單、日線資料 — 2026-04-27,直接打 v4 endpoint
+- [x] T1.3 在 data_fetcher 加入快取邏輯:先查 DB,沒有才打 API — 2026-04-27,用 sync_log 區間判斷,只補缺的頭/尾
+- [x] T1.4 加入三大法人買賣超抓取 — 2026-04-27,含 pivot(外資/投信/自營商加總)
+- [~] T1.5 加入財報資料(月營收、季 EPS、ROE)抓取 — 2026-04-27 月營收已寫;季 EPS/ROE 程式已寫但**未實測**(無 token 模式可能被 FinMind 拒絕,函式已加降級邏輯回空 DF) → 待主公升級 token 後再驗證
 - [ ] T1.6 加入 yfinance 美股資料抓取(基本款) — **P2 / 暫緩**(首版只做台股,跑通整條鏈路後再啟用)
-- [ ] T1.7 寫 `tests/test_database.py` 測試基本 CRUD
-- [ ] T1.8 寫 `tests/test_data_fetcher.py` 測試快取行為(用 mock)
-- **驗收**:能用 Python REPL 取得 2330 (台積電) 過去 60 日資料,第二次呼叫不再打 API
+- [x] T1.7 寫 `tests/test_database.py` 測試基本 CRUD — 2026-04-27,含 init_db 冪等、各表 upsert、sync_log 區間擴展
+- [x] T1.8 寫 `tests/test_data_fetcher.py` 測試快取行為(用 mock) — 2026-04-27,33 個測試全綠
+- **驗收**:能用 Python REPL 取得 2330 (台積電) 過去 60 日資料,第二次呼叫不再打 API ✅ 已通過(2024 Q1 共 56 筆;第二次走 [CACHE])
+
+### T1.5 卡點記錄
+- [!] T1.5-S 季財報實測:`fetch_quarterly_financials` 在無 token 模式是否能成功?需主公申請 FinMind token 後實打驗證,並對照 EPS/ROE 欄位名稱(目前先假設 type='EPS' / type='ROE')。**P3 待實測**。
 
 ---
 
@@ -105,3 +108,5 @@
 - 2026-04-27 T0.1 ~ T0.6 完成,Streamlit Hello World 可跑(HTTP 200 驗證)
 - 2026-04-27 已決定先用「無 token 模式」開發,未來再升級補 FinMind token
 - 2026-04-27 環境:Python 3.14 + venv,tqdm 已加進 requirements(finmind 1.9.x 漏依賴)
+- 2026-04-27 T1.1~T1.4、T1.7、T1.8 完成;T1.5 月營收完成、季財報程式就位但未實測(標 [!]);T1.6 暫緩
+- 2026-04-27 真實打 FinMind 無 token API 取台積電 2024 Q1 日線成功(56 筆),快取第二次完全不打 API
