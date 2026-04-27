@@ -31,6 +31,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Fetch top-50 daily data (price + institutional)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+
       - name: Run daily notify
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
