@@ -7,13 +7,13 @@
 
 ## 第 0 階段:環境與骨架 (預估 0.5 天)
 
-- [ ] T0.1 建立 Python 虛擬環境 (uv 或 venv)
-- [ ] T0.2 建立 `requirements.txt`,寫入核心相依套件
-- [ ] T0.3 建立 `.env.example` 與 `.gitignore`
-- [ ] T0.4 建立目錄結構 (src/, tests/, data/, docs/)
-- [ ] T0.5 寫 `src/config.py` 載入環境變數
-- [ ] T0.6 寫一個最小的 `app.py`,顯示 "Hello Streamlit",確認可執行
-- **驗收**:`streamlit run app.py` 能啟動並在瀏覽器看到頁面
+- [x] T0.1 建立 Python 虛擬環境 (uv 或 venv) — 2026-04-27 完成,使用 venv,Python 3.14
+- [x] T0.2 建立 `requirements.txt`,寫入核心相依套件 — 2026-04-27,額外補裝 tqdm(finmind 漏依賴)
+- [x] T0.3 建立 `.env.example` 與 `.gitignore` — 2026-04-27,本機 .env 已建,FinMind 走無 token 模式
+- [x] T0.4 建立目錄結構 (src/, tests/, data/, docs/) — 2026-04-27,含 __init__.py 與 .gitkeep
+- [x] T0.5 寫 `src/config.py` 載入環境變數 — 2026-04-27,五個常數齊備,缺值印 warning 不拋例外
+- [x] T0.6 寫一個最小的 `app.py`,顯示 "Hello Streamlit",確認可執行 — 2026-04-27,HTTP 200 + health=ok 驗證通過
+- **驗收**:`streamlit run app.py` 能啟動並在瀏覽器看到頁面 ✅ 已通過
 
 ---
 
@@ -102,4 +102,6 @@
 ## 完成記錄
 
 (任務完成時在這裡記日期與備註,例如:)
-- 2026-04-27 T0.1 ~ T0.6 完成,Streamlit Hello World 可跑
+- 2026-04-27 T0.1 ~ T0.6 完成,Streamlit Hello World 可跑(HTTP 200 驗證)
+- 2026-04-27 已決定先用「無 token 模式」開發,未來再升級補 FinMind token
+- 2026-04-27 環境:Python 3.14 + venv,tqdm 已加進 requirements(finmind 1.9.x 漏依賴)

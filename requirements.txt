@@ -4,6 +4,7 @@ streamlit>=1.32.0
 # 資料來源
 finmind>=1.9.0
 yfinance>=0.2.40
+tqdm>=4.66.0  # finmind 1.9.x 漏寫的依賴,需補上
 
 # 資料處理
 pandas>=2.2.0
