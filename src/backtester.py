@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
+import logging
 import math
+from datetime import date as _date
 from typing import Callable
 
 import pandas as pd
@@ -29,6 +31,9 @@ import pandas as pd
 from src import database as db
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
+
+
+logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -116,10 +121,25 @@ def backtest_short(
         ],
     )
 
+    period_days = (_date.fromisoformat(end_date) - _date.fromisoformat(start_date)).days
+    summary = _compute_summary(
+        trades_df, hold_days=hold_days, period_days=period_days,
+    )
+    equity_curve = _compute_equity_curve(trades_df, trading_days)
+
+    logger.info(
+        "[BACKTEST] trades=%d total=%.2f%% sharpe=%.2f equity_curve len=%d "
+        "min=%.2f%% max=%.2f%%",
+        summary["trades"], summary["total_return"], summary["sharpe"],
+        len(equity_curve),
+        float(equity_curve.min()) if not equity_curve.empty else 0.0,
+        float(equity_curve.max()) if not equity_curve.empty else 0.0,
+    )
+
     return {
-        "summary": _compute_summary(trades_df),
+        "summary": summary,
         "trades": trades_df,
-        "equity_curve": _compute_equity_curve(trades_df, trading_days),
+        "equity_curve": equity_curve,
     }
 
 
@@ -177,6 +197,9 @@ def _empty_summary() -> dict:
         "max_win": 0.0,
         "max_loss": 0.0,
         "sharpe": 0.0,
+        "annual_return": 0.0,
+        "annual_volatility": 0.0,
+        "hold_days": 0,
     }
 
 
@@ -193,10 +216,25 @@ def _empty_result() -> dict:
     }
 
 
-def _compute_summary(trades_df: pd.DataFrame) -> dict:
-    """從交易明細算統計。"""
+def _compute_summary(
+    trades_df: pd.DataFrame,
+    hold_days: int = 5,
+    period_days: int = 0,
+) -> dict:
+    """從交易明細算統計。
+
+    重要 — 年化基準:
+    - 「每筆交易報酬」是 hold_days 天的累積報酬,**不是日報酬**。
+      若直接 × √252 會嚴重高估 sharpe(把 5 日波動誤當 1 日波動再放大)。
+    - 正確做法:把每筆視為「持 hold_days 天的單次操作」,年化次數 ≈ 252/hold_days,
+      所以 sharpe = mean / std × √(252/hold_days)。
+    - 簡化版:不減無風險利率(假設 0)。
+    - 年化報酬:用「期間天數」反推 (1+total)^(365/period_days) − 1。
+    """
     if trades_df.empty:
-        return _empty_summary()
+        out = _empty_summary()
+        out["hold_days"] = hold_days
+        return out
     returns = trades_df["return_pct"]
     n = len(returns)
     wins = int((returns > 0).sum())
@@ -206,7 +244,20 @@ def _compute_summary(trades_df: pd.DataFrame) -> dict:
     max_win = float(returns.max())
     max_loss = float(returns.min())
     std = float(returns.std()) if n > 1 else 0.0
-    sharpe = (returns.mean() / std) * math.sqrt(252) if std > 0 else 0.0
+
+    # 年化:每年 ~252/hold_days 次交易
+    annual_factor = math.sqrt(252.0 / max(hold_days, 1))
+    sharpe = (returns.mean() / std) * annual_factor if std > 0 else 0.0
+    annual_volatility = std * annual_factor
+
+    # 年化報酬:用日曆天數(端點到端點)反推複利
+    if period_days > 0:
+        annual_return = (
+            ((1 + total_return / 100.0) ** (365.0 / period_days)) - 1
+        ) * 100.0
+    else:
+        annual_return = 0.0
+
     return {
         "trades": n,
         "win_rate": float(win_rate),
@@ -215,6 +266,9 @@ def _compute_summary(trades_df: pd.DataFrame) -> dict:
         "max_win": max_win,
         "max_loss": max_loss,
         "sharpe": float(sharpe),
+        "annual_return": float(annual_return),
+        "annual_volatility": float(annual_volatility),
+        "hold_days": hold_days,
     }
 
 

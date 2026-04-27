@@ -693,28 +693,45 @@ def _page_backtest() -> None:
         )
         return
 
-    # 6 格 metric
-    cols = st.columns(6)
-    cols[0].metric("交易次數", f"{summary['trades']}")
-    cols[1].metric("勝率", f"{summary['win_rate']:.1f}%")
-    cols[2].metric("平均報酬", f"{summary['avg_return']:.2f}%")
-    cols[3].metric(
-        "總報酬(複利)", f"{summary['total_return']:.2f}%",
-        delta=f"vs 0050 待算" if False else None,
+    # 8 格 metric (兩列 × 四欄)
+    row1 = st.columns(4)
+    row1[0].metric("交易次數", f"{summary['trades']}")
+    row1[1].metric("勝率", f"{summary['win_rate']:.1f}%")
+    row1[2].metric("平均報酬/筆", f"{summary['avg_return']:.2f}%")
+    row1[3].metric("總報酬(複利)", f"{summary['total_return']:.2f}%")
+
+    row2 = st.columns(4)
+    row2[0].metric("年化報酬", f"{summary['annual_return']:.2f}%")
+    row2[1].metric("年化波動率", f"{summary['annual_volatility']:.2f}%")
+    row2[2].metric(
+        "夏普比率",
+        f"{summary['sharpe']:.2f}",
+        help=f"年化基準 √(252/{summary['hold_days']}) = "
+             f"{(252 / max(summary['hold_days'], 1)) ** 0.5:.2f}",
     )
-    cols[4].metric(
+    row2[3].metric(
         "最大單筆",
         f"{summary['max_win']:.2f}%",
         delta=f"最差 {summary['max_loss']:.2f}%",
         delta_color="off",
     )
-    cols[5].metric("夏普比率", f"{summary['sharpe']:.2f}")
 
     # 累積報酬曲線(含 0050 對比,失敗就不畫)
     st.markdown("### 📈 累積報酬曲線")
     st.plotly_chart(
         _make_equity_chart(result["equity_curve"], start.isoformat(), end.isoformat()),
         use_container_width=True,
+    )
+
+    # 單筆報酬分佈直方圖
+    st.markdown("### 📊 單筆報酬分佈")
+    st.plotly_chart(
+        _make_returns_histogram(result["trades"]),
+        use_container_width=True,
+    )
+    st.caption(
+        "看分佈是否有極端值(肥尾)拉高 sharpe / 平均報酬。"
+        "理想分佈是右偏(賺多賠少)。"
     )
 
     # 交易明細
@@ -730,14 +747,24 @@ def _make_equity_chart(
     start: str,
     end: str,
 ) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=list(equity_curve.index), y=equity_curve.values,
-        name="策略累積報酬",
-        line=dict(color="#d62728", width=2.5),
-    ))
+    """累積報酬曲線。
 
-    # 嘗試疊上 0050 大盤對比(抓不到優雅降級)
+    用 date 軸(不是 category),避免兩條線(策略 vs 0050)x 集合不同時
+    plotly 把策略線壓到 0050 範圍內導致看不到。
+    """
+    fig = go.Figure()
+
+    # 策略線 — index 從 'YYYY-MM-DD' str 轉 datetime
+    if not equity_curve.empty:
+        x_strategy = pd.to_datetime(list(equity_curve.index))
+        fig.add_trace(go.Scatter(
+            x=x_strategy, y=equity_curve.values,
+            name="策略累積報酬",
+            line=dict(color="#d62728", width=2.5),
+            mode="lines",
+        ))
+
+    # 0050 大盤對比(失敗就不畫)
     try:
         bench = fetch_daily_price("0050", start, end)
         if not bench.empty and len(bench) >= 2:
@@ -745,10 +772,11 @@ def _make_equity_chart(
             if base > 0:
                 bench_returns = (bench["close"] / base - 1) * 100
                 fig.add_trace(go.Scatter(
-                    x=bench["date"].tolist(),
+                    x=pd.to_datetime(bench["date"].tolist()),
                     y=bench_returns.tolist(),
                     name="0050 台灣 50",
                     line=dict(color="#1f77b4", width=2, dash="dot"),
+                    mode="lines",
                 ))
     except Exception:  # noqa: BLE001 — 抓不到大盤就不畫
         pass
@@ -759,8 +787,44 @@ def _make_equity_chart(
         margin=dict(t=20, b=20, l=20, r=20),
         legend=dict(orientation="h", y=1.02, x=0, font=dict(size=16)),
         font=dict(size=16),
-        xaxis=dict(tickfont=dict(size=14), type="category"),
+        xaxis=dict(
+            tickfont=dict(size=14),
+            # 跳週末讓圖看起來連續(台股無交易)
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+        ),
         yaxis=dict(tickfont=dict(size=14), title="累積報酬 (%)"),
+    )
+    return fig
+
+
+def _make_returns_histogram(trades_df: pd.DataFrame) -> go.Figure:
+    """單筆報酬分佈直方圖,用來肉眼判斷有沒有肥尾拉高 sharpe。"""
+    fig = go.Figure()
+    if trades_df.empty:
+        return fig
+    returns = trades_df["return_pct"]
+    fig.add_trace(go.Histogram(
+        x=returns,
+        nbinsx=20,
+        marker=dict(color="#1f77b4", line=dict(color="white", width=1)),
+        name="次數",
+    ))
+    fig.add_vline(
+        x=0, line_color="gray", line_dash="dash", opacity=0.7,
+    )
+    fig.add_vline(
+        x=float(returns.mean()),
+        line_color="#d62728", line_dash="dot",
+        annotation_text=f"平均 {returns.mean():.2f}%",
+        annotation_font=dict(size=14),
+    )
+    fig.update_layout(
+        height=300,
+        margin=dict(t=20, b=20, l=20, r=20),
+        font=dict(size=16),
+        xaxis=dict(tickfont=dict(size=14), title="單筆報酬率 (%)"),
+        yaxis=dict(tickfont=dict(size=14), title="次數"),
+        showlegend=False,
     )
     return fig
 
