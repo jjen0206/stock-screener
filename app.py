@@ -1,16 +1,13 @@
 """
 Stock Screener — Streamlit 入口。
 
-T4-A 階段實作:
-- sidebar 四項分頁(短線推薦 / 長線口袋名單 / 個股查詢 / 設定)
-- 「個股查詢」與「設定」兩頁完整實作
-- 「短線推薦」「長線口袋名單」放佔位畫面,留給 T4-B
-- 風險警語每頁底部都看得到
+T4-A 完成:sidebar 路由 + 個股查詢頁 + 設定頁
+T4-B 完成:短線推薦頁 + 長線占位頁 + sidebar「更新今日資料」按鈕
 """
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,21 +15,21 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src import config, database as db, indicators as ind
-from src.data_fetcher import fetch_daily_price
+from src.data_fetcher import (
+    FinMindAPIError,
+    fetch_daily_price,
+    fetch_institutional,
+)
+from src.screener_long import screen_long
+from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
+from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
-
-# === 頁面定義 ===
 
 PAGES = ["短線推薦", "長線口袋名單", "個股查詢", "設定"]
 
-# 設定頁要列出的資料表
 _CACHE_TABLES = [
-    "stocks",
-    "daily_prices",
-    "institutional",
-    "financials",
-    "dividend",
-    "sync_log",
+    "stocks", "daily_prices", "institutional",
+    "financials", "dividend", "sync_log",
 ]
 
 
@@ -48,11 +45,6 @@ def main() -> None:
     st.sidebar.title("📈 個人選股工具")
     st.sidebar.caption("台股 · 短線 + 長線")
     page = st.sidebar.radio("選擇功能", PAGES, index=2)
-    st.sidebar.markdown("---")
-    st.sidebar.caption(
-        f"市場:{config.DEFAULT_MARKET}　·　"
-        f"FinMind:{'有 token' if config.FINMIND_TOKEN else '無 token'}"
-    )
 
     if page == "短線推薦":
         _page_short()
@@ -63,7 +55,203 @@ def main() -> None:
     elif page == "設定":
         _page_settings()
 
+    _render_sidebar_update()
+    st.sidebar.markdown("---")
+    st.sidebar.caption(
+        f"市場:{config.DEFAULT_MARKET}　·　"
+        f"FinMind:{'有 token' if config.FINMIND_TOKEN else '無 token'}"
+    )
+
     _render_footer()
+
+
+# === 短線推薦頁 ===
+
+def _page_short() -> None:
+    st.header("🔥 短線推薦")
+
+    # sidebar 參數區
+    st.sidebar.markdown("### 短線參數")
+    vol_mult = st.sidebar.number_input(
+        "均量倍數", min_value=1.0, max_value=5.0,
+        value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+        help="當日量 > 過去 5 日均量 × 此倍數",
+    )
+    kd_low = st.sidebar.number_input(
+        "KD 門檻 K_low", min_value=0.0, max_value=80.0,
+        value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+        help="K 黃金交叉 D 後,K 至少要超過此值才入選",
+    )
+    inst_days = st.sidebar.number_input(
+        "法人連續買超天數", min_value=1, max_value=10,
+        value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+    )
+
+    # 上方控制列
+    cols = st.columns([2, 3, 1])
+    target_date = cols[0].date_input("選股日期", value=date.today())
+    universe_choice = cols[1].selectbox(
+        "選股範圍",
+        ["快速:50 檔大型股", "我的關注清單", "全部台股 (慢)"],
+        help="無 token 模式抓全台股容易被 FinMind 頻率限制,建議先用 50 檔",
+    )
+    cols[2].markdown("&nbsp;", unsafe_allow_html=True)
+    submit = cols[2].button("執行選股", type="primary", use_container_width=True)
+
+    if not submit:
+        st.info(
+            "選好參數後按「執行選股」。\n\n"
+            "首次執行會逐檔抓取最新資料(已在 cache 的不重抓),"
+            "建議先用「快速:50 檔大型股」測試。"
+        )
+        return
+
+    # 取選股範圍
+    universe = _resolve_universe(universe_choice)
+    if universe is None:
+        return
+
+    # 抓資料(進度條)
+    today_iso = target_date.isoformat()
+    start_iso = (target_date - timedelta(days=90)).isoformat()
+    progress = st.progress(0.0, text="準備資料...")
+    status = st.empty()
+    n = len(universe)
+    failures: list[str] = []
+    for i, (sid, name) in enumerate(universe):
+        progress.progress(
+            (i + 1) / n,
+            text=f"抓取 {i + 1}/{n}: {sid} {name}",
+        )
+        try:
+            db.upsert_stocks([{"stock_id": sid, "name": name, "market": "TW"}])
+            fetch_daily_price(sid, start_iso, today_iso)
+            fetch_institutional(sid, start_iso, today_iso)
+        except FinMindAPIError as e:
+            failures.append(f"{sid}({e})")
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{sid}({type(e).__name__}: {e})")
+    progress.empty()
+    status.empty()
+
+    if failures:
+        st.warning(f"⚠️ {len(failures)} 檔抓取失敗(可能無 token 被限制):{', '.join(failures[:5])}{'...' if len(failures) > 5 else ''}")
+
+    # 跑選股
+    params = {
+        "volume_multiplier": float(vol_mult),
+        "kd_threshold_low": float(kd_low),
+        "inst_buy_days": int(inst_days),
+    }
+    with st.spinner("執行短線選股邏輯..."):
+        result = screen_short(today_iso, params=params)
+
+    if result.empty:
+        st.info(
+            "📭 無符合條件的個股。可放寬參數:降低均量倍數、降低 KD 門檻、減少法人買超天數。"
+        )
+        return
+
+    st.success(f"✅ 共 {len(result)} 檔符合條件(三條件:量價突破 + KD 黃金交叉 + 法人連買)")
+
+    # 加「符合理由」欄位
+    result_show = result.copy()
+    result_show["符合理由"] = "量價突破 + KD 黃金交叉 + 法人連買"
+
+    selection = st.dataframe(
+        result_show,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    if selection and selection.selection.rows:
+        idx = selection.selection.rows[0]
+        sid = result.iloc[idx]["stock_id"]
+        st.session_state["query_stock_id"] = sid
+        st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
+
+
+def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
+    """根據使用者選擇回傳個股清單;回 None 表示已 render 提示、外層直接 return。"""
+    if choice == "快速:50 檔大型股":
+        return TW_TOP_50
+    if choice == "我的關注清單":
+        wl = load_watchlist()
+        if not wl:
+            st.warning(
+                f"找不到 `{WATCHLIST_PATH}` 或內容為空。\n\n"
+                "請建立此檔,一行一個股號(可加 # 註解),例如:\n\n"
+                "```\n2330\n2454\n# 這是註解\n2317\n```"
+            )
+            return None
+        return wl
+    # 全部台股
+    st.warning(
+        "⚠️ 無 token 模式抓全部台股會被 FinMind 頻率限制(可能 5–10 分鐘且容易失敗)。"
+        "建議先升級 FinMind token,或改選「快速:50 檔大型股」。"
+    )
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id, name FROM stocks WHERE market='TW'"
+        ).fetchall()
+    universe = [(r["stock_id"], r["name"]) for r in rows]
+    if not universe:
+        st.error(
+            "stocks 表為空。請先在 sidebar 點「🔄 更新今日資料」初始化 50 檔大型股,"
+            "或執行一次「快速:50 檔大型股」選股。"
+        )
+        return None
+    return universe
+
+
+# === 長線口袋名單頁(占位) ===
+
+def _page_long() -> None:
+    st.header("💎 長線口袋名單")
+
+    st.warning(
+        "⚠️ 此功能需 **FinMind 升級會員 token** 才能用,需要季財報、ROE、配息資料。\n\n"
+        "目前版本走無 token 模式,長線選股會回空清單。"
+    )
+
+    st.markdown("### 預設策略")
+    st.markdown(
+        """
+- **高 ROE**:近 3 年平均季 ROE > 15%
+- **低 PE**:當日本益比 < 20,或 < 該股票所屬產業平均 PE
+- **連續配息**:近 5 年每年都有現金股利
+- **殖利率**:近 1 年現金殖利率 > 4%
+        """
+    )
+
+    st.markdown("---")
+    cols = st.columns(2)
+    cols[0].link_button(
+        "📝 申請 FinMind Token",
+        "https://finmindtrade.com/",
+        use_container_width=True,
+    )
+    test_btn = cols[1].button(
+        "🧪 我已升級 token,立即試用",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if test_btn:
+        with st.spinner("執行長線選股..."):
+            result = screen_long()
+        if result.empty:
+            st.error(
+                "仍然回空清單。可能原因:\n\n"
+                "- FinMind token 仍未設定(請編輯 `.env` 或 Streamlit Secrets 填 `FINMIND_TOKEN`)\n"
+                "- 季財報 / 配息資料尚未抓取(`fetch_quarterly_financials` / `fetch_dividend` 待實作)\n"
+                "- 真的沒有符合條件的個股"
+            )
+        else:
+            st.success(f"✅ 共 {len(result)} 檔")
+            st.dataframe(result, use_container_width=True, hide_index=True)
 
 
 # === 個股查詢頁 ===
@@ -71,8 +259,11 @@ def main() -> None:
 def _page_stock_query() -> None:
     st.header("🔍 個股查詢")
 
+    # 短線頁可以 push stock_id 進來
+    default_stock = st.session_state.pop("query_stock_id", "2330")
+
     cols = st.columns([2, 2, 2, 1])
-    stock_id = cols[0].text_input("股票代碼", value="2330", help="例:2330(台積電)")
+    stock_id = cols[0].text_input("股票代碼", value=default_stock, help="例:2330(台積電)")
     start = cols[1].date_input("起始日", value=date(2024, 1, 1))
     end = cols[2].date_input("結束日", value=date(2024, 3, 31))
     cols[3].markdown("&nbsp;", unsafe_allow_html=True)
@@ -98,11 +289,9 @@ def _page_stock_query() -> None:
     try:
         with st.spinner(f"抓取 {sid} 日線資料中..."):
             df = fetch_daily_price(sid, start.isoformat(), end.isoformat())
-    except Exception as e:  # noqa: BLE001 — UI 層面要吃掉所有錯誤,不能爆
+    except Exception as e:  # noqa: BLE001
         st.error(f"資料抓取失敗:{type(e).__name__}: {e}")
-        st.caption(
-            "可能原因:股票代碼錯誤、無 token 模式被頻率限制、網路問題。"
-        )
+        st.caption("可能原因:股票代碼錯誤、無 token 模式被頻率限制、網路問題。")
         return
 
     if df.empty:
@@ -112,7 +301,6 @@ def _page_stock_query() -> None:
         )
         return
 
-    # 算指標
     df = df.copy()
     df["MA5"] = ind.sma(df, 5)
     df["MA20"] = ind.sma(df, 20)
@@ -124,11 +312,11 @@ def _page_stock_query() -> None:
 
     st.caption(f"取得 {len(df)} 筆,日期 {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}")
 
-    # K 線圖
     st.plotly_chart(_make_candlestick(df, bb), use_container_width=True)
 
-    # 指標分頁
-    tab_kd, tab_macd, tab_rsi = st.tabs(["KD (9, 3, 3)", "MACD (12, 26, 9)", "RSI (14)"])
+    tab_kd, tab_macd, tab_rsi = st.tabs(
+        ["KD (9, 3, 3)", "MACD (12, 26, 9)", "RSI (14)"]
+    )
     with tab_kd:
         st.plotly_chart(_make_kd_chart(df, kd_df), use_container_width=True)
     with tab_macd:
@@ -136,7 +324,6 @@ def _page_stock_query() -> None:
     with tab_rsi:
         st.plotly_chart(_make_rsi_chart(df, rsi14), use_container_width=True)
 
-    # 摘要
     _render_summary(df, kd_df, rsi14, macd_df)
 
 
@@ -176,14 +363,12 @@ def _fmt(v: float) -> str:
 # === 圖表 ===
 
 def _make_candlestick(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
-    """K 線 + 均線 + 布林通道 + 量。"""
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.04,
         row_heights=[0.72, 0.28],
     )
-    # K 線(台股慣例:紅漲綠跌)
     fig.add_trace(
         go.Candlestick(
             x=df["date"],
@@ -195,7 +380,6 @@ def _make_candlestick(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
         ),
         row=1, col=1,
     )
-    # 均線
     for col, color in [("MA5", "#1f77b4"), ("MA20", "#ff7f0e"), ("MA60", "#9467bd")]:
         if col in df.columns and df[col].notna().any():
             fig.add_trace(
@@ -205,24 +389,24 @@ def _make_candlestick(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
                 ),
                 row=1, col=1,
             )
-    # 布林通道(上下軌帶填色)
     if not bb.empty and bb["upper"].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df["date"], y=bb["upper"],
-                name="BB 上", line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
+                name="BB 上",
+                line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
             ),
             row=1, col=1,
         )
         fig.add_trace(
             go.Scatter(
                 x=df["date"], y=bb["lower"],
-                name="BB 下", line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
+                name="BB 下",
+                line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
                 fill="tonexty", fillcolor="rgba(120,120,120,0.08)",
             ),
             row=1, col=1,
         )
-    # 量(漲紅 / 跌綠)
     vol_colors = [
         "#d62728" if c >= o else "#2ca02c"
         for c, o in zip(df["close"], df["open"])
@@ -310,7 +494,7 @@ def _make_rsi_chart(df: pd.DataFrame, rsi14: pd.Series) -> go.Figure:
 def _page_settings() -> None:
     st.header("⚙️ 設定")
 
-    st.markdown("### 環境變數 (.env)")
+    st.markdown("### 環境變數 (.env / Streamlit Secrets)")
     cols = st.columns(2)
     cols[0].metric(
         "FinMind Token",
@@ -336,12 +520,12 @@ def _page_settings() -> None:
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.caption(
-        "註:此頁僅唯讀。要修改設定請編輯專案根目錄的 `.env` 後重啟 Streamlit。"
+        "註:此頁僅唯讀。要修改設定請編輯專案根目錄的 `.env`(本機)"
+        "或 Streamlit Cloud Settings → Secrets(雲端)後重啟。"
     )
 
 
 def _get_table_counts() -> dict[str, object]:
-    """各表 row 數;表不存在記為 '—'。"""
     db.init_db()
     counts: dict[str, object] = {}
     with db.get_conn() as conn:
@@ -354,16 +538,37 @@ def _get_table_counts() -> dict[str, object]:
     return counts
 
 
-# === 佔位頁 ===
+# === sidebar 資料更新按鈕(每頁都看得到) ===
 
-def _page_short() -> None:
-    st.header("🔥 短線推薦")
-    st.info("📌 T4-B 階段實作。屆時會列出當日符合「量價突破 + 法人買超 + KD 黃金交叉」的個股。")
+def _render_sidebar_update() -> None:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔄 資料更新")
+    if st.sidebar.button("更新 50 檔大型股", use_container_width=True):
+        _run_update_top_50()
 
 
-def _page_long() -> None:
-    st.header("💎 長線口袋名單")
-    st.info("📌 T4-B 階段實作。屆時會列出符合「高 ROE + 低 PE + 連續配息 + 殖利率」的個股。")
+def _run_update_top_50() -> None:
+    """對 TW_TOP_50 跑一次增量抓取(已有的不重抓)。"""
+    today = date.today()
+    today_iso = today.isoformat()
+    start_iso = (today - timedelta(days=90)).isoformat()
+
+    progress = st.progress(0.0, text="準備...")
+    n = len(TW_TOP_50)
+    success = 0
+    for i, (sid, name) in enumerate(TW_TOP_50):
+        progress.progress(
+            (i + 1) / n, text=f"更新 {i + 1}/{n}: {sid} {name}",
+        )
+        try:
+            db.upsert_stocks([{"stock_id": sid, "name": name, "market": "TW"}])
+            fetch_daily_price(sid, start_iso, today_iso)
+            fetch_institutional(sid, start_iso, today_iso)
+            success += 1
+        except Exception:  # noqa: BLE001
+            continue
+    progress.empty()
+    st.toast(f"已更新 {success} / {n} 檔資料", icon="✅")
 
 
 # === 頁尾 ===

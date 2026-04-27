@@ -86,13 +86,17 @@
 
 ### T4-A 階段(2026-04-27 完成)
 
-- [x] T4.1 重寫 `app.py`,加入 sidebar 切換「短線 / 長線 / 個股查詢 / 設定」 — 部分,sidebar 四項齊備,短線/長線為佔位
-- [~] T4.2 短線頁:顯示今日推薦清單,參數可在 sidebar 調整 — 佔位,留 T4-B
-- [~] T4.3 長線頁:顯示口袋名單,附 ROE / PE / 殖利率欄位 — 佔位,留 T4-B
+- [x] T4.1 重寫 `app.py`,加入 sidebar 切換「短線 / 長線 / 個股查詢 / 設定」 — sidebar 四項齊備
 - [x] T4.4 個股查詢頁:輸入股票代碼,顯示 K 線圖(plotly)+ 指標 + 籌碼 — 2026-04-27,K 線+量+均線+布林+KD/MACD/RSI 分頁+摘要
-- [~] T4.5 加入「資料更新」按鈕,觸發增量抓取 — 留 T4-B
 - [x] T4.6 加入手機版 layout 調整(欄位自適應) — 部分,使用 st.columns 自動疊 + use_container_width
 - [x] T4.7 在頁尾加風險警語 — 2026-04-27,每頁底部都看得到
+
+### T4-B 階段(2026-04-27 完成)
+
+- [x] T4.2 短線頁:顯示今日推薦清單,參數可在 sidebar 調整 — 2026-04-27,sidebar 三個參數 + 上方控制列(日期/範圍/執行) + 進度條 + 結果表(可點列跨頁)
+- [x] T4.3 長線頁:顯示口袋名單,附 ROE / PE / 殖利率欄位 — 2026-04-27,因缺資料先做占位頁(策略說明 + 申請 token 連結 + 試用按鈕)
+- [x] T4.5 加入「資料更新」按鈕,觸發增量抓取 — 2026-04-27,sidebar 加「更新 50 檔大型股」按鈕
+- 新增 `src/universe.py`:TW_TOP_50 大型股清單 + load_watchlist()
 - **驗收**:在電腦瀏覽器和 iPhone Safari 都能順暢操作 — T4-A 程式驗收 ✅(5 個 AppTest smoke pass);手機實機驗收待主公測試
 
 ### T4-A 已知小問題
@@ -140,3 +144,5 @@
 - 2026-04-27 觀察:yfinance 抓台股 OHLC 與 TWSE 有差(2330 2024-03-29 yf=776 vs TWSE=779),記錄於 docs/DATA_NOTES.md
 - 2026-04-27 T3.1~T3.3 完成,加 dividend 表 schema,長線選股目前缺資料時防呆回空,78 passed
 - 2026-04-27 T4-A 完成:sidebar 路由 + 個股查詢頁(K 線/MA/BB + KD/MACD/RSI 分頁 + 摘要) + 設定頁(token 狀態+cache 內容);AppTest 5 個 smoke pass
+- 2026-04-27 部署到 Streamlit Cloud,網址 https://jjen-stock-screener.streamlit.app;GitHub repo https://github.com/jjen0206/stock-screener
+- 2026-04-27 T4-B 完成:短線推薦頁 + 長線占位頁 + sidebar「更新 50 檔大型股」按鈕;新增 src/universe.py(50 大型股清單);AppTest 4 個 smoke pass

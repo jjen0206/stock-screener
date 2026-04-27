@@ -2,7 +2,8 @@
 
 [server]
 headless = true
-enableCORS = false
+# 保留 XSRF 防護(enableCORS 預設 true,與 XSRF 相容);
+# 不要設 enableCORS = false,會與 XSRF 衝突 → Streamlit 印 warning。
 enableXsrfProtection = true
 
 [browser]
