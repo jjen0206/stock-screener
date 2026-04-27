@@ -184,6 +184,32 @@ jobs:
 ```
 Windows 用「工作排程器」綁同樣指令。
 
+## Discord Webhook 備援推播
+
+Telegram 偶爾被擋,Discord webhook 是另一個免費備援。
+
+### 1. 拿 webhook URL
+Discord 頻道設定 → 整合 → Webhooks → New Webhook → 複製 URL。
+
+### 2. 寫進 Secrets
+Streamlit Cloud Secrets / 本機 `.env`:
+```
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."
+```
+
+### 3. GitHub Actions
+GitHub Settings → Secrets → 加 `DISCORD_WEBHOOK_URL`,workflow 已有對應 env。
+
+### 4. 並行行為
+`notify_short_picks` / `notify_multi_strategy` 會**同時送 Telegram + Discord**,
+任一個成功 = 整體 OK,GitHub Actions exit 0。可用 `--no-telegram` / `--no-discord`
+個別關閉:
+
+```bash
+python scripts/daily_notify.py --no-telegram   # 只送 Discord
+python scripts/daily_notify.py --no-discord    # 只送 Telegram
+```
+
 ## 常見問題
 
 **Q: Claude Code 改了我不想改的檔案怎麼辦?**

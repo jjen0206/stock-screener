@@ -106,14 +106,34 @@ def format_short_picks(picks: pd.DataFrame, date: str) -> str:
 def notify_short_picks(
     date: str | None = None,
     params: dict | None = None,
-) -> bool:
-    """跑短線選股 → 格式化 → 推播(單策略,向後相容)。"""
+    send_telegram: bool = True,
+    send_discord: bool = True,
+) -> dict[str, bool]:
+    """跑短線選股 → 並行送 Telegram + Discord。
+
+    回 {'telegram': bool, 'discord': bool} — 只包含實際送的通道。
+    若兩者 secrets 都沒設 → 回 {}(空 dict 視為沒推任何東西)。
+    """
     if date is None:
         date = _date.today().isoformat()
     sids = [s for s, _ in TW_TOP_50]
     picks = screen_short(date, params=params, stock_ids=sids)
-    text = format_short_picks(picks, date)
-    return send_telegram_message(text)
+
+    results: dict[str, bool] = {}
+    if send_telegram and config.TELEGRAM_BOT_TOKEN:
+        results["telegram"] = send_telegram_message(
+            format_short_picks(picks, date)
+        )
+    if send_discord and config.DISCORD_WEBHOOK_URL:
+        # lazy import 避免 module import cycle / 拖慢啟動
+        from src.discord_notifier import (
+            format_short_picks_discord,
+            send_discord_message,
+        )
+        results["discord"] = send_discord_message(
+            format_short_picks_discord(picks, date)
+        )
+    return results
 
 
 # === 多策略並行推播 ===
@@ -163,8 +183,13 @@ def notify_multi_strategy(
     date: str | None = None,
     enabled: list[str] | None = None,
     params: dict | None = None,
-) -> bool:
-    """跑多策略 → 聚合 → Telegram 推播。"""
+    send_telegram: bool = True,
+    send_discord: bool = True,
+) -> dict[str, bool]:
+    """跑多策略 → 聚合 → 並行送 Telegram + Discord。
+
+    回 {'telegram': bool, 'discord': bool} — 只包含實際送的通道。
+    """
     from src.strategies import run_all_strategies
     if date is None:
         date = _date.today().isoformat()
@@ -172,8 +197,21 @@ def notify_multi_strategy(
     agg = run_all_strategies(
         date, enabled=enabled, params=params, stock_ids=sids,
     )
-    text = format_multi_strategy_picks(agg, date)
-    return send_telegram_message(text)
+
+    results: dict[str, bool] = {}
+    if send_telegram and config.TELEGRAM_BOT_TOKEN:
+        results["telegram"] = send_telegram_message(
+            format_multi_strategy_picks(agg, date)
+        )
+    if send_discord and config.DISCORD_WEBHOOK_URL:
+        from src.discord_notifier import (
+            format_multi_strategy_picks_discord,
+            send_discord_message,
+        )
+        results["discord"] = send_discord_message(
+            format_multi_strategy_picks_discord(agg, date)
+        )
+    return results
 
 
 __all__ = [

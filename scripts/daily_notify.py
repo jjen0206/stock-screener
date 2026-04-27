@@ -35,7 +35,7 @@ from src.notifier import notify_multi_strategy  # noqa: E402
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="每日短線選股 → Telegram 推播",
+        description="每日短線選股 → Telegram + Discord 並行推播",
     )
     p.add_argument(
         "--date", default=None,
@@ -43,21 +43,42 @@ def main() -> int:
     )
     p.add_argument(
         "--params-json", default=None,
-        help='短線參數 JSON,例 \'{"volume_multiplier": 1.8, "kd_threshold_low": 25}\'',
+        help='短線參數 JSON,例 \'{"volume_multiplier": 1.8}\'',
+    )
+    p.add_argument(
+        "--no-telegram", action="store_true",
+        help="跳過 Telegram 推播",
+    )
+    p.add_argument(
+        "--no-discord", action="store_true",
+        help="跳過 Discord 推播",
     )
     args = p.parse_args()
 
     params = json.loads(args.params_json) if args.params_json else None
 
-    ok = notify_multi_strategy(date=args.date, params=params)
-    if ok:
-        print(f"OK: notify_multi_strategy(date={args.date or 'today'})")
-        return 0
-    print(
-        f"FAIL: notify_multi_strategy(date={args.date or 'today'}) — "
-        "可能缺 TELEGRAM_BOT_TOKEN/CHAT_ID 或網路錯誤,看上面 stderr 詳情"
+    results = notify_multi_strategy(
+        date=args.date, params=params,
+        send_telegram=not args.no_telegram,
+        send_discord=not args.no_discord,
     )
-    return 1
+
+    # Summary 列印每個通道的結果
+    if not results:
+        print(
+            "兩個通道都跳過(沒設 secrets 或 --no-* 旗標關閉) — "
+            "exit 0,什麼都沒推。"
+        )
+        return 0
+
+    parts = []
+    for ch in ("telegram", "discord"):
+        if ch in results:
+            parts.append(f"{ch.title()}: {'✅' if results[ch] else '❌'}")
+    print(f"推播結果 — {' | '.join(parts)}")
+
+    # 任一個成功就視為整體 OK(GitHub Actions 不要因為某個通道掛掉就紅)
+    return 0 if any(results.values()) else 1
 
 
 if __name__ == "__main__":

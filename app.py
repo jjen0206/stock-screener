@@ -1196,6 +1196,34 @@ Streamlit Cloud 沒有定時任務功能,要靠:
             """
         )
 
+    with st.expander("怎麼設定 Discord Webhook(備援推播)?", expanded=False):
+        st.markdown(
+            """
+**Telegram 偶爾會被 GFW / Cloudflare 擋,Discord webhook 是另一個推播管道。**
+
+**1. 建 Discord server(已有可跳過)**
+- Discord 桌機 / 手機 App 左下「+」→ 建立伺服器 → 自訂
+
+**2. 建頻道 webhook(免帳號 / 免 OAuth)**
+- 找一個你想接收推播的頻道(例 `#stock-alerts`)
+- 頻道名稱右邊齒輪 → **整合 / Integrations** → **Webhooks** → **New Webhook**
+- 取名(隨意)→ **複製 Webhook URL**(類似 `https://discord.com/api/webhooks/12345/abcdef...`)
+
+**3. 寫進 Secrets**
+- 雲端:Streamlit Cloud → Settings → Secrets 加一行:
+    ```
+    DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."
+    ```
+- 本機:`.env` 加同樣內容(值不加引號)
+- Reboot app → sidebar 出現「💬 測試 Discord」
+
+**4. 每日排程**
+和 Telegram 同 workflow(`daily-notify.yml`),env 加 `DISCORD_WEBHOOK_URL`,
+GitHub repo Settings → Secrets 也補一份。Telegram + Discord 並行送,
+任一個成功就算 OK,GitHub Actions 不會紅。
+            """
+        )
+
 
 def _get_table_counts() -> dict[str, object]:
     db.init_db()
@@ -1236,8 +1264,16 @@ def _render_sidebar_update() -> None:
             if ok:
                 st.toast("✅ Telegram 已通", icon="✅")
             else:
-                # 不要把 token / API 回應塞進 toast,避免曝露
                 st.toast("❌ Telegram 發送失敗,看 console 日誌", icon="❌")
+
+    if config.DISCORD_WEBHOOK_URL:
+        if st.sidebar.button("💬 測試 Discord", use_container_width=True):
+            from src.discord_notifier import send_discord_message
+            ok = send_discord_message("📊 Discord 通了!")
+            if ok:
+                st.toast("✅ Discord 已通", icon="✅")
+            else:
+                st.toast("❌ Discord 發送失敗,看 console 日誌", icon="❌")
 
 
 # 50 檔大型股抓取的回望天數(過去 1 年,讓回測有足夠歷史)

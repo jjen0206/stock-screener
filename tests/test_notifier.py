@@ -148,8 +148,11 @@ def test_notify_short_picks_calls_send(with_token, monkeypatch):
     )
     fake = Mock(); fake.status_code = 200
     with patch("src.notifier.requests.post", return_value=fake) as m:
-        ok = notifier.notify_short_picks(date="2026-04-25")
-    assert ok is True
+        results = notifier.notify_short_picks(
+            date="2026-04-25", send_discord=False,
+        )
+    # 新版回 dict
+    assert results == {"telegram": True}
     sent_text = m.call_args.kwargs["json"]["text"]
     assert "2330" in sent_text
     assert "2026-04-25" in sent_text
@@ -163,8 +166,10 @@ def test_notify_short_picks_empty_still_sends(with_token, monkeypatch):
     )
     fake = Mock(); fake.status_code = 200
     with patch("src.notifier.requests.post", return_value=fake) as m:
-        ok = notifier.notify_short_picks(date="2026-04-25")
-    assert ok is True
+        results = notifier.notify_short_picks(
+            date="2026-04-25", send_discord=False,
+        )
+    assert results.get("telegram") is True
     sent_text = m.call_args.kwargs["json"]["text"]
     assert "無符合條件" in sent_text
 
@@ -180,7 +185,7 @@ def test_notify_short_picks_uses_universe(with_token, monkeypatch):
     monkeypatch.setattr(notifier, "screen_short", fake_screen)
     fake = Mock(); fake.status_code = 200
     with patch("src.notifier.requests.post", return_value=fake):
-        notifier.notify_short_picks(date="2026-04-25")
+        notifier.notify_short_picks(date="2026-04-25", send_discord=False)
 
     assert captured["stock_ids"] is not None
     assert len(captured["stock_ids"]) == 50  # TW_TOP_50
@@ -190,12 +195,58 @@ def test_notify_short_picks_uses_universe(with_token, monkeypatch):
 def test_notify_short_picks_returns_false_on_send_failure(
     with_token, monkeypatch,
 ):
-    """send 失敗(API 401)→ notify 也回 False。"""
+    """send 失敗(API 401)→ telegram 通道回 False。"""
     monkeypatch.setattr(
         notifier, "screen_short",
         lambda d, params=None, stock_ids=None: pd.DataFrame(),
     )
     fake = Mock(); fake.status_code = 401; fake.text = "Unauthorized"
     with patch("src.notifier.requests.post", return_value=fake):
-        ok = notifier.notify_short_picks(date="2026-04-25")
-    assert ok is False
+        results = notifier.notify_short_picks(
+            date="2026-04-25", send_discord=False,
+        )
+    assert results.get("telegram") is False
+
+
+def test_notify_short_picks_no_secrets_returns_empty(monkeypatch):
+    """兩個通道都沒設 secrets → 回空 dict。"""
+    from src import config as cfg
+    monkeypatch.setattr(cfg, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(cfg, "TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(cfg, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(
+        notifier, "screen_short",
+        lambda d, params=None, stock_ids=None: pd.DataFrame(),
+    )
+    results = notifier.notify_short_picks(date="2026-04-25")
+    assert results == {}
+
+
+def test_notify_short_picks_both_channels_when_both_configured(
+    with_token, monkeypatch,
+):
+    """Telegram + Discord 都有 secrets → 兩個通道都送。
+
+    `requests.post` 是 module-level singleton,patch 會被全域共享 —
+    用一個 patch 觀察兩次呼叫(URL 不同)。
+    """
+    from src import config as cfg
+    monkeypatch.setattr(cfg, "DISCORD_WEBHOOK_URL", "https://discord/webhook")
+
+    monkeypatch.setattr(
+        notifier, "screen_short",
+        lambda d, params=None, stock_ids=None: pd.DataFrame(
+            [_make_pick_row()]
+        ),
+    )
+
+    fake = Mock(); fake.status_code = 200  # Telegram 200 / Discord 也 OK
+    with patch("requests.post", return_value=fake) as m:
+        results = notifier.notify_short_picks(date="2026-04-25")
+
+    assert results == {"telegram": True, "discord": True}
+    assert m.call_count == 2
+    # 兩個 call 應該分別打到 Telegram 與 Discord
+    urls = [c.args[0] for c in m.call_args_list]
+    assert any("telegram" in u for u in urls)
+    assert any("discord" in u for u in urls)

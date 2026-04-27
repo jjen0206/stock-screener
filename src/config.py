@@ -52,6 +52,7 @@ def _get(name: str, default: str = "") -> str:
 FINMIND_TOKEN: str = _get("FINMIND_TOKEN")
 TELEGRAM_BOT_TOKEN: str = _get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID: str = _get("TELEGRAM_CHAT_ID")
+DISCORD_WEBHOOK_URL: str = _get("DISCORD_WEBHOOK_URL")
 DATABASE_PATH: str = _get("DATABASE_PATH", "data/cache.db")
 DEFAULT_MARKET: str = _get("DEFAULT_MARKET", "TW").upper()
 
@@ -84,6 +85,7 @@ __all__ = [
     "FINMIND_TOKEN",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
+    "DISCORD_WEBHOOK_URL",
     "DATABASE_PATH",
     "DEFAULT_MARKET",
 ]
