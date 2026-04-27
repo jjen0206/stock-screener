@@ -31,6 +31,10 @@ from src.market_sentiment import (
 )
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
+from src.strategies import (
+    ALL_STRATEGIES, STRATEGY_LABELS,
+    aggregated_to_dataframe, run_all_strategies,
+)
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
 
@@ -166,8 +170,19 @@ def main() -> None:
 def _page_short() -> None:
     st.header("🔥 短線推薦")
 
+    # sidebar 多策略選擇
+    st.sidebar.markdown("### 啟用策略")
+    label_to_key = {v: k for k, v in STRATEGY_LABELS.items()}
+    selected_labels = st.sidebar.multiselect(
+        "策略",
+        list(STRATEGY_LABELS.values()),
+        default=list(STRATEGY_LABELS.values()),
+        help="多選 = 多策略並行,信號越多 = 越多策略同時看好",
+    )
+    enabled_keys = [label_to_key[lbl] for lbl in selected_labels]
+
     # sidebar 參數區
-    st.sidebar.markdown("### 短線參數")
+    st.sidebar.markdown("### 短線參數(策略 1)")
     vol_mult = st.sidebar.number_input(
         "均量倍數", min_value=1.0, max_value=5.0,
         value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
@@ -233,29 +248,36 @@ def _page_short() -> None:
     if failures:
         st.warning(f"⚠️ {len(failures)} 檔抓取失敗(可能無 token 被限制):{', '.join(failures[:5])}{'...' if len(failures) > 5 else ''}")
 
-    # 跑選股
+    # 跑多策略並行
     params = {
         "volume_multiplier": float(vol_mult),
         "kd_threshold_low": float(kd_low),
         "inst_buy_days": int(inst_days),
     }
-    with st.spinner("執行短線選股邏輯..."):
-        result = screen_short(today_iso, params=params)
+    if not enabled_keys:
+        st.warning("⚠️ 至少要選一套策略")
+        return
+    sids_only = [s for s, _ in universe]
+    with st.spinner(f"執行 {len(enabled_keys)} 套策略並行..."):
+        agg = run_all_strategies(
+            today_iso, enabled=enabled_keys, params=params,
+            stock_ids=sids_only,
+        )
 
-    if result.empty:
+    if not agg:
         st.info(
-            "📭 無符合條件的個股。可放寬參數:降低均量倍數、降低 KD 門檻、減少法人買超天數。"
+            "📭 任一啟用的策略都無入選。可放寬參數或加開更多策略。"
         )
         return
 
-    st.success(f"✅ 共 {len(result)} 檔符合條件(三條件:量價突破 + KD 黃金交叉 + 法人連買)")
+    st.success(
+        f"✅ 共 {len(agg)} 檔被選中"
+        f"({len(enabled_keys)} 套策略並行,按信號數排序)"
+    )
 
-    # 加「符合理由」欄位
-    result_show = result.copy()
-    result_show["符合理由"] = "量價突破 + KD 黃金交叉 + 法人連買"
-
+    df = aggregated_to_dataframe(agg)
     selection = st.dataframe(
-        result_show,
+        df,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -264,7 +286,7 @@ def _page_short() -> None:
 
     if selection and selection.selection.rows:
         idx = selection.selection.rows[0]
-        sid = result.iloc[idx]["stock_id"]
+        sid = df.iloc[idx]["stock_id"]
         st.session_state["query_stock_id"] = sid
         st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
 

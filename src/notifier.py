@@ -107,10 +107,7 @@ def notify_short_picks(
     date: str | None = None,
     params: dict | None = None,
 ) -> bool:
-    """跑短線選股 → 格式化 → 推播。回 True 表整段成功。
-
-    universe 固定用 TW_TOP_50(避免無 token 模式被打太兇)。
-    """
+    """跑短線選股 → 格式化 → 推播(單策略,向後相容)。"""
     if date is None:
         date = _date.today().isoformat()
     sids = [s for s, _ in TW_TOP_50]
@@ -119,8 +116,70 @@ def notify_short_picks(
     return send_telegram_message(text)
 
 
+# === 多策略並行推播 ===
+
+def format_multi_strategy_picks(
+    aggregated: dict[str, dict],
+    date: str,
+) -> str:
+    """把 run_all_strategies 聚合結果包成 Telegram Markdown。
+
+    aggregated: {sid: {"name", "signals": [...], "details": {...}}}
+    優先列 信號數 多的(多策略同時看好 = 信心強)。
+    """
+    if not aggregated:
+        return f"📭 *{date}* 今日無任一策略選中個股"
+
+    # 按信號數降序、stock_id 升序
+    sorted_items = sorted(
+        aggregated.items(),
+        key=lambda kv: (-len(kv[1]["signals"]), kv[0]),
+    )
+    n = len(sorted_items)
+    lines = [
+        f"📈 *{date} 短線推薦* ({n} 檔,多策略並行)",
+        "",
+    ]
+    for i, (sid, info) in enumerate(sorted_items, start=1):
+        # 取 close 顯示
+        close = None
+        for d in info["details"].values():
+            if "close" in d and d["close"]:
+                close = d["close"]
+                break
+        signals = " + ".join(info["signals"])
+        confidence = "🔥" * len(info["signals"])
+        lines.append(f"{i}. *{sid} {info['name']}* {confidence}")
+        if close:
+            lines.append(f"   收 {close:.2f} | 信號: {signals}")
+        else:
+            lines.append(f"   信號: {signals}")
+    lines.append("")
+    lines.append("⚠️ 僅供研究,非投資建議")
+    return "\n".join(lines)
+
+
+def notify_multi_strategy(
+    date: str | None = None,
+    enabled: list[str] | None = None,
+    params: dict | None = None,
+) -> bool:
+    """跑多策略 → 聚合 → Telegram 推播。"""
+    from src.strategies import run_all_strategies
+    if date is None:
+        date = _date.today().isoformat()
+    sids = [s for s, _ in TW_TOP_50]
+    agg = run_all_strategies(
+        date, enabled=enabled, params=params, stock_ids=sids,
+    )
+    text = format_multi_strategy_picks(agg, date)
+    return send_telegram_message(text)
+
+
 __all__ = [
     "send_telegram_message",
     "format_short_picks",
+    "format_multi_strategy_picks",
     "notify_short_picks",
+    "notify_multi_strategy",
 ]

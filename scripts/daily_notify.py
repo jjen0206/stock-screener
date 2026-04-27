@@ -30,7 +30,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from src.notifier import notify_short_picks  # noqa: E402
+from src.notifier import notify_multi_strategy  # noqa: E402
 
 
 def main() -> int:
@@ -49,12 +49,12 @@ def main() -> int:
 
     params = json.loads(args.params_json) if args.params_json else None
 
-    ok = notify_short_picks(date=args.date, params=params)
+    ok = notify_multi_strategy(date=args.date, params=params)
     if ok:
-        print(f"OK: notify_short_picks(date={args.date or 'today'})")
+        print(f"OK: notify_multi_strategy(date={args.date or 'today'})")
         return 0
     print(
-        f"FAIL: notify_short_picks(date={args.date or 'today'}) — "
+        f"FAIL: notify_multi_strategy(date={args.date or 'today'}) — "
         "可能缺 TELEGRAM_BOT_TOKEN/CHAT_ID 或網路錯誤,看上面 stderr 詳情"
     )
     return 1
