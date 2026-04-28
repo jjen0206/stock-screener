@@ -67,3 +67,66 @@ def test_add_without_note_uses_none(tmp_db):
     db.add_to_watchlist("2330")
     items = db.get_watchlist()
     assert items[0]["note"] is None
+
+
+# === UI 整合測試:個股查詢 toggle 第二次新增不該失敗 ===
+# 主公回報 bug:同 session 改 stock_id 後 toggle 失效;root cause = button key 固定。
+# 修法:button key 包含當下 stock_id (key=f"star_toggle_{sid}");每次 render 重查 DB。
+
+def test_query_page_toggle_first_add(monkeypatch, tmp_path):
+    """情境 1:預設 2330,按 toggle → 加入 watchlist。"""
+    from streamlit.testing.v1 import AppTest
+    from src import config as cfg
+    cfg.DATABASE_PATH = str(tmp_path / "ux1.db")
+    db.init_db()
+
+    at = AppTest.from_file("app.py").run(timeout=30)
+    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
+    add_btn = next(
+        (b for b in at.button if "2330" in b.label and "加入" in b.label),
+        None,
+    )
+    assert add_btn is not None
+    add_btn.click().run(timeout=30)
+    assert db.is_in_watchlist("2330")
+
+
+def test_query_page_toggle_second_add_after_changing_stock(monkeypatch, tmp_path):
+    """情境 2(主公的 bug):加入 2330 後改成 2317,該能再加入 — 兩檔都在。"""
+    from streamlit.testing.v1 import AppTest
+    from src import config as cfg
+    cfg.DATABASE_PATH = str(tmp_path / "ux2.db")
+    db.init_db()
+
+    at = AppTest.from_file("app.py").run(timeout=30)
+    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
+    # 第一次加 2330
+    btn = next(b for b in at.button if "2330" in b.label and "加入" in b.label)
+    btn.click().run(timeout=30)
+    # 改成 2317 第二次加
+    at.text_input[0].set_value("2317").run(timeout=30)
+    btn = next(b for b in at.button if "2317" in b.label and "加入" in b.label)
+    btn.click().run(timeout=30)
+    # 兩檔都該在(2330 不該被誤殺)
+    assert db.is_in_watchlist("2317")
+    assert db.is_in_watchlist("2330")
+
+
+def test_query_page_toggle_remove_existing(monkeypatch, tmp_path):
+    """情境 3:對已關注的股票按 toggle → 取消關注。"""
+    from streamlit.testing.v1 import AppTest
+    from src import config as cfg
+    cfg.DATABASE_PATH = str(tmp_path / "ux3.db")
+    db.init_db()
+    db.add_to_watchlist("2330")  # 預先加入
+
+    at = AppTest.from_file("app.py").run(timeout=30)
+    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
+    # 該顯示「已關注 2330」按鈕
+    remove_btn = next(
+        (b for b in at.button if "2330" in b.label and "已關注" in b.label),
+        None,
+    )
+    assert remove_btn is not None, "已在 watchlist 該顯示移除 button"
+    remove_btn.click().run(timeout=30)
+    assert not db.is_in_watchlist("2330")

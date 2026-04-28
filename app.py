@@ -525,37 +525,38 @@ def _has_long_data() -> bool:
 
 def _page_stock_query() -> None:
     st.header("🔍 個股查詢")
+    db.init_db()
 
-    # 短線 / 關注頁可以 push stock_id 進來
+    # 短線 / 關注頁可以 push stock_id 進來當預設
     default_stock = st.session_state.pop("query_stock_id", "2330")
 
-    # ⭐ Toggle 關注按鈕(放標題下,以「上次查詢的」或預設股號為對象)
-    db.init_db()
-    starred = db.is_in_watchlist(default_stock.strip())
-    star_col, info_col = st.columns([1, 5])
-    if star_col.button(
-        f"{'⭐' if starred else '☆'} {'已關注' if starred else '加入關注'}",
-        key="star_toggle",
-        help=f"切換 {default_stock} 是否在關注清單",
-    ):
-        if starred:
-            db.remove_from_watchlist(default_stock.strip())
-            st.toast(f"已從關注移除 {default_stock}", icon="☆")
-        else:
-            db.add_to_watchlist(default_stock.strip())
-            st.toast(f"已加入關注 {default_stock}", icon="⭐")
-        st.rerun()
-    info_col.caption(
-        f"目前關注對象:**{default_stock}**(改下方代號後再切換才會對到新代號)"
-    )
-
+    # 輸入區先(input 在 toggle 之前,toggle 拿到的就是最新值)
     cols = st.columns([2, 2, 2, 1])
-    stock_id = cols[0].text_input("股票代碼", value=default_stock, help="例:2330(台積電)")
+    stock_id = cols[0].text_input(
+        "股票代碼", value=default_stock, help="例:2330(台積電)",
+    )
     today = date.today()
     start = cols[1].date_input("起始日", value=today - timedelta(days=90))
     end = cols[2].date_input("結束日", value=today)
     cols[3].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[3].button("查詢", use_container_width=True, type="primary")
+
+    # ⭐ Toggle 用「當下 input 的 stock_id」,不再卡在 page-load 時的舊值
+    sid_clean = stock_id.strip()
+    if sid_clean:
+        starred = db.is_in_watchlist(sid_clean)
+        toggle_label = (
+            f"⭐ 已關注 {sid_clean}" if starred
+            else f"☆ 加入關注 {sid_clean}"
+        )
+        if st.button(toggle_label, key=f"star_toggle_{sid_clean}"):
+            if starred:
+                db.remove_from_watchlist(sid_clean)
+                st.toast(f"已從關注移除 {sid_clean}", icon="☆")
+            else:
+                db.add_to_watchlist(sid_clean)
+                st.toast(f"已加入關注 {sid_clean}", icon="⭐")
+            st.rerun()
 
     if not submit:
         st.info(
