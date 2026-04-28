@@ -3,11 +3,10 @@ name: Daily Telegram Push
 # 排程 + 手動觸發
 on:
   schedule:
-    # 13:13 UTC = 21:13 Asia/Taipei (台股 13:30 收盤後 7 小時 43 分)
+    # 14:30 UTC = 22:30 Asia/Taipei (台股 13:30 收盤後 9 小時)
     # 週一到週五跑(週末台股不開)
-    # 故意選 :13 不是 :00 — GitHub Actions 整點是全球高峰,
-    # 排程容易延遲 5–30+ 分鐘甚至漏跑;偏移到非整點延遲機率小很多。
-    - cron: "13 13 * * 1-5"
+    # :30 是非整點,避開 GitHub Actions 全球高峰造成的排程延遲
+    - cron: "30 14 * * 1-5"
   workflow_dispatch:
     inputs:
       date:
@@ -19,6 +18,8 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write  # 給後面 commit + push snapshot CSV 用
 
     steps:
       - name: Checkout repo
@@ -42,6 +43,28 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/daily_fetch.py
+
+      # 此 step 會更新 data/twse_snapshot/ CSV 並 commit
+      # (continue-on-error 保證即使失敗推播仍跑;Streamlit Cloud IP 被 TWSE 擋,
+      # GitHub Actions Azure IP 不被擋,所以這裡是 TWSE 資料的主要來源)
+      - name: Fetch TWSE OpenAPI market data (refresh snapshot)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/weekly_market_update.py
+        continue-on-error: true
+
+      - name: Commit snapshot CSV if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/ || true
+          if git diff --quiet --staged; then
+            echo "No snapshot changes to commit"
+          else
+            git commit -m "chore(snapshot): daily TWSE market data refresh [skip ci]"
+            git push
+          fi
 
       - name: Run daily notify
         env:
