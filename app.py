@@ -1078,6 +1078,7 @@ def _page_watchlist() -> None:
         ).fetchall()
         name_map = {r["stock_id"]: r["name"] for r in name_rows}
 
+    target_prices: dict[str, dict | None] = {}  # 留給下方目標價區塊用
     for it in items:
         sid = it["stock_id"]
         # 取最新兩日 close 算漲跌 + 最近 5 日 MA5
@@ -1103,75 +1104,56 @@ def _page_watchlist() -> None:
             )
         else:
             close = prev_close = change_pct = ma5 = None
-
-        # 算目標價(共用 strategies.compute_target_prices 邏輯)
-        tp = compute_target_prices(sid)
+        # 順便算目標價,留給下方區塊用(不塞進表格,保持原樣)
+        target_prices[sid] = compute_target_prices(sid)
         rows.append({
-            "stock_id": sid,
-            "name": name_map.get(sid, "—"),
-            "close": close,
-            "change_pct": change_pct,
-            "target_low": tp["target_low"] if tp else None,
-            "target_high": tp["target_high"] if tp else None,
-            "stop_loss": tp["stop_loss"] if tp else None,
-            "ma5": ma5,
-            "risk_reward": tp["risk_reward"] if tp else None,
-            "atr14": tp["atr14"] if tp else None,
-            "note": it.get("note") or "",
-            "added_at": it["added_at"][:10] if it["added_at"] else "—",
+            "代號": sid,
+            "名稱": name_map.get(sid, "—"),
+            "收盤": f"{close:.2f}" if close else "—",
+            "漲跌%": f"{change_pct:+.2f}%" if change_pct is not None else "—",
+            "MA5": f"{ma5:.2f}" if ma5 else "—",
+            "備註": it.get("note") or "",
+            "加入時間": it["added_at"][:10] if it["added_at"] else "—",
         })
     df = pd.DataFrame(rows)
 
     selection = st.dataframe(
         df, use_container_width=True, hide_index=True,
         on_select="rerun", selection_mode="single-row",
-        # 手機優先看到:代號 / 名稱 / 收盤 / 漲跌 / 目標價 / 停損
-        column_order=[
-            "stock_id", "name", "close", "change_pct",
-            "target_low", "target_high", "stop_loss",
-            "ma5", "risk_reward", "atr14", "note", "added_at",
-        ],
-        column_config={
-            "stock_id": st.column_config.TextColumn("代號", width="small"),
-            "name": st.column_config.TextColumn("名稱", width="small"),
-            "close": st.column_config.NumberColumn(
-                "收盤", format="%.2f", width="small",
-            ),
-            "change_pct": st.column_config.NumberColumn(
-                "漲跌%", format="%+.2f%%", width="small",
-            ),
-            "target_low": st.column_config.NumberColumn(
-                "🎯 保守目標", format="%.2f",
-                help="收盤 + 1.5 × ATR",
-            ),
-            "target_high": st.column_config.NumberColumn(
-                "🚀 積極目標", format="%.2f",
-                help="收盤 + 3 × ATR",
-            ),
-            "stop_loss": st.column_config.NumberColumn(
-                "🛑 停損", format="%.2f",
-                help="收盤 − 1.5 × ATR",
-            ),
-            "ma5": st.column_config.NumberColumn(
-                "MA5", format="%.2f", width="small",
-            ),
-            "risk_reward": st.column_config.NumberColumn(
-                "R:R", format="%.1f", width="small",
-            ),
-            "atr14": st.column_config.NumberColumn(
-                "ATR(14)", format="%.2f", width="small",
-            ),
-            "note": st.column_config.TextColumn("備註"),
-            "added_at": st.column_config.TextColumn(
-                "加入時間", width="small",
-            ),
-        },
     )
     if selection and selection.selection.rows:
         idx = selection.selection.rows[0]
         sid = items[idx]["stock_id"]
         st.session_state["query_stock_id"] = sid
         st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
+
+    # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
+    st.markdown("### 🎯 目標價參考")
+    bullet_lines: list[str] = []
+    for it in items:
+        sid = it["stock_id"]
+        name = name_map.get(sid, "—")
+        tp = target_prices.get(sid)
+        if tp is None:
+            bullet_lines.append(
+                f"- **{sid} {name}**:(cache 缺資料,請按 sidebar 更新)"
+            )
+        else:
+            rr_str = (
+                f" (R:R {tp['risk_reward']:.1f}:1)"
+                if tp.get("risk_reward") else ""
+            )
+            bullet_lines.append(
+                f"- **{sid} {name}**(收 {tp['close']:.2f}):"
+                f"🎯 保守 {tp['target_low']:.2f} / "
+                f"🚀 積極 {tp['target_high']:.2f} / "
+                f"🛑 停損 {tp['stop_loss']:.2f}{rr_str}"
+            )
+    st.markdown("\n".join(bullet_lines))
+    st.caption(
+        "⚠️ 目標價為 ATR(14) 統計參考,**非實際預測**。"
+        "公式:🎯 = close + 1.5×ATR / 🚀 = close + 3×ATR / 🛑 = close − 1.5×ATR"
+    )
 
     st.markdown("---")
     st.markdown("### 編輯")
