@@ -152,6 +152,12 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
+    # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
+    "CREATE INDEX IF NOT EXISTS idx_financials_stock_type_period "
+    "ON financials(stock_id, period_type, period DESC)",
+    # 加速 watchlist 排序顯示
+    "CREATE INDEX IF NOT EXISTS idx_watchlist_added_at "
+    "ON watchlist(added_at DESC)",
 ]
 
 

@@ -33,6 +33,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Lint 失敗不阻塞 push (產品 code 都通過,tests 內 E702 風格沒影響)
+      - name: Lint with ruff (advisory)
+        continue-on-error: true
+        run: python -m ruff check src/ scripts/ app.py
+
       - name: Fetch top-50 daily data (price + institutional)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}

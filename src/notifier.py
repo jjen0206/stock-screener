@@ -16,6 +16,7 @@ Telegram Bot 推播模組。
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date as _date
 
 import pandas as pd
@@ -24,6 +25,11 @@ import requests
 from src import config
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
+
+
+# 推播失敗 retry 設定:總共最多 3 次嘗試,失敗等 1s 再重試
+_MAX_ATTEMPTS = 3
+_RETRY_DELAY_SECS = 1.0
 
 
 logger = logging.getLogger(__name__)
@@ -51,25 +57,40 @@ def send_telegram_message(
         return False
 
     url = TELEGRAM_API_URL.format(token=token)
-    try:
-        r = requests.post(
-            url,
-            json={"chat_id": cid, "text": text, "parse_mode": "Markdown"},
-            timeout=15,
-        )
-    except requests.RequestException as ex:
-        logger.error("[NOTIFIER] 網路錯誤: %s", ex)
-        return False
+    payload = {"chat_id": cid, "text": text, "parse_mode": "Markdown"}
 
-    if r.status_code != 200:
-        # 注意:不要在外層 UI 把 r.text 顯示出來,避免暴露 token
-        logger.error(
-            "[NOTIFIER] Telegram API 回 %d: %s",
-            r.status_code, r.text[:200],
-        )
-        return False
+    # 失敗 retry:網路 exception 或 5xx 才重試,4xx 是 client error 不重試
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+        except requests.RequestException as ex:
+            logger.warning(
+                "[NOTIFIER] 網路錯誤 (attempt %d/%d): %s",
+                attempt + 1, _MAX_ATTEMPTS, ex,
+            )
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_RETRY_DELAY_SECS)
+                continue
+            logger.error("[NOTIFIER] 網路錯誤,放棄重試: %s", ex)
+            return False
 
-    return True
+        if r.status_code == 200:
+            return True
+        if r.status_code < 500:
+            # 4xx (401/400 等)→ client error, 重試也沒用
+            logger.error(
+                "[NOTIFIER] Telegram API client error %d: %s",
+                r.status_code, r.text[:200],
+            )
+            return False
+        # 5xx → 重試
+        logger.warning(
+            "[NOTIFIER] Telegram API %d (attempt %d/%d),retry...",
+            r.status_code, attempt + 1, _MAX_ATTEMPTS,
+        )
+        if attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_RETRY_DELAY_SECS)
+    return False
 
 
 def format_short_picks(picks: pd.DataFrame, date: str) -> str:

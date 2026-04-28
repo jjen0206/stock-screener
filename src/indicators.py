@@ -223,12 +223,12 @@ def rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     avg_g = float(np.mean(gain[1 : n + 1]))
     avg_l = float(np.mean(loss[1 : n + 1]))
 
-    def _rsi_value(g: float, l: float) -> float:
-        if l == 0.0 and g == 0.0:
+    def _rsi_value(g: float, loss_val: float) -> float:
+        if loss_val == 0.0 and g == 0.0:
             return 50.0
-        if l == 0.0:
+        if loss_val == 0.0:
             return 100.0
-        rs = g / l
+        rs = g / loss_val
         return 100.0 - 100.0 / (1.0 + rs)
 
     out[n] = _rsi_value(avg_g, avg_l)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from datetime import date as _date
 
 import pandas as pd
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 DISCORD_BOT_AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
 DISCORD_MSG_LIMIT = 2000
+
+# 推播失敗 retry 設定:總共最多 3 次嘗試,失敗等 1s 再重試
+_MAX_ATTEMPTS = 3
+_RETRY_DELAY_SECS = 1.0
 
 
 def _post_with_fallback(url: str, payload: dict, timeout: int = 15):
@@ -85,17 +90,40 @@ def send_discord_message(
         "username": "Stock Screener",
         "avatar_url": DISCORD_BOT_AVATAR,
     }
-    try:
-        r = _post_with_fallback(url, payload)
-    except Exception as e:  # noqa: BLE001
-        logger.error("[DISCORD] 發送失敗: %s", e)
-        return False
-    if r.status_code in (200, 204):
-        return True
-    # 注意 r.text 不要在 UI 顯示(可能含 webhook URL 的部分資訊)
-    logger.error(
-        "[DISCORD] HTTP %d: %s", r.status_code, str(r.text)[:200],
-    )
+
+    # 失敗 retry:exception 或 5xx 才重試,4xx 直接 fail
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            r = _post_with_fallback(url, payload)
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            logger.warning(
+                "[DISCORD] 發送失敗 (attempt %d/%d): %s",
+                attempt + 1, _MAX_ATTEMPTS, e,
+            )
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_RETRY_DELAY_SECS)
+                continue
+            logger.error("[DISCORD] 放棄重試: %s", last_exc)
+            return False
+
+        if r.status_code in (200, 204):
+            return True
+        if r.status_code < 500:
+            # 4xx → client error 不重試;不要把 r.text 暴露(可能含 webhook 資訊)
+            logger.error(
+                "[DISCORD] HTTP %d: %s",
+                r.status_code, str(r.text)[:200],
+            )
+            return False
+        # 5xx → retry
+        logger.warning(
+            "[DISCORD] HTTP %d (attempt %d/%d),retry...",
+            r.status_code, attempt + 1, _MAX_ATTEMPTS,
+        )
+        if attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_RETRY_DELAY_SECS)
     return False
 
 

@@ -30,9 +30,9 @@ from src.market_sentiment import (
     fetch_vix,
 )
 from src.screener_long import screen_long
-from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
+from src.screener_short import DEFAULT_SHORT_PARAMS
 from src.strategies import (
-    ALL_STRATEGIES, STRATEGY_LABELS,
+    STRATEGY_LABELS,
     aggregated_to_dataframe, run_all_strategies,
 )
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src import config, database as db
-from src.screener_long import DEFAULT_LONG_PARAMS, screen_long
+from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS, screen_short
 
 
