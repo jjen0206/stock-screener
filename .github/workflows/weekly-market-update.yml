@@ -1,0 +1,45 @@
+name: Weekly TWSE Market Update
+
+# 每週六 23:00 UTC = 週日 07:00 台北時區
+# 用 GitHub Actions runner (Azure IP) 抓 TWSE,避開 Streamlit Cloud IP 被擋
+# 抓完把 CSV commit 進 repo,Streamlit Cloud app startup 時讀 CSV 灌進 SQLite
+on:
+  schedule:
+    - cron: "0 23 * * 6"
+  workflow_dispatch:  # 手動觸發,急用時可立刻跑
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # 需要寫 git push
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly TWSE market update
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/weekly_market_update.py
+
+      - name: Commit & push snapshot CSVs (if changed)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/
+          if git diff --staged --quiet; then
+            echo "No changes to snapshot CSVs"
+          else
+            git commit -m "chore(snapshot): weekly TWSE market data update"
+            git push
+          fi
