@@ -136,6 +136,60 @@ def _compute_atr_for_stock(
     return float(last)
 
 
+def compute_target_prices(
+    stock_id: str,
+    target_date: str | None = None,
+) -> dict | None:
+    """對單檔股票算 ATR 與目標價(對外 helper,給 watchlist / UI 共用)。
+
+    流程:
+      1. 從 SQLite 拉近 30 日 daily_prices
+      2. 算 ATR(14)
+      3. 取「截至 target_date 的最後一筆 close」
+      4. 套常數算 target_low / target_high / stop_loss / risk_reward
+
+    target_date 預設今日。資料不足回 None。
+
+    回 {close, atr14, target_low, target_high, stop_loss, risk_reward}
+    """
+    from datetime import date as _date
+    if target_date is None:
+        target_date = _date.today().isoformat()
+
+    atr14 = _compute_atr_for_stock(stock_id, target_date, period=14)
+    if atr14 is None or atr14 <= 0:
+        return None
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT close FROM daily_prices "
+            "WHERE stock_id=? AND date<=? "
+            "ORDER BY date DESC LIMIT 1",
+            (stock_id, target_date),
+        ).fetchone()
+    if row is None or row["close"] is None:
+        return None
+    close = float(row["close"])
+    if close <= 0:
+        return None
+
+    target_low = close + TARGET_LOW_MULT * atr14
+    target_high = close + TARGET_HIGH_MULT * atr14
+    stop_loss = close - STOP_LOSS_MULT * atr14
+    risk = close - stop_loss
+    reward = target_high - close
+    risk_reward = reward / risk if risk > 0 else None
+
+    return {
+        "close": close,
+        "atr14": atr14,
+        "target_low": target_low,
+        "target_high": target_high,
+        "stop_loss": stop_loss,
+        "risk_reward": risk_reward,
+    }
+
+
 # === 策略 2:均線多頭排列 ===
 
 def screen_ma_alignment(
@@ -409,8 +463,12 @@ __all__ = [
     "screen_bias_convergence",
     "run_all_strategies",
     "aggregated_to_dataframe",
+    "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
     "DEFAULT_MA_PARAMS",
     "DEFAULT_BIAS_PARAMS",
+    "TARGET_LOW_MULT",
+    "TARGET_HIGH_MULT",
+    "STOP_LOSS_MULT",
 ]

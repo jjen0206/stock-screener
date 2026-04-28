@@ -208,6 +208,60 @@ def test_enrich_insufficient_data_fills_none(tmp_db, monkeypatch):
     assert enriched.iloc[0]["stop_loss"] is None
 
 
+# === compute_target_prices(對單檔算 ATR + 目標價) ===
+
+def test_compute_target_prices_returns_full_dict(tmp_db):
+    """有足夠資料 → 回完整 dict 含 6 個 key。"""
+    last = _seed_uptrend("UP", "上升", n=67)
+    tp = strat.compute_target_prices("UP", target_date=last)
+    assert tp is not None
+    for key in ["close", "atr14", "target_low", "target_high",
+                "stop_loss", "risk_reward"]:
+        assert key in tp
+    assert tp["atr14"] > 0
+    # 公式驗算
+    assert tp["target_low"] == pytest.approx(
+        tp["close"] + 1.5 * tp["atr14"]
+    )
+    assert tp["target_high"] == pytest.approx(
+        tp["close"] + 3.0 * tp["atr14"]
+    )
+    assert tp["stop_loss"] == pytest.approx(
+        tp["close"] - 1.5 * tp["atr14"]
+    )
+    # R:R = 3 / 1.5 = 2.0
+    assert tp["risk_reward"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_compute_target_prices_no_data_returns_none(tmp_db):
+    """SQLite 沒該股資料 → None。"""
+    tp = strat.compute_target_prices("NONEXIST")
+    assert tp is None
+
+
+def test_compute_target_prices_insufficient_data_returns_none(tmp_db):
+    """資料 < 15 日 → ATR 算不出來 → None。"""
+    db.upsert_stocks([{"stock_id": "X", "name": "X", "market": "TW"}])
+    db.upsert_daily_prices([
+        {
+            "stock_id": "X", "date": _DATES[i],
+            "open": 100, "high": 101, "low": 99, "close": 100,
+            "volume": 1000, "trading_money": None,
+            "trading_turnover": None, "spread": None,
+        }
+        for i in range(10)  # 只 10 日,不足 ATR(14) 的 15 筆
+    ])
+    tp = strat.compute_target_prices("X", target_date=_DATES[9])
+    assert tp is None
+
+
+def test_compute_target_prices_default_date_is_today(tmp_db):
+    """target_date=None → 預設用今日(若 SQLite 沒今日資料則回 None)。"""
+    # 不灌資料,該回 None(今日 cache 沒這檔)
+    tp = strat.compute_target_prices("NEVER_TRADED")
+    assert tp is None
+
+
 # === run_all_strategies 聚合 ===
 
 def test_run_all_strategies_aggregates_signals(tmp_db, monkeypatch):

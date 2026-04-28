@@ -34,7 +34,7 @@ from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS
 from src.strategies import (
     STRATEGY_LABELS,
-    aggregated_to_dataframe, run_all_strategies,
+    aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
 from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
 
@@ -1103,20 +1103,69 @@ def _page_watchlist() -> None:
             )
         else:
             close = prev_close = change_pct = ma5 = None
+
+        # 算目標價(共用 strategies.compute_target_prices 邏輯)
+        tp = compute_target_prices(sid)
         rows.append({
-            "代號": sid,
-            "名稱": name_map.get(sid, "—"),
-            "收盤": f"{close:.2f}" if close else "—",
-            "漲跌%": f"{change_pct:+.2f}%" if change_pct is not None else "—",
-            "MA5": f"{ma5:.2f}" if ma5 else "—",
-            "備註": it.get("note") or "",
-            "加入時間": it["added_at"][:10] if it["added_at"] else "—",
+            "stock_id": sid,
+            "name": name_map.get(sid, "—"),
+            "close": close,
+            "change_pct": change_pct,
+            "target_low": tp["target_low"] if tp else None,
+            "target_high": tp["target_high"] if tp else None,
+            "stop_loss": tp["stop_loss"] if tp else None,
+            "ma5": ma5,
+            "risk_reward": tp["risk_reward"] if tp else None,
+            "atr14": tp["atr14"] if tp else None,
+            "note": it.get("note") or "",
+            "added_at": it["added_at"][:10] if it["added_at"] else "—",
         })
     df = pd.DataFrame(rows)
 
     selection = st.dataframe(
         df, use_container_width=True, hide_index=True,
         on_select="rerun", selection_mode="single-row",
+        # 手機優先看到:代號 / 名稱 / 收盤 / 漲跌 / 目標價 / 停損
+        column_order=[
+            "stock_id", "name", "close", "change_pct",
+            "target_low", "target_high", "stop_loss",
+            "ma5", "risk_reward", "atr14", "note", "added_at",
+        ],
+        column_config={
+            "stock_id": st.column_config.TextColumn("代號", width="small"),
+            "name": st.column_config.TextColumn("名稱", width="small"),
+            "close": st.column_config.NumberColumn(
+                "收盤", format="%.2f", width="small",
+            ),
+            "change_pct": st.column_config.NumberColumn(
+                "漲跌%", format="%+.2f%%", width="small",
+            ),
+            "target_low": st.column_config.NumberColumn(
+                "🎯 保守目標", format="%.2f",
+                help="收盤 + 1.5 × ATR",
+            ),
+            "target_high": st.column_config.NumberColumn(
+                "🚀 積極目標", format="%.2f",
+                help="收盤 + 3 × ATR",
+            ),
+            "stop_loss": st.column_config.NumberColumn(
+                "🛑 停損", format="%.2f",
+                help="收盤 − 1.5 × ATR",
+            ),
+            "ma5": st.column_config.NumberColumn(
+                "MA5", format="%.2f", width="small",
+            ),
+            "risk_reward": st.column_config.NumberColumn(
+                "R:R", format="%.1f", width="small",
+            ),
+            "atr14": st.column_config.NumberColumn(
+                "ATR(14)", format="%.2f", width="small",
+            ),
+            "note": st.column_config.TextColumn("備註"),
+            "added_at": st.column_config.TextColumn(
+                "加入時間", width="small",
+            ),
+        },
     )
     if selection and selection.selection.rows:
         idx = selection.selection.rows[0]
