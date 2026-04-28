@@ -106,3 +106,66 @@ def test_cache_avoids_double_fetch():
         ms.fetch_taiex(days=30)
         ms.fetch_taiex(days=30)
     assert m.call_count == 1
+
+
+# === compute_total_net_per_day(三大法人合計修法) ===
+
+def test_compute_total_net_uses_total_row_only():
+    """raw 一日 6 筆(5 法人 + 1 'total'),該只取 'total' 那筆,
+    避免 sum 全 6 筆 = 2× 真值的舊 bug。"""
+    raw = pd.DataFrame([
+        # 2026-04-20 一日 6 筆
+        {"date": "2026-04-20", "name": "Dealer_self",
+         "buy": 6_000_000_000, "sell": 9_000_000_000},
+        {"date": "2026-04-20", "name": "Foreign_Dealer_Self",
+         "buy": 0, "sell": 0},
+        {"date": "2026-04-20", "name": "Dealer_Hedging",
+         "buy": 25_000_000_000, "sell": 35_000_000_000},
+        {"date": "2026-04-20", "name": "Investment_Trust",
+         "buy": 10_000_000_000, "sell": 7_000_000_000},
+        {"date": "2026-04-20", "name": "Foreign_Investor",
+         "buy": 227_000_000_000, "sell": 291_000_000_000},
+        {"date": "2026-04-20", "name": "total",
+         "buy": 268_000_000_000, "sell": 342_000_000_000},
+    ])
+    out = ms.compute_total_net_per_day(raw)
+    assert len(out) == 1
+    # total: (268e9 - 342e9) / 1e8 = -740 億
+    assert out["net"].iloc[0] == pytest.approx(-740.0, abs=0.5)
+
+
+def test_compute_total_net_fallback_when_no_total_row():
+    """FinMind 漏給 'total' → fallback SUM 5 個分項法人。"""
+    raw = pd.DataFrame([
+        {"date": "2026-04-20", "name": "Foreign_Investor",
+         "buy": 200_000_000_000, "sell": 250_000_000_000},
+        {"date": "2026-04-20", "name": "Investment_Trust",
+         "buy": 10_000_000_000, "sell": 5_000_000_000},
+    ])
+    out = ms.compute_total_net_per_day(raw)
+    assert len(out) == 1
+    # SUM:(210e9 - 255e9) / 1e8 = -450 億
+    assert out["net"].iloc[0] == pytest.approx(-450.0, abs=0.5)
+
+
+def test_compute_total_net_empty_input():
+    out = ms.compute_total_net_per_day(pd.DataFrame())
+    assert out.empty
+    assert list(out.columns) == ["date", "net"]
+
+
+def test_compute_total_net_multiple_days_sorted():
+    """多天該按日期排序回傳。"""
+    raw = pd.DataFrame([
+        {"date": "2026-04-22", "name": "total",
+         "buy": 100_000_000_000, "sell": 80_000_000_000},
+        {"date": "2026-04-20", "name": "total",
+         "buy": 268_000_000_000, "sell": 342_000_000_000},
+        {"date": "2026-04-21", "name": "total",
+         "buy": 150_000_000_000, "sell": 130_000_000_000},
+    ])
+    out = ms.compute_total_net_per_day(raw)
+    assert list(out["date"]) == ["2026-04-20", "2026-04-21", "2026-04-22"]
+    # 第 1 天賣超、第 2 天買超 200 億、第 3 天買超 200 億
+    assert out["net"].iloc[0] == pytest.approx(-740.0, abs=0.5)
+    assert out["net"].iloc[1] == pytest.approx(200.0, abs=0.5)

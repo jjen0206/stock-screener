@@ -24,6 +24,7 @@ from src.data_fetcher import (
 )
 from src.financial_fetcher_free import update_long_term_data_free
 from src.market_sentiment import (
+    compute_total_net_per_day,
     fetch_institutional_total,
     fetch_margin_balance,
     fetch_taiex,
@@ -1055,10 +1056,13 @@ def _page_market_sentiment() -> None:
     if df.empty:
         st.warning("法人總額抓取失敗(FinMind 限流或 dataset 受限)")
     else:
-        # FinMind 此 dataset 每天每法人別一筆,需 pivot 取 buy-sell
-        if "buy" in df.columns and "sell" in df.columns:
-            df["net"] = (df["buy"].fillna(0) - df["sell"].fillna(0)) / 1e8  # 億元
-            agg = df.groupby("date")["net"].sum().reset_index()
+        # 用 helper 抽「每日 total 那筆」,避免把 5 法人 + 'total' 加成 2× 真值
+        agg = compute_total_net_per_day(df)
+        if agg.empty:
+            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
+            st.caption(f"💬 dataset 欄位:{list(df.columns)} — 與預期不同")
+        else:
+            # 紅買綠賣(買超是利多 → 紅)
             colors = ["#d62728" if v > 0 else "#2ca02c" for v in agg["net"]]
             fig = go.Figure(go.Bar(
                 x=agg["date"], y=agg["net"],
@@ -1073,16 +1077,14 @@ def _page_market_sentiment() -> None:
                 showlegend=False,
             )
             st.plotly_chart(fig, use_container_width=True)
-            recent_buy = (agg["net"].tail(5) > 0).sum()
+            recent_buy = int((agg["net"].tail(5) > 0).sum())
+            latest_net = float(agg["net"].iloc[-1])
             st.caption(
-                f"💬 近 5 日法人合計買超天數:**{recent_buy}/5** "
+                f"💬 最新一日 ({agg['date'].iloc[-1]}):"
+                f"{'買超' if latest_net > 0 else '賣超'} "
+                f"{abs(latest_net):.1f} 億 | "
+                f"近 5 日買超天數:**{recent_buy}/5** "
                 f"({'偏多' if recent_buy >= 3 else '偏空'})"
-            )
-        else:
-            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
-            st.caption(
-                f"💬 dataset 欄位:{list(df.columns)} "
-                "— 與預期不同,請看 raw data"
             )
 
     # 融資融券

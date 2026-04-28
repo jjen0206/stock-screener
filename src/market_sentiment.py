@@ -121,9 +121,43 @@ def fetch_vix(days: int = 90) -> pd.DataFrame:
     return _get_cached(f"vix_{days}", _do)
 
 
+def compute_total_net_per_day(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """從 fetch_institutional_total 的 raw 抽出「每日法人合計買賣超」(億元)。
+
+    Raw schema: 每日 6 筆 → 5 個法人(Foreign_Investor / Investment_Trust /
+    Dealer_self / Dealer_Hedging / Foreign_Dealer_Self)+ 1 筆 name='total'(已是加總)。
+
+    取 'total' 那筆即可;若 FinMind 某天漏給 total → fallback 對 5 法人 SUM。
+    回傳 DataFrame[date, net] (淨買超億元,正 = 買超、負 = 賣超)。
+
+    驗證:正確 net 範圍應在 ±1000 億內,典型日約 ±300 億。
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=["date", "net"])
+
+    total_rows = raw_df[raw_df["name"] == "total"]
+    if not total_rows.empty:
+        out = total_rows[["date"]].copy()
+        out["net"] = (
+            total_rows["buy"].fillna(0).values
+            - total_rows["sell"].fillna(0).values
+        ) / 1e8
+    else:
+        # Fallback:FinMind 沒給 'total' 列 → 對 5 個分項法人 SUM
+        agg = raw_df.groupby("date").agg(
+            buy_sum=("buy", "sum"),
+            sell_sum=("sell", "sum"),
+        ).reset_index()
+        out = agg[["date"]].copy()
+        out["net"] = (agg["buy_sum"] - agg["sell_sum"]) / 1e8
+
+    return out.sort_values("date").reset_index(drop=True)
+
+
 __all__ = [
     "fetch_taiex",
     "fetch_institutional_total",
     "fetch_margin_balance",
     "fetch_vix",
+    "compute_total_net_per_day",
 ]
