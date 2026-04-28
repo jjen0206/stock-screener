@@ -492,12 +492,13 @@ def _render_summary(
 ) -> None:
     st.markdown("### 📊 最新指標摘要")
     last = df.iloc[-1]
+    close = float(last["close"])
     prev_close = df["close"].iloc[-2] if len(df) >= 2 else None
-    delta = (last["close"] - prev_close) if prev_close is not None else None
+    delta = (close - prev_close) if prev_close is not None else None
 
     cols = st.columns(4)
     cols[0].metric(
-        "收盤", f"{last['close']:.2f}",
+        "收盤", f"{close:.2f}",
         f"{delta:+.2f}" if delta is not None else None,
     )
     cols[1].metric("K(9)", _fmt(kd_df["K"].iloc[-1]))
@@ -509,6 +510,41 @@ def _render_summary(
     cols[1].metric("MA20", _fmt(df["MA20"].iloc[-1]))
     cols[2].metric("MA60", _fmt(df["MA60"].iloc[-1]))
     cols[3].metric("DIF", _fmt(macd_df["DIF"].iloc[-1]))
+
+    # === 目標價參考(ATR 統計) ===
+    atr_series = ind.atr(df, period=14)
+    atr14 = atr_series.iloc[-1] if not atr_series.empty else None
+    if atr14 and not pd.isna(atr14) and close > 0:
+        from src.strategies import (
+            STOP_LOSS_MULT, TARGET_HIGH_MULT, TARGET_LOW_MULT,
+        )
+        target_low = close + TARGET_LOW_MULT * atr14
+        target_high = close + TARGET_HIGH_MULT * atr14
+        stop_loss = close - STOP_LOSS_MULT * atr14
+        st.markdown("### 🎯 目標價參考(ATR 統計,**非預測**)")
+        cols = st.columns(4)
+        cols[0].metric(
+            "🎯 保守目標",
+            f"{target_low:.2f}",
+            f"+{(target_low - close) / close * 100:.1f}%",
+        )
+        cols[1].metric(
+            "🚀 積極目標",
+            f"{target_high:.2f}",
+            f"+{(target_high - close) / close * 100:.1f}%",
+        )
+        cols[2].metric(
+            "🛑 建議停損",
+            f"{stop_loss:.2f}",
+            f"{(stop_loss - close) / close * 100:.1f}%",
+            delta_color="inverse",
+        )
+        rr = TARGET_HIGH_MULT / STOP_LOSS_MULT  # = 2.0
+        cols[3].metric("⚖️ 風險報酬比", f"{rr:.1f} : 1")
+        st.caption(
+            "⚠️ 目標價為 ATR(14) 波動度估計,**非實際預測**;"
+            "個人交易仍應自行評估。"
+        )
 
 
 def _fmt(v: float) -> str:

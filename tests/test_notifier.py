@@ -138,6 +138,29 @@ def test_format_short_picks_handles_zero_ma_volume():
     assert "0.0x" in msg  # 量比顯示 0.0x
 
 
+def test_format_multi_strategy_telegram_includes_targets():
+    """有 target_low/high/stop_loss 該印「🎯 目標 / 🛑 停損」。"""
+    agg = {
+        "2880": {
+            "name": "華南金", "signals": ["乖離收斂"],
+            "details": {
+                "bias_convergence": {
+                    "close": 33.05,
+                    "target_low": 34.20,
+                    "target_high": 36.50,
+                    "stop_loss": 31.90,
+                    "risk_reward": 2.0,
+                },
+            },
+        },
+    }
+    msg = notifier.format_multi_strategy_picks(agg, "2026-04-28")
+    assert "🎯" in msg and "🛑" in msg
+    assert "34.20" in msg and "36.50" in msg and "31.90" in msg
+    assert "R:R 2.0:1" in msg
+    assert "ATR" in msg  # 風險警語
+
+
 # === notify_short_picks ===
 
 def test_notify_short_picks_calls_send(with_token, monkeypatch):

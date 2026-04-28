@@ -182,12 +182,16 @@ def format_multi_strategy_picks(
         "",
     ]
     for i, (sid, info) in enumerate(sorted_items, start=1):
-        # 取 close 顯示
         close = None
+        target_low = target_high = stop_loss = risk_reward = None
         for d in info["details"].values():
-            if "close" in d and d["close"]:
+            if close is None and d.get("close"):
                 close = d["close"]
-                break
+            if target_low is None and d.get("target_low"):
+                target_low = d.get("target_low")
+                target_high = d.get("target_high")
+                stop_loss = d.get("stop_loss")
+                risk_reward = d.get("risk_reward")
         signals = " + ".join(info["signals"])
         confidence = "🔥" * len(info["signals"])
         lines.append(f"{i}. *{sid} {info['name']}* {confidence}")
@@ -195,8 +199,14 @@ def format_multi_strategy_picks(
             lines.append(f"   收 {close:.2f} | 信號: {signals}")
         else:
             lines.append(f"   信號: {signals}")
+        if target_low and target_high and stop_loss:
+            rr_str = f" (R:R {risk_reward:.1f}:1)" if risk_reward else ""
+            lines.append(
+                f"   🎯 目標 {target_low:.2f}~{target_high:.2f}"
+                f" / 🛑 停損 {stop_loss:.2f}{rr_str}"
+            )
     lines.append("")
-    lines.append("⚠️ 僅供研究,非投資建議")
+    lines.append("⚠️ 僅供研究,非投資建議。目標價為 ATR 統計參考,非實際預測。")
     return "\n".join(lines)
 
 

@@ -45,7 +45,95 @@ def screen_volume_kd(
     stock_ids: list[str] | None = None,
 ) -> pd.DataFrame:
     """策略 1:量價突破 + KD 黃金交叉 + 法人連 N 日買超(原 screen_short 邏輯)。"""
-    return screen_short(date, params=params, stock_ids=stock_ids)
+    df = screen_short(date, params=params, stock_ids=stock_ids)
+    return _enrich_with_targets(df, date)
+
+
+# === 共用:加目標價 / 停損 / R:R ===
+
+# 目標價計算係數(基於 ATR 倍數,純價量統計;非真實預測)
+TARGET_LOW_MULT = 1.5    # 保守目標 = close + 1.5×ATR (約 1 週)
+TARGET_HIGH_MULT = 3.0   # 積極目標 = close + 3.0×ATR (約 2-3 週)
+STOP_LOSS_MULT = 1.5     # 停損 = close − 1.5×ATR
+
+
+def _enrich_with_targets(
+    df: pd.DataFrame,
+    target_date: str,
+    atr_period: int = 14,
+) -> pd.DataFrame:
+    """對選股結果 DataFrame 每行加 5 個欄位:
+      atr14, target_low, target_high, stop_loss, risk_reward
+
+    risk_reward = (target_high - close) / (close - stop_loss)
+                = 3 / 1.5 = 2.0(理想 > 1.5)
+
+    資料不足算 ATR → 5 個欄位都填 None。空 DF 也保證 schema 齊全。
+    """
+    extra_cols = [
+        "atr14", "target_low", "target_high", "stop_loss", "risk_reward",
+    ]
+    if df.empty:
+        # 空 DF 補欄位讓下游 schema 一致
+        for col in extra_cols:
+            if col not in df.columns:
+                df[col] = pd.Series(dtype=float)
+        return df
+
+    rows: list[dict] = []
+    for _, row in df.iterrows():
+        sid = row["stock_id"]
+        close = float(row.get("close") or 0)
+        new_row = row.to_dict()
+        atr14 = _compute_atr_for_stock(sid, target_date, atr_period)
+        if atr14 is not None and atr14 > 0 and close > 0:
+            target_low = close + TARGET_LOW_MULT * atr14
+            target_high = close + TARGET_HIGH_MULT * atr14
+            stop_loss = close - STOP_LOSS_MULT * atr14
+            risk = close - stop_loss
+            reward = target_high - close
+            risk_reward = reward / risk if risk > 0 else None
+            new_row.update({
+                "atr14": atr14,
+                "target_low": target_low,
+                "target_high": target_high,
+                "stop_loss": stop_loss,
+                "risk_reward": risk_reward,
+            })
+        else:
+            for col in extra_cols:
+                new_row[col] = None
+        rows.append(new_row)
+    return pd.DataFrame(rows)
+
+
+def _compute_atr_for_stock(
+    stock_id: str, target_date: str, period: int = 14,
+) -> float | None:
+    """從 SQLite 拉個股近 N 日,算 ATR(period) 取最後一筆。
+
+    需要至少 period+1 筆才有 ATR;否則回 None。
+    """
+    lookback = max(period * 2, 30)  # 留足夠資料給 ATR Wilder 平滑收斂
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT date, high, low, close FROM daily_prices "
+            "WHERE stock_id=? AND date<=? "
+            "ORDER BY date DESC LIMIT ?",
+            (stock_id, target_date, lookback),
+        ).fetchall()
+    if len(rows) < period + 1:
+        return None
+    df = (
+        pd.DataFrame([dict(r) for r in rows])
+        .iloc[::-1]
+        .reset_index(drop=True)
+    )
+    series = ind.atr(df, period=period)
+    last = series.iloc[-1]
+    if pd.isna(last) or last <= 0:
+        return None
+    return float(last)
 
 
 # === 策略 2:均線多頭排列 ===
@@ -65,12 +153,13 @@ def screen_ma_alignment(
         "stock_id", "name", "close",
         "ma5", "ma10", "ma20", "ma60", "matched_at",
     ]
-    return _evaluate_strategy(
+    raw = _evaluate_strategy(
         date, sids, cols,
         evaluate_fn=lambda df, name: _evaluate_ma_alignment(df, name, date),
         lookback_days=p["lookback_days"],
         min_required=65,
     )
+    return _enrich_with_targets(raw, date)
 
 
 def _evaluate_ma_alignment(
@@ -127,12 +216,13 @@ def screen_bias_convergence(
         "stock_id", "name", "close",
         "ma20", "bias_pct", "vol_ratio", "matched_at",
     ]
-    return _evaluate_strategy(
+    raw = _evaluate_strategy(
         date, sids, cols,
         evaluate_fn=lambda df, name: _evaluate_bias(df, name, date, p),
         lookback_days=30,
         min_required=22,  # 20 MA + 5 量均 + 緩衝
     )
+    return _enrich_with_targets(raw, date)
 
 
 def _evaluate_bias(

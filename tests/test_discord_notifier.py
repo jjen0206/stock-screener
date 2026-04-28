@@ -161,3 +161,28 @@ def test_format_multi_strategy_discord_sorted_by_signals():
 def test_format_multi_strategy_discord_empty():
     msg = dn.format_multi_strategy_picks_discord({}, "2026-04-25")
     assert "無任一策略" in msg
+
+
+def test_format_multi_strategy_discord_includes_targets():
+    """有 target_low/high/stop 該印「🎯 目標 ... / 🛑 停損 ...」行。"""
+    agg = {
+        "2880": {
+            "name": "華南金", "signals": ["乖離收斂"],
+            "details": {
+                "bias_convergence": {
+                    "close": 33.05,
+                    "target_low": 34.20,
+                    "target_high": 36.50,
+                    "stop_loss": 31.90,
+                    "risk_reward": 2.0,
+                },
+            },
+        },
+    }
+    msg = dn.format_multi_strategy_picks_discord(agg, "2026-04-28")
+    assert "🎯" in msg and "🛑" in msg
+    assert "34.20" in msg
+    assert "36.50" in msg
+    assert "31.90" in msg
+    assert "R:R 2.0:1" in msg
+    assert "ATR" in msg  # 風險警語提及 ATR

@@ -158,6 +158,56 @@ def test_bias_convergence_low_volume_fails(tmp_db):
     assert df.empty
 
 
+# === 目標價 enrich ===
+
+def test_enrich_adds_target_columns(tmp_db):
+    """ATR 算得出來時,該加 5 個欄位。"""
+    last = _seed_uptrend("UP", "上升", n=67)
+    df = strat.screen_ma_alignment(last, stock_ids=["UP"])
+    assert not df.empty
+    for col in ["atr14", "target_low", "target_high", "stop_loss", "risk_reward"]:
+        assert col in df.columns, f"missing {col}"
+    # 線性遞增 close,ATR 該 > 0
+    row = df.iloc[0]
+    assert row["atr14"] > 0
+    # 公式:target_low = close + 1.5·ATR
+    expected_low = row["close"] + 1.5 * row["atr14"]
+    assert row["target_low"] == pytest.approx(expected_low)
+    expected_high = row["close"] + 3.0 * row["atr14"]
+    assert row["target_high"] == pytest.approx(expected_high)
+    expected_stop = row["close"] - 1.5 * row["atr14"]
+    assert row["stop_loss"] == pytest.approx(expected_stop)
+    # R:R = 3 / 1.5 = 2.0
+    assert row["risk_reward"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_enrich_empty_df_keeps_schema(tmp_db):
+    """空 input → 5 個欄位仍存在(下游不會 KeyError)。"""
+    df = strat.screen_ma_alignment("2024-01-01", stock_ids=["NONEXIST"])
+    for col in ["atr14", "target_low", "target_high", "stop_loss", "risk_reward"]:
+        assert col in df.columns
+
+
+def test_enrich_insufficient_data_fills_none(tmp_db, monkeypatch):
+    """資料不足算 ATR → 5 個欄位是 None。"""
+    # 模擬有入選但 daily_prices 不足 15 日
+    db.upsert_stocks([{"stock_id": "X", "name": "X", "market": "TW"}])
+    db.upsert_daily_prices([{
+        "stock_id": "X", "date": "2024-01-01",
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    fake_picks = pd.DataFrame([{
+        "stock_id": "X", "name": "X", "close": 100,
+        "ma5": 99, "ma10": 98, "ma20": 95, "ma60": 90,
+        "matched_at": "2024-01-01",
+    }])
+    enriched = strat._enrich_with_targets(fake_picks, "2024-01-01")
+    assert enriched.iloc[0]["atr14"] is None
+    assert enriched.iloc[0]["target_low"] is None
+    assert enriched.iloc[0]["stop_loss"] is None
+
+
 # === run_all_strategies 聚合 ===
 
 def test_run_all_strategies_aggregates_signals(tmp_db, monkeypatch):

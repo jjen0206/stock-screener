@@ -268,6 +268,62 @@ def test_bollinger_returns_dataframe_columns():
     assert list(bb.columns) == ["mid", "upper", "lower"]
 
 
+# === ATR ===
+
+def test_atr_handcalc():
+    """已知資料對拍 ATR(3)。
+
+    high=[10,12,11,14], low=[8,9,9,11], close=[9,11,10,13]
+    TR[0] = NaN (沒 prev_close)
+    TR[1] = max(12-9, |12-9|, |9-9|) = 3
+    TR[2] = max(11-9, |11-11|, |9-11|) = 2
+    TR[3] = max(14-11, |14-10|, |11-10|) = 4
+    first ATR (index=3) = mean([3,2,4]) = 3.0
+    """
+    df = pd.DataFrame({
+        "high": [10, 12, 11, 14],
+        "low":  [8, 9, 9, 11],
+        "close":[9, 11, 10, 13],
+    })
+    a = ind.atr(df, period=3)
+    assert pd.isna(a.iloc[0])
+    assert pd.isna(a.iloc[1])
+    assert pd.isna(a.iloc[2])
+    assert a.iloc[3] == pytest.approx(3.0)
+
+
+def test_atr_wilder_smoothing():
+    """5 日 ATR,首期 SMA + 後續 Wilder 平滑驗算。"""
+    df = pd.DataFrame({
+        "high": [10, 12, 11, 14, 13, 15],
+        "low":  [8, 9, 9, 11, 11, 12],
+        "close":[9, 11, 10, 13, 12, 14],
+    })
+    a = ind.atr(df, period=3)
+    # index=3 first = mean(TR[1..3]) = mean(3,2,4) = 3
+    # TR[4] = max(13-11, |13-13|, |11-13|) = 2
+    # ATR[4] = (3·2 + 2)/3 = 8/3 ≈ 2.667
+    assert a.iloc[4] == pytest.approx(2.667, abs=0.01)
+    # TR[5] = max(15-12, |15-12|, |12-12|) = 3
+    # ATR[5] = (2.667·2 + 3)/3 = 8.333/3 ≈ 2.778
+    assert a.iloc[5] == pytest.approx(2.778, abs=0.01)
+
+
+def test_atr_insufficient_data_returns_nan():
+    """資料 < period+1 → 全 NaN。"""
+    df = pd.DataFrame({
+        "high": [10, 12, 11], "low": [8, 9, 9], "close": [9, 11, 10],
+    })
+    a = ind.atr(df, period=14)
+    assert a.isna().all()
+
+
+def test_atr_invalid_period_raises():
+    df = pd.DataFrame({"high": [1], "low": [1], "close": [1]})
+    with pytest.raises(ValueError):
+        ind.atr(df, period=0)
+
+
 # === 共通:不 in-place 修改輸入 ===
 
 def test_indicators_do_not_mutate_input():

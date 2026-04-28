@@ -277,4 +277,53 @@ def bollinger(
     )
 
 
-__all__ = ["sma", "ema", "kd", "macd", "rsi", "bollinger"]
+# === ATR (Average True Range) ===
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """ATR(平均真實波幅,Wilder 平滑)。
+
+    公式:
+        TR_t = max(
+            high_t − low_t,
+            |high_t − close_{t−1}|,
+            |low_t  − close_{t−1}|
+        )
+        首期(第 period 日,index=period):
+            ATR = mean(TR[1..period])           # 用 SMA seed,跳過 TR[0] 的 NaN
+        之後:
+            ATR_t = (ATR_{t−1}·(period−1) + TR_t) / period
+
+    用途:衡量股價日波動度,可推估「合理目標價」與「停損點」。
+    例如: stop_loss = close − 1.5·ATR;target = close + 1.5·ATR (約 1 週合理漲幅)
+
+    資料不足(< period+1 筆)→ 全回 NaN。
+
+    範例:
+        >>> a = atr(df, 14)
+    """
+    if period <= 0:
+        raise ValueError("period 必須 > 0")
+    high, low, close = _need_hlc(df)
+    n = period
+    n_rows = len(close)
+    out = np.full(n_rows, np.nan)
+    if n_rows < n + 1:
+        return pd.Series(out, index=close.index, name="ATR")
+
+    prev_close = close.shift(1)
+    tr_df = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1)
+    tr_arr = tr_df.max(axis=1).to_numpy()
+    # tr_arr[0] 因為 prev_close 是 NaN 而是 NaN,這裡跳過
+
+    first_atr = float(np.nanmean(tr_arr[1 : n + 1]))
+    out[n] = first_atr
+    for i in range(n + 1, n_rows):
+        out[i] = (out[i - 1] * (n - 1) + tr_arr[i]) / n
+    return pd.Series(out, index=close.index, name="ATR")
+
+
+__all__ = ["sma", "ema", "kd", "macd", "rsi", "bollinger", "atr"]
