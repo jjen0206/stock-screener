@@ -415,6 +415,102 @@ def test_fetch_long_term_data_callback_error_does_not_stop_loop(tmp_db):
     assert len(result["failed"]) == 2
 
 
+# === ensure_stock_info(自動補 stocks 表的 name / industry) ===
+
+_FAKE_STOCK_INFO = [
+    {
+        "industry_category": "半導體業", "stock_id": "2330",
+        "stock_name": "台積電", "type": "twse", "date": "2026-04-29",
+    },
+    {
+        "industry_category": "半導體業", "stock_id": "3680",
+        "stock_name": "家登", "type": "tpex", "date": "2026-04-29",
+    },
+    {
+        "industry_category": "金融保險", "stock_id": "2880",
+        "stock_name": "華南金", "type": "twse", "date": "2026-04-29",
+    },
+]
+
+
+@pytest.fixture(autouse=True)
+def reset_stock_info_cache():
+    fetcher._reset_stock_info_cache()
+    yield
+    fetcher._reset_stock_info_cache()
+
+
+def test_ensure_stock_info_returns_existing_from_cache(tmp_db):
+    """SQLite 已有 → 不該打 FinMind。"""
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "industry": "半導體業"},
+    ])
+    with patch.object(fetcher, "_api_call") as m:
+        info = fetcher.ensure_stock_info("2330")
+    assert info["name"] == "台積電"
+    assert info["industry"] == "半導體業"
+    m.assert_not_called()  # 已 cache, 不該打 API
+
+
+def test_ensure_stock_info_fetches_unknown_stock(tmp_db):
+    """SQLite 沒 → 該打 FinMind 抓全市場 + 寫入 stocks 表。"""
+    with patch.object(fetcher, "_api_call", return_value=_FAKE_STOCK_INFO) as m:
+        info = fetcher.ensure_stock_info("3680")
+    assert info["name"] == "家登"
+    assert info["industry"] == "半導體業"
+    m.assert_called_once()  # 確實打了 API
+    # 該寫進 SQLite
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT name, industry, type FROM stocks WHERE stock_id='3680'"
+        ).fetchone()
+    assert row["name"] == "家登"
+    assert row["industry"] == "半導體業"
+    assert row["type"] == "tpex"
+
+
+def test_ensure_stock_info_unknown_id_returns_none(tmp_db):
+    """FinMind 也找不到此代號 → 回 None,不寫垃圾資料進 stocks。"""
+    with patch.object(fetcher, "_api_call", return_value=_FAKE_STOCK_INFO):
+        info = fetcher.ensure_stock_info("9999")
+    assert info is None
+    # 不該寫進 stocks
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM stocks WHERE stock_id='9999'"
+        ).fetchone()
+    assert row is None
+
+
+def test_ensure_stock_info_api_failure_returns_none(tmp_db):
+    """FinMind API 整個失敗 → 回 None,不拋例外。"""
+    with patch.object(
+        fetcher, "_api_call",
+        side_effect=fetcher.FinMindAPIError("network boom"),
+    ):
+        info = fetcher.ensure_stock_info("3680")
+    assert info is None
+
+
+def test_ensure_stock_info_uses_cache_for_repeated_unknown_lookups(tmp_db):
+    """同 process 第二次查未知股 → 不該再打 FinMind(全市場 cache)。"""
+    with patch.object(
+        fetcher, "_api_call", return_value=_FAKE_STOCK_INFO,
+    ) as m:
+        fetcher.ensure_stock_info("3680")  # 第一次:打 API
+        fetcher.ensure_stock_info("3680")  # 第二次:查 SQLite 拿到
+        fetcher.ensure_stock_info("2880")  # 也是未知,但全市場 cache 內有
+    # 全市場 API 只該打一次 (3680 第一次後 cache 有了)
+    # 第三次 2880 查 SQLite 沒,但走全市場 cache 不打 API
+    assert m.call_count == 1
+
+
+def test_ensure_stock_info_empty_or_whitespace_id_returns_none(tmp_db):
+    assert fetcher.ensure_stock_info("") is None
+    assert fetcher.ensure_stock_info("   ") is None
+    assert fetcher.ensure_stock_info(None) is None  # type: ignore
+
+
 # === _missing_ranges 邏輯單元測試 ===
 
 @pytest.mark.parametrize("synced, start, end, expected", [

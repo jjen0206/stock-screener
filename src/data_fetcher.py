@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from typing import Any, Callable
 
@@ -560,9 +561,93 @@ def fetch_long_term_data(
     }
 
 
+# === 個股基本資料 helper(自動補 stocks 表的 name / industry) ===
+
+# 1 小時記憶體 cache,避免每查未知 stock_id 都打全市場 API(4093 筆 ~500KB)
+_stock_info_cache: dict[str, dict] | None = None
+_stock_info_cache_time: float = 0.0
+_STOCK_INFO_TTL_SECS = 3600
+
+
+def _reset_stock_info_cache() -> None:
+    """測試用:清空 stock_info 記憶體 cache。"""
+    global _stock_info_cache, _stock_info_cache_time
+    _stock_info_cache = None
+    _stock_info_cache_time = 0.0
+
+
+def _fetch_all_stock_info() -> dict[str, dict]:
+    """打 FinMind TaiwanStockInfo 拉全市場 (上市+上櫃) 個股基本資料。"""
+    global _stock_info_cache, _stock_info_cache_time
+    now = time.time()
+    if (
+        _stock_info_cache is not None
+        and now - _stock_info_cache_time < _STOCK_INFO_TTL_SECS
+    ):
+        return _stock_info_cache
+    raw = _api_call(DATASET_INFO)
+    _stock_info_cache = {r["stock_id"]: r for r in raw if r.get("stock_id")}
+    _stock_info_cache_time = now
+    logger.info("[STOCK_INFO] 拿到 %d 檔基本資料", len(_stock_info_cache))
+    return _stock_info_cache
+
+
+def ensure_stock_info(stock_id: str) -> dict | None:
+    """確保 stocks 表有此 stock_id 的 name/industry,沒有就抓 FinMind 補。
+
+    回 {stock_id, name, industry} 或 None(FinMind 也找不到此股)。
+
+    流程:
+      1. 查 SQLite stocks 表;有 name 就回
+      2. 沒有 → 抓全市場(含上櫃 tpex,例如 3680 家登)
+      3. 篩出此 sid → upsert_stocks 寫進 cache
+      4. 找不到 → 回 None(可能是無效代號)
+    """
+    sid = stock_id.strip() if stock_id else ""
+    if not sid:
+        return None
+
+    db.init_db()
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT stock_id, name, industry FROM stocks "
+            "WHERE stock_id=? AND name IS NOT NULL AND name != ''",
+            (sid,),
+        ).fetchone()
+    if row:
+        return {
+            "stock_id": row["stock_id"],
+            "name": row["name"],
+            "industry": row["industry"],
+        }
+
+    # SQLite 沒 → 抓 FinMind 全市場
+    try:
+        all_info = _fetch_all_stock_info()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[STOCK_INFO] FinMind 抓全市場失敗: %s", e)
+        return None
+
+    raw = all_info.get(sid)
+    if raw is None:
+        return None
+
+    name = raw.get("stock_name") or ""
+    industry = raw.get("industry_category") or None
+    db.upsert_stocks([{
+        "stock_id": sid,
+        "name": name,
+        "market": "TW",
+        "industry": industry,
+        "type": raw.get("type"),
+    }])
+    return {"stock_id": sid, "name": name, "industry": industry}
+
+
 __all__ = [
     "FinMindAPIError",
     "list_tw_stocks",
+    "ensure_stock_info",
     "fetch_daily_price",
     "fetch_institutional",
     "fetch_monthly_revenue",

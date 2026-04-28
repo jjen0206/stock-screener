@@ -18,6 +18,7 @@ from src import config, database as db, indicators as ind
 from src.backtester import backtest_short
 from src.data_fetcher import (
     FinMindAPIError,
+    ensure_stock_info,
     fetch_daily_price,
     fetch_dividend,
     fetch_institutional,
@@ -544,10 +545,14 @@ def _page_stock_query() -> None:
     # ⭐ Toggle 用「當下 input 的 stock_id」,不再卡在 page-load 時的舊值
     sid_clean = stock_id.strip()
     if sid_clean:
+        # 確保 stocks 表有此股的 name(即使 TW_TOP_50 沒收錄,例如上櫃 3680 家登)
+        info = ensure_stock_info(sid_clean)
+        display_name = info["name"] if info and info.get("name") else "(未知代號)"
+
         starred = db.is_in_watchlist(sid_clean)
         toggle_label = (
-            f"⭐ 已關注 {sid_clean}" if starred
-            else f"☆ 加入關注 {sid_clean}"
+            f"⭐ 已關注 {sid_clean} {display_name}" if starred
+            else f"☆ 加入關注 {sid_clean} {display_name}"
         )
         if st.button(toggle_label, key=f"star_toggle_{sid_clean}"):
             if starred:
@@ -555,7 +560,7 @@ def _page_stock_query() -> None:
                 st.toast(f"已從關注移除 {sid_clean}", icon="☆")
             else:
                 db.add_to_watchlist(sid_clean)
-                st.toast(f"已加入關注 {sid_clean}", icon="⭐")
+                st.toast(f"已加入關注 {sid_clean} {display_name}", icon="⭐")
             st.rerun()
 
     if not submit:
@@ -1078,6 +1083,14 @@ def _page_watchlist() -> None:
             sids,
         ).fetchall()
         name_map = {r["stock_id"]: r["name"] for r in name_rows}
+
+    # 對 name 為 None / 空 / 不存在的股票自動抓 FinMind 補
+    # (例如上櫃股 3680 家登,初始不在 TW_TOP_50)
+    for sid in sids:
+        if not name_map.get(sid):
+            info = ensure_stock_info(sid)
+            if info and info.get("name"):
+                name_map[sid] = info["name"]
 
     target_prices: dict[str, dict | None] = {}  # 留給下方目標價區塊用
     for it in items:
