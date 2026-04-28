@@ -253,6 +253,34 @@ def test_aggregated_to_dataframe_sorted_by_signal_count(tmp_db, monkeypatch):
     assert df.iloc[1]["stock_id"] == "A"
 
 
+def test_aggregated_to_dataframe_includes_target_columns():
+    """DataFrame 要含 target_low / target_high / stop_loss / risk_reward / atr14。"""
+    agg = {
+        "2880": {
+            "name": "華南金", "signals": ["乖離收斂"],
+            "details": {
+                "bias_convergence": {
+                    "close": 33.05,
+                    "atr14": 1.0,
+                    "target_low": 34.55,
+                    "target_high": 36.05,
+                    "stop_loss": 31.55,
+                    "risk_reward": 2.0,
+                },
+            },
+        },
+    }
+    df = strat.aggregated_to_dataframe(agg)
+    for col in ["target_low", "target_high", "stop_loss", "risk_reward", "atr14"]:
+        assert col in df.columns, f"missing {col}"
+    row = df.iloc[0]
+    assert row["target_low"] == pytest.approx(34.55)
+    assert row["target_high"] == pytest.approx(36.05)
+    assert row["stop_loss"] == pytest.approx(31.55)
+    assert row["risk_reward"] == pytest.approx(2.0)
+    assert row["atr14"] == pytest.approx(1.0)
+
+
 def test_run_all_strategies_respects_enabled_filter(tmp_db, monkeypatch):
     """enabled=['volume_kd'] 該只跑那一套,其他兩套不該被叫。"""
     called = []

@@ -377,6 +377,43 @@ def _page_short() -> None:
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
+        # 手機螢幕優先顯示:代號 / 名稱 / 收盤 / 目標價 / 停損
+        # 信號數 / 信號 / R:R / ATR 排後面(向右 scroll 才看得到)
+        column_order=[
+            "stock_id", "name", "close",
+            "target_low", "target_high", "stop_loss",
+            "信號數", "信號", "risk_reward", "atr14",
+        ],
+        column_config={
+            "stock_id": st.column_config.TextColumn("代號", width="small"),
+            "name": st.column_config.TextColumn("名稱", width="small"),
+            "close": st.column_config.NumberColumn(
+                "收盤", format="%.2f", width="small",
+            ),
+            "target_low": st.column_config.NumberColumn(
+                "🎯 保守目標", format="%.2f",
+                help="收盤 + 1.5 × ATR",
+            ),
+            "target_high": st.column_config.NumberColumn(
+                "🚀 積極目標", format="%.2f",
+                help="收盤 + 3 × ATR",
+            ),
+            "stop_loss": st.column_config.NumberColumn(
+                "🛑 停損", format="%.2f",
+                help="收盤 − 1.5 × ATR",
+            ),
+            "信號數": st.column_config.NumberColumn(
+                "🔥", width="small", help="同時被幾套策略選中",
+            ),
+            "信號": st.column_config.TextColumn("策略", width="medium"),
+            "risk_reward": st.column_config.NumberColumn(
+                "R:R", format="%.1f", width="small",
+                help="(積極目標 - 收盤) / (收盤 - 停損)",
+            ),
+            "atr14": st.column_config.NumberColumn(
+                "ATR(14)", format="%.2f", width="small",
+            ),
+        },
     )
 
     if selection and selection.selection.rows:

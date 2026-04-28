@@ -357,29 +357,50 @@ def run_all_strategies(
     return aggregated
 
 
+_AGGREGATED_COLUMNS = [
+    "stock_id", "name", "信號數", "信號",
+    "close", "target_low", "target_high", "stop_loss",
+    "risk_reward", "atr14",
+]
+
+
 def aggregated_to_dataframe(agg: dict[str, dict]) -> pd.DataFrame:
-    """把 run_all_strategies 結果攤平成 DataFrame 給 UI 顯示。"""
+    """把 run_all_strategies 結果攤平成 DataFrame 給 UI 顯示。
+
+    欄位含目標價(target_low / target_high / stop_loss / risk_reward / atr14),
+    從任一策略 details 取得(三個策略的 _enrich_with_targets 都會塞同樣值)。
+    """
     if not agg:
-        return pd.DataFrame(columns=[
-            "stock_id", "name", "信號數", "信號", "close",
-        ])
+        return pd.DataFrame(columns=_AGGREGATED_COLUMNS)
     rows = []
     for sid, info in agg.items():
-        # 從任一 strategy 的 details 取 close(取第一個有的)
         close = None
+        target_low = target_high = stop_loss = risk_reward = atr14 = None
         for d in info["details"].values():
-            if "close" in d and d["close"]:
+            if close is None and d.get("close"):
                 close = d["close"]
-                break
+            if target_low is None and d.get("target_low"):
+                target_low = d.get("target_low")
+                target_high = d.get("target_high")
+                stop_loss = d.get("stop_loss")
+                risk_reward = d.get("risk_reward")
+                atr14 = d.get("atr14")
         rows.append({
             "stock_id": sid,
             "name": info["name"],
             "信號數": len(info["signals"]),
             "信號": " + ".join(info["signals"]),
             "close": close,
+            "target_low": target_low,
+            "target_high": target_high,
+            "stop_loss": stop_loss,
+            "risk_reward": risk_reward,
+            "atr14": atr14,
         })
-    df = pd.DataFrame(rows)
-    return df.sort_values(["信號數", "stock_id"], ascending=[False, True]).reset_index(drop=True)
+    df = pd.DataFrame(rows, columns=_AGGREGATED_COLUMNS)
+    return df.sort_values(
+        ["信號數", "stock_id"], ascending=[False, True],
+    ).reset_index(drop=True)
 
 
 __all__ = [
