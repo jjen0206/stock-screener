@@ -226,28 +226,11 @@ def _load_snapshot_if_needed() -> None:
         return
 
     db.init_db()
-    with db.get_conn() as conn:
-        try:
-            metrics_cnt = conn.execute(
-                "SELECT COUNT(*) AS c FROM daily_metrics"
-            ).fetchone()["c"]
-            fin_cnt = conn.execute(
-                "SELECT COUNT(*) AS c FROM financials WHERE period_type='quarterly'"
-            ).fetchone()["c"]
-            prices_cnt = conn.execute(
-                "SELECT COUNT(*) AS c FROM daily_prices"
-            ).fetchone()["c"]
-            inst_cnt = conn.execute(
-                "SELECT COUNT(*) AS c FROM institutional"
-            ).fetchone()["c"]
-        except sqlite3.OperationalError:
-            metrics_cnt = fin_cnt = prices_cnt = inst_cnt = 0
 
-    # 已有 long-term 資料 + daily_prices 也夠 → 全部跳過
-    # (daily_prices < 1000 行視為「幾乎是空的」,需要 backfill snapshot 灌進來)
-    if metrics_cnt > 0 and fin_cnt > 0 and prices_cnt >= 1000:
-        _snapshot_loaded = True
-        return
+    # 一律 load CSV — 所有 upsert_* 都是 idempotent (PRIMARY KEY ON CONFLICT
+    # DO UPDATE),即使 SQLite 已有資料也安全。之前用 prices_cnt < 1000 等門檻
+    # 會擋住:雲端 daily_fetch 累積幾天 prices_cnt 早就 > 1000,結果 backfill
+    # snapshot 的 90 天歷史完全灌不進去。
 
     # 灌 stocks (含 industry)
     stocks_csv = snapshot_dir / "stocks.csv"
@@ -266,7 +249,7 @@ def _load_snapshot_if_needed() -> None:
 
     # 灌 daily_metrics
     metrics_csv = snapshot_dir / "daily_metrics.csv"
-    if metrics_csv.exists() and metrics_cnt == 0:
+    if metrics_csv.exists():
         df = pd.read_csv(metrics_csv, dtype={"stock_id": str})
         rows = []
         for _, r in df.iterrows():
@@ -283,7 +266,7 @@ def _load_snapshot_if_needed() -> None:
 
     # 灌 financials.quarterly
     fin_csv = snapshot_dir / "financials_quarterly.csv"
-    if fin_csv.exists() and fin_cnt == 0:
+    if fin_csv.exists():
         df = pd.read_csv(fin_csv, dtype={"stock_id": str})
         rows = []
         for _, r in df.iterrows():
@@ -301,7 +284,7 @@ def _load_snapshot_if_needed() -> None:
 
     # 灌 daily_prices(從 backfill_history.py 產生的 snapshot)
     prices_csv = snapshot_dir / "daily_prices.csv"
-    if prices_csv.exists() and prices_cnt < 1000:
+    if prices_csv.exists():
         df = pd.read_csv(prices_csv, dtype={"stock_id": str})
         # 用 to_dict('records') 比 iterrows 快 30-50x(180K 行差很大)
         records = df.to_dict("records")
@@ -315,7 +298,7 @@ def _load_snapshot_if_needed() -> None:
 
     # 灌 institutional(同樣從 backfill snapshot)
     inst_csv = snapshot_dir / "institutional.csv"
-    if inst_csv.exists() and inst_cnt == 0:
+    if inst_csv.exists():
         df = pd.read_csv(inst_csv, dtype={"stock_id": str})
         records = df.to_dict("records")
         for r in records:
@@ -427,14 +410,16 @@ def _page_dashboard() -> None:
 
     # === 2. 今日短線推薦 Top 3 ===
     st.markdown("### 🔥 今日短線推薦 (Top 3)")
-    eligible_sids = db.stocks_with_min_history(60)
+    # 20 天足夠跑量價KD + 乖離率(60+ 天靠 backfill 抓 90 calendar days
+    # 只能換到 ~54 個交易日,湊不到 60 桶)
+    eligible_sids = db.stocks_with_min_history(20)
     if not eligible_sids:
         st.caption(
-            "📭 cache 內沒有任何個股累積 60 天歷史。"
+            "📭 cache 內沒有任何個股累積 20 天歷史。"
             "請按 sidebar『⏳ 一次性回補 90 日歷史』。"
         )
     else:
-        with st.spinner(f"掃描 {len(eligible_sids)} 檔(60+ 天)..."):
+        with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天)..."):
             try:
                 today_iso = date.today().isoformat()
                 agg = run_all_strategies(today_iso, stock_ids=eligible_sids)
@@ -504,11 +489,11 @@ def _page_dashboard() -> None:
     with cols[1]:
         with st.container(border=True):
             st.metric(
-                "可跑全策略個股 (60+ 天)",
-                f"{b['60+']}",
+                "可跑短線策略個股 (20+ 天)",
+                f"{b['60+'] + b['20-59']}",
                 delta=(
-                    f"另有 {b['20-59']} 檔可跑乖離率"
-                    if b["20-59"] else None
+                    f"其中 {b['60+']} 檔可跑全策略 (60+ 天 = MA60)"
+                    if b["60+"] else "(MA60 多頭排列暫不可用)"
                 ),
                 delta_color="off",
             )
@@ -557,21 +542,23 @@ def _page_short() -> None:
 
     # cache 健康度(供下方 selectbox + caption 用)
     health = db.cache_health_summary()
+    # 20+ 天 = 60+ 桶 + 20-59 桶之和(20 天足夠跑量價KD + 乖離率;
+    # ma_alignment 需 MA60 但 backfill 90 calendar days 只能換 ~54 交易日)
     eligible_stocks = health["buckets"]["60+"] + health["buckets"]["20-59"]
 
     # 上方控制列
     cols = st.columns([2, 3, 1])
     target_date = cols[0].date_input("選股日期", value=date.today())
     universe_options = [
-        f"📊 僅有充足歷史的股 ({health['buckets']['60+']} 檔, 60+ 天)",
+        f"📊 充足歷史的股 ({eligible_stocks} 檔, 20+ 天)",
         "全市場 (約 2360 檔, twse + tpex + ETF)",
         "快速:50 檔大型股",
         "我的關注清單",
     ]
-    # 預設「僅有充足歷史」— 全市場大多缺歷史會 0 入選誤導使用者
+    # 預設「充足歷史」— 全市場大多缺歷史會 0 入選誤導使用者
     universe_choice = cols[1].selectbox(
         "選股範圍", universe_options, index=0,
-        help="預設「僅有充足歷史」過濾 cache 還沒回補完的個股。"
+        help="預設「充足歷史」過濾 cache 還沒回補完的個股。"
              "全市場 / TOP 50 走 GH Actions 每日更新的 SQLite 快取。",
     )
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
@@ -673,7 +660,7 @@ def _page_short() -> None:
         if eligible_stocks < 100:
             st.warning(
                 f"⏳ **歷史資料累積中**:目前只有 **{eligible_stocks}** 檔有 20+ 天歷史"
-                f"(策略需要 14-60 天)。\n\n"
+                f"(量價KD 需 14 天 / 乖離率 22 天 / 多頭排列 60 天)。\n\n"
                 "**解法**:\n"
                 "1. 按 sidebar『⏳ 一次性回補 90 日歷史』觸發 backfill\n"
                 "2. 或選「快速:50 檔大型股」(已有完整歷史)\n"
@@ -760,12 +747,13 @@ def _page_short() -> None:
 
 def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
     """根據使用者選擇回傳個股清單;回 None 表示已 render 提示、外層直接 return。"""
-    if choice.startswith("📊 僅有充足歷史"):
-        # 過濾 daily_prices 天數 >= 60 的個股(可跑 MA60 全策略)
-        sids_set = set(db.stocks_with_min_history(60))
+    if choice.startswith("📊 充足歷史") or choice.startswith("📊 僅有充足歷史"):
+        # 過濾 daily_prices 天數 >= 20 的個股(量價KD + 乖離率可跑;
+        # MA60 多頭排列需 60 天,但 backfill 90 calendar days 只到 ~54 交易日)
+        sids_set = set(db.stocks_with_min_history(20))
         if not sids_set:
             st.warning(
-                "目前沒有任何個股累積到 60 天歷史。"
+                "目前沒有任何個股累積到 20 天歷史。"
                 "請按 sidebar『⏳ 一次性回補 90 日歷史』觸發 GH Actions backfill。"
             )
             return None
