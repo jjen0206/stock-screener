@@ -1534,6 +1534,22 @@ def _page_watchlist() -> None:
         )
         return
 
+    # === 雲端 export:把當前 watchlist 下載成 CSV,使用者自行 commit 永久化 ===
+    # 雲端容器沒 git push 權限,在雲端 ☆ 加的東西重啟就沒;這顆按鈕讓使用者把當下狀態
+    # 下載 → 覆蓋進 repo 的 data/twse_snapshot/watchlist.csv → push,讓下次 boot 還原。
+    from src import watchlist_snapshot
+    exp_cols = st.columns([1, 4])
+    exp_cols[0].download_button(
+        "📤 匯出 watchlist.csv",
+        data=watchlist_snapshot.dump_to_string(),
+        file_name=f"watchlist_{date.today().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    exp_cols[1].caption(
+        "下載後請 commit 進 repo (`data/twse_snapshot/watchlist.csv`) 才能跨容器永久保存。"
+    )
+
     # 對歷史不足 15 日的個股(算不出 ATR)自動補 90 天 — 第一次會 spinner
     sids_in_wl = [it["stock_id"] for it in items]
     need_fetch_count = _count_missing_history(sids_in_wl, min_required=15)

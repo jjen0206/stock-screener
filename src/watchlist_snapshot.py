@@ -46,6 +46,32 @@ def _db_inside_project(db_path: str | Path | None) -> bool:
         return False
 
 
+def _watchlist_to_dataframe(db_path: str | Path | None) -> pd.DataFrame:
+    """把 SQLite watchlist 表轉成 schema 對齊的 DataFrame(共用給 dump_to_csv / dump_to_string)。"""
+    from src import database as db
+    items = db.get_watchlist(db_path=db_path)
+    return pd.DataFrame(
+        [
+            {
+                "stock_id": it["stock_id"],
+                "added_at": it["added_at"],
+                "note": it.get("note"),
+            }
+            for it in items
+        ],
+        columns=["stock_id", "added_at", "note"],
+    )
+
+
+def dump_to_string(db_path: str | Path | None = None) -> str:
+    """把 SQLite watchlist 表 dump 成 CSV 字串(in-memory,不寫檔)。
+
+    供 Streamlit 雲端 download_button 用 — 雲端容器無法直接 git push,
+    改讓使用者下載後自行 commit 永久化。不受 SNAPSHOT_DIR / db path guard 限制。
+    """
+    return _watchlist_to_dataframe(db_path).to_csv(index=False)
+
+
 def dump_to_csv(db_path: str | Path | None = None) -> int:
     """把 SQLite watchlist 表 dump 成 watchlist.csv。
 
@@ -65,19 +91,7 @@ def dump_to_csv(db_path: str | Path | None = None) -> int:
     if not _db_inside_project(db_path):
         return -1
 
-    from src import database as db
-    items = db.get_watchlist(db_path=db_path)
-    df = pd.DataFrame(
-        [
-            {
-                "stock_id": it["stock_id"],
-                "added_at": it["added_at"],
-                "note": it.get("note"),
-            }
-            for it in items
-        ],
-        columns=["stock_id", "added_at", "note"],
-    )
+    df = _watchlist_to_dataframe(db_path)
     df.to_csv(WATCHLIST_CSV, index=False)
     return len(df)
 
@@ -124,5 +138,6 @@ __all__ = [
     "SNAPSHOT_DIR",
     "WATCHLIST_CSV",
     "dump_to_csv",
+    "dump_to_string",
     "load_from_csv",
 ]
