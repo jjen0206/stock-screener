@@ -1,0 +1,10 @@
+backfilled_at=2026-04-29T11:31:25+00:00
+git_sha=a99e7a64944e8f29f54377f1882a284a89a9a8e5
+run_id=25100834562
+days_requested=90
+todo=2713
+price_ok=1167
+price_fail=1546
+inst_ok=16
+inst_fail=34
+elapsed_min=129.1
