@@ -50,6 +50,14 @@ DATASET_REVENUE = "TaiwanStockMonthRevenue"
 DATASET_FINANCIAL = "TaiwanStockFinancialStatements"
 DATASET_DIVIDEND = "TaiwanStockDividend"
 
+# 全市場 bulk endpoint(免 token / 一次拿全市場 OHLCV,~30 秒解決 2360 檔)
+TWSE_DAILY_BULK_URL = (
+    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+)
+TPEX_DAILY_BULK_URL = (
+    "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+)
+
 
 class FinMindAPIError(RuntimeError):
     """FinMind API 回傳非 200 status 或網路錯誤時拋出。"""
@@ -561,6 +569,175 @@ def fetch_long_term_data(
     }
 
 
+# === 全市場 bulk OHLCV 抓取 ===
+
+# 60 秒 cache,避免 daily_fetch 跟 daily_notify 重複打
+_bulk_cache: dict[str, pd.DataFrame] = {}
+_bulk_cache_time: dict[str, float] = {}
+_BULK_CACHE_TTL_SECS = 60
+
+
+def _reset_bulk_cache() -> None:
+    """測試用。"""
+    _bulk_cache.clear()
+    _bulk_cache_time.clear()
+
+
+def _parse_roc_date(roc: str) -> str:
+    """民國 'YYYMMDD' (7 字元) → 西元 'YYYY-MM-DD'。例 '1150428' → '2026-04-28'。"""
+    if not roc or len(str(roc)) < 7:
+        return ""
+    s = str(roc)
+    try:
+        year = int(s[:3]) + 1911
+        return f"{year}-{s[3:5]}-{s[5:7]}"
+    except (ValueError, TypeError):
+        return ""
+
+
+def _safe_int(v: Any) -> int | None:
+    """字串 → int;空 / 非數 / 含 '+'-',' → 處理。"""
+    if v is None or v == "":
+        return None
+    try:
+        # TWSE/TPEx 的數字偶有 ',' 千分位
+        return int(float(str(v).replace(",", "")))
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_float_loose(v: Any) -> float | None:
+    """寬鬆轉 float;支援 '+/-' 開頭與 ',' 千分位。"""
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).replace(",", "").replace("+", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_twse_bulk_row(r: dict) -> dict | None:
+    """TWSE STOCK_DAY_ALL 一筆 → daily_prices schema。"""
+    sid = r.get("Code")
+    iso_date = _parse_roc_date(r.get("Date", ""))
+    if not sid or not iso_date:
+        return None
+    return {
+        "stock_id": sid,
+        "date": iso_date,
+        "open": _safe_float_loose(r.get("OpeningPrice")),
+        "high": _safe_float_loose(r.get("HighestPrice")),
+        "low": _safe_float_loose(r.get("LowestPrice")),
+        "close": _safe_float_loose(r.get("ClosingPrice")),
+        "volume": _safe_int(r.get("TradeVolume")),
+        "trading_money": _safe_float_loose(r.get("TradeValue")),
+        "trading_turnover": _safe_int(r.get("Transaction")),
+        "spread": _safe_float_loose(r.get("Change")),
+    }
+
+
+def _normalize_tpex_bulk_row(r: dict) -> dict | None:
+    """TPEx tpex_mainboard_quotes 一筆 → daily_prices schema。
+
+    TPEx 與 TWSE 欄位名不同 — 用 SecuritiesCompanyCode、Open/High/Low/Close。
+    """
+    sid = r.get("SecuritiesCompanyCode")
+    iso_date = _parse_roc_date(r.get("Date", ""))
+    if not sid or not iso_date:
+        return None
+    return {
+        "stock_id": sid,
+        "date": iso_date,
+        "open": _safe_float_loose(r.get("Open")),
+        "high": _safe_float_loose(r.get("High")),
+        "low": _safe_float_loose(r.get("Low")),
+        "close": _safe_float_loose(r.get("Close")),
+        "volume": _safe_int(r.get("TradingShares")),
+        "trading_money": _safe_float_loose(r.get("TransactionAmount")),
+        "trading_turnover": _safe_int(r.get("TransactionNumber")),
+        "spread": _safe_float_loose(r.get("Change")),
+    }
+
+
+def _fetch_bulk_url(url: str, timeout: int = 30) -> list[dict]:
+    """robust GET(requests + httpx fallback);回 JSON list 或 raise。"""
+    # 共用 financial_fetcher_free 的 _twse_get 思路:requests 失敗試 httpx
+    try:
+        from src.financial_fetcher_free import _twse_get
+        # _twse_get 對 openapi.twse.com.tw 有 SSL adapter;對 tpex 也適用(都 verify=False)
+        r = _twse_get(url, timeout=timeout)
+        return r.json()
+    except Exception:
+        pass
+    # fallback 直接 httpx
+    import httpx
+    with httpx.Client(verify=False, timeout=timeout, follow_redirects=True) as c:
+        resp = c.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) stock-screener/1.0",
+            "Accept": "application/json, text/plain, */*",
+        })
+        resp.raise_for_status()
+        return resp.json()
+
+
+def fetch_all_daily_prices_bulk(
+    date_str: str | None = None,
+) -> pd.DataFrame:
+    """一次拿全市場 OHLCV(TWSE + TPEx),約 2360 檔 < 30 秒。
+
+    參數 date_str 預留;實際 endpoint 永遠回「最近一個交易日」資料,
+    傳 date_str 不影響回傳內容(但會分開 cache)。
+
+    回 DataFrame[stock_id, date, open, high, low, close, volume,
+                  trading_money, trading_turnover, spread]
+    任一邊 fetch 失敗,仍回另一邊資料(不擋全流程)。
+    兩邊都失敗回空 DataFrame + log error。
+    """
+    cache_key = date_str or "today"
+    now = time.time()
+    if (
+        cache_key in _bulk_cache
+        and now - _bulk_cache_time.get(cache_key, 0) < _BULK_CACHE_TTL_SECS
+    ):
+        return _bulk_cache[cache_key]
+
+    rows: list[dict] = []
+
+    # TWSE bulk
+    try:
+        twse_raw = _fetch_bulk_url(TWSE_DAILY_BULK_URL)
+        for r in twse_raw:
+            norm = _normalize_twse_bulk_row(r)
+            if norm:
+                rows.append(norm)
+        logger.info("[BULK] TWSE 拿到 %d 筆", sum(1 for _ in twse_raw))
+    except Exception as e:  # noqa: BLE001
+        logger.error("[BULK] TWSE STOCK_DAY_ALL 失敗: %s", e)
+
+    # TPEx bulk
+    try:
+        tpex_raw = _fetch_bulk_url(TPEX_DAILY_BULK_URL)
+        for r in tpex_raw:
+            norm = _normalize_tpex_bulk_row(r)
+            if norm:
+                rows.append(norm)
+        logger.info("[BULK] TPEx 拿到 %d 筆", sum(1 for _ in tpex_raw))
+    except Exception as e:  # noqa: BLE001
+        logger.error("[BULK] TPEx daily quotes 失敗: %s", e)
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "stock_id", "date", "open", "high", "low", "close",
+            "volume", "trading_money", "trading_turnover", "spread",
+        ],
+    )
+    _bulk_cache[cache_key] = df
+    _bulk_cache_time[cache_key] = now
+    logger.info("[BULK] 合併 %d 筆 (TWSE + TPEx)", len(df))
+    return df
+
+
 # === 個股基本資料 helper(自動補 stocks 表的 name / industry) ===
 
 # 1 小時記憶體 cache,避免每查未知 stock_id 都打全市場 API(4093 筆 ~500KB)
@@ -648,6 +825,7 @@ __all__ = [
     "FinMindAPIError",
     "list_tw_stocks",
     "ensure_stock_info",
+    "fetch_all_daily_prices_bulk",
     "fetch_daily_price",
     "fetch_institutional",
     "fetch_monthly_revenue",

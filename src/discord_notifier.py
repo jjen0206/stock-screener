@@ -160,7 +160,14 @@ def format_multi_strategy_picks_discord(
     date: str,
 ) -> str:
     """多策略結果的 Discord 版本(含 🔥 信號數視覺)。"""
-    banner = f"📊 **stock-screener** | {date}"
+    try:
+        d = _date.fromisoformat(date)
+        week_zh = ["一", "二", "三", "四", "五", "六", "日"][d.weekday()]
+        date_label = f"{date} (週{week_zh})"
+    except Exception:  # noqa: BLE001
+        date_label = date
+    banner = f"📊 **stock-screener** | {date_label}"
+
     if not aggregated:
         return f"{banner}\n\n📭 今日無任一策略選中個股"
 

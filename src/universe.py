@@ -104,4 +104,55 @@ def load_watchlist() -> list[tuple[str, str]]:
     return [(s, name_map.get(s, s)) for s in sids]
 
 
-__all__ = ["TW_TOP_50", "WATCHLIST_PATH", "load_watchlist"]
+def get_full_universe(refresh: bool = False) -> list[str]:
+    """取全市場 stock_id list (twse 上市 + tpex 上櫃,含 ETF)。
+
+    流程:
+      1. 預設從 SQLite stocks 表拿(>= 1000 筆視為已 init)
+      2. 不足 / refresh → 打 FinMind TaiwanStockInfo 抓 4093 筆,
+         篩出 type in {twse, tpex} 寫入 stocks 表
+      3. 回所有有 name 的 stock_id
+
+    回 list[str],約 2360 筆(TWSE 1355 + TPEx 1005,含 ETF)。
+    """
+    db.init_db()
+    if not refresh:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT stock_id FROM stocks "
+                "WHERE market='TW' AND name IS NOT NULL AND name != ''"
+            ).fetchall()
+        if len(rows) >= 1000:
+            return [r["stock_id"] for r in rows]
+
+    # 第一次 / refresh:打 FinMind 抓全市場
+    from src.data_fetcher import _fetch_all_stock_info
+    try:
+        all_info = _fetch_all_stock_info()
+    except Exception:
+        return []
+
+    rows_to_upsert = []
+    for sid, raw in all_info.items():
+        type_ = (raw.get("type") or "").lower()
+        if type_ not in ("twse", "tpex"):
+            continue
+        name = raw.get("stock_name") or ""
+        if not name:
+            continue
+        rows_to_upsert.append({
+            "stock_id": sid,
+            "name": name,
+            "industry": raw.get("industry_category"),
+            "type": type_,
+            "market": "TW",
+        })
+    if rows_to_upsert:
+        db.upsert_stocks(rows_to_upsert)
+    return [r["stock_id"] for r in rows_to_upsert]
+
+
+__all__ = [
+    "TW_TOP_50", "WATCHLIST_PATH", "load_watchlist",
+    "get_full_universe",
+]

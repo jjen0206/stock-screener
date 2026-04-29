@@ -1,13 +1,14 @@
-"""排程入口:抓 TW_TOP_50 過去 N 天 daily_price + institutional 進 SQLite cache。
+"""排程入口:全市場 bulk 抓價量 + 對 TOP_50 + watchlist 抓 institutional。
 
-GitHub Actions 用:在 `daily_notify.py` 之前跑,讓 SQLite 有資料可供選股。
+設計:
+- daily_prices 用 TWSE/TPEx bulk endpoint(免 token + 一次拿全市場 ~2360 檔 < 30 秒)
+- institutional **lazy load**:只對 TW_TOP_50 + watchlist (~70 檔) 抓
+  避免 2360 檔 × FinMind = 燒爆 1500/小時 token 限額
+- universe 順手 init(第一次跑會把全市場 stock_id 寫入 stocks 表)
 
-使用範例:
-    python scripts/daily_fetch.py
-    python scripts/daily_fetch.py --days 60
+GitHub Actions runner (Azure IP) 不被 TWSE 擋,所以 bulk endpoint 可用。
 
-Exit code:
-    0 — 跑完(即使部分失敗,主流程仍應繼續到 daily_notify)
+Exit code:0 = 跑完(部分失敗也算)
 """
 from __future__ import annotations
 
@@ -22,81 +23,89 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
-from src.data_fetcher import fetch_daily_price, fetch_institutional  # noqa: E402
-from src.universe import TW_TOP_50  # noqa: E402
+from src.data_fetcher import (  # noqa: E402
+    fetch_all_daily_prices_bulk,
+    fetch_institutional,
+)
+from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E402
 
 
-def run(days: int = 90) -> dict:
-    """主邏輯(可單獨呼叫,方便測試)。
+def run(institutional_days: int = 7) -> dict:
+    """執行 daily 流程:全市場 bulk 價量 + 小批 institutional。
 
-    對 TW_TOP_50 每檔跑 fetch_daily_price + fetch_institutional,
-    印進度到 stdout,**單檔失敗印 warning 不中斷**。
-
-    回傳 {"price_ok": int, "inst_ok": int, "total": int, "days": int}
+    回 {bulk_rows, institutional_ok, institutional_fail, universe_size}
     """
-    today = date.today()
-    today_iso = today.isoformat()
-    start_iso = (today - timedelta(days=days)).isoformat()
+    db.init_db()
+
+    # 1. Init / refresh universe(全市場 ~2360 檔寫入 stocks 表)
+    universe_sids = get_full_universe()
+    print(f"[FETCH] universe = {len(universe_sids)} 檔(twse + tpex)", flush=True)
+
+    # 2. Bulk 抓全市場 OHLCV(< 30 秒)
+    print("[FETCH] bulk 抓全市場 daily_prices...", flush=True)
+    bulk_df = fetch_all_daily_prices_bulk()
+    if bulk_df.empty:
+        print("[FETCH] WARN: bulk 完全失敗,跳過 daily_prices 寫入", flush=True)
+        bulk_rows = 0
+    else:
+        rows = bulk_df.to_dict("records")
+        bulk_rows = db.upsert_daily_prices(rows)
+        print(f"[FETCH] 寫入 {bulk_rows} 筆 daily_prices", flush=True)
+
+    # 3. 對 TW_TOP_50 + watchlist 抓 institutional(lazy load 邏輯)
+    inst_sids = set(s for s, _ in TW_TOP_50)
+    for s, _ in load_watchlist():
+        inst_sids.add(s)
+    inst_sids_list = sorted(inst_sids)
+    today = date.today().isoformat()
+    start = (date.today() - timedelta(days=institutional_days)).isoformat()
 
     print(
-        f"[FETCH] 抓 {len(TW_TOP_50)} 檔過去 {days} 天 "
-        f"({start_iso} ~ {today_iso})",
+        f"[FETCH] 對 {len(inst_sids_list)} 檔(TOP_50 + watchlist)抓 institutional "
+        f"近 {institutional_days} 天...",
         flush=True,
     )
-
-    db.init_db()
-    db.upsert_stocks([
-        {"stock_id": sid, "name": name, "market": "TW"}
-        for sid, name in TW_TOP_50
-    ])
-
-    n = len(TW_TOP_50)
-    price_ok = 0
     inst_ok = 0
-
-    for i, (sid, name) in enumerate(TW_TOP_50, start=1):
-        price_status = "FAIL"
-        inst_status = "FAIL"
+    inst_fail = 0
+    n_inst = len(inst_sids_list)
+    for i, sid in enumerate(inst_sids_list, start=1):
         try:
-            fetch_daily_price(sid, start_iso, today_iso)
-            price_ok += 1
-            price_status = "OK"
-        except Exception as e:  # noqa: BLE001 — 容錯
-            price_status = f"FAIL({type(e).__name__})"
-        try:
-            fetch_institutional(sid, start_iso, today_iso)
+            fetch_institutional(sid, start, today)
             inst_ok += 1
-            inst_status = "OK"
-        except Exception as e:  # noqa: BLE001 — 容錯
-            inst_status = f"FAIL({type(e).__name__})"
-        print(
-            f"[{i}/{n}] {sid} {name} ... price {price_status} | inst {inst_status}",
-            flush=True,
-        )
+        except Exception as e:  # noqa: BLE001
+            inst_fail += 1
+            if i <= 5:  # 只印前 5 個 fail 細節
+                print(
+                    f"[FETCH]   {sid} institutional fail: {type(e).__name__}",
+                    flush=True,
+                )
+        if i % 10 == 0:
+            print(f"[FETCH]   institutional {i}/{n_inst}...", flush=True)
 
     print(
-        f"\ndone. price ok={price_ok}/{n}, inst ok={inst_ok}/{n}",
+        f"\n[FETCH] done. "
+        f"daily_prices={bulk_rows}, "
+        f"institutional ok={inst_ok}/{n_inst}, fail={inst_fail}",
         flush=True,
     )
     return {
-        "price_ok": price_ok,
-        "inst_ok": inst_ok,
-        "total": n,
-        "days": days,
+        "bulk_rows": bulk_rows,
+        "institutional_ok": inst_ok,
+        "institutional_fail": inst_fail,
+        "universe_size": len(universe_sids),
     }
 
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="抓 TW_TOP_50 daily_price + institutional 進 SQLite",
+        description="全市場 bulk 抓價量 + 小批 institutional",
     )
     p.add_argument(
-        "--days", type=int, default=90,
-        help="抓過去 N 天,預設 90(夠 KD/MA 計算)",
+        "--institutional-days", type=int, default=7,
+        help="對 TOP_50 + watchlist 抓近 N 天的法人(預設 7)",
     )
     args = p.parse_args()
-    run(days=args.days)
-    # 即使部分失敗也回 0,主流程(daily_notify)仍應繼續
+    run(institutional_days=args.institutional_days)
     return 0
 
 

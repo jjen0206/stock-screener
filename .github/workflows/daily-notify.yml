@@ -3,10 +3,10 @@ name: Daily Telegram Push
 # 排程 + 手動觸發
 on:
   schedule:
-    # 14:30 UTC = 22:30 Asia/Taipei (台股 13:30 收盤後 9 小時)
+    # 14:13 UTC = 22:13 Asia/Taipei (台股 13:30 收盤後 8 小時 43 分,法人 22:00 公布後)
     # 週一到週五跑(週末台股不開)
-    # :30 是非整點,避開 GitHub Actions 全球高峰造成的排程延遲
-    - cron: "30 14 * * 1-5"
+    # :13 是非整點,避開 GitHub Actions 全球高峰造成的排程延遲
+    - cron: "13 14 * * 1-5"
   workflow_dispatch:
     inputs:
       date:
@@ -17,7 +17,7 @@ on:
 jobs:
   notify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30  # 全市場 ~2360 檔 bulk + institutional ~70 檔,留充裕時間
     permissions:
       contents: write  # 給後面 commit + push snapshot CSV 用
 

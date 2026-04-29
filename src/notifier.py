@@ -177,8 +177,15 @@ def format_multi_strategy_picks(
         key=lambda kv: (-len(kv[1]["signals"]), kv[0]),
     )
     n = len(sorted_items)
+    # 加週幾(資料日期,非執行日期)
+    try:
+        d = _date.fromisoformat(date)
+        week_zh = ["一", "二", "三", "四", "五", "六", "日"][d.weekday()]
+        date_label = f"{date} (週{week_zh})"
+    except Exception:  # noqa: BLE001
+        date_label = date
     lines = [
-        f"📈 *{date} 短線推薦* ({n} 檔,多策略並行)",
+        f"📈 *{date_label} 短線推薦* ({n} 檔,多策略並行)",
         "",
     ]
     for i, (sid, info) in enumerate(sorted_items, start=1):

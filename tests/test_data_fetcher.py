@@ -415,6 +415,110 @@ def test_fetch_long_term_data_callback_error_does_not_stop_loop(tmp_db):
     assert len(result["failed"]) == 2
 
 
+# === fetch_all_daily_prices_bulk(全市場 OHLCV) ===
+
+@pytest.fixture(autouse=True)
+def reset_bulk_cache():
+    fetcher._reset_bulk_cache()
+    yield
+    fetcher._reset_bulk_cache()
+
+
+_FAKE_TWSE_BULK = [
+    {
+        "Date": "1150428", "Code": "2330", "Name": "台積電",
+        "TradeVolume": "57336004", "TradeValue": "128432565716",
+        "OpeningPrice": "2245.00", "HighestPrice": "2280.00",
+        "LowestPrice": "2215.00", "ClosingPrice": "2215.00",
+        "Change": "-50.0000", "Transaction": "308514",
+    },
+    {
+        "Date": "1150428", "Code": "2454", "Name": "聯發科",
+        "TradeVolume": "5000000", "TradeValue": "6000000000",
+        "OpeningPrice": "1200", "HighestPrice": "1220",
+        "LowestPrice": "1190", "ClosingPrice": "1210",
+        "Change": "+10", "Transaction": "20000",
+    },
+]
+_FAKE_TPEX_BULK = [
+    {
+        "Date": "1150428", "SecuritiesCompanyCode": "3680",
+        "CompanyName": "家登", "Close": "850", "Open": "840",
+        "High": "860", "Low": "835", "TradingShares": "1000000",
+        "TransactionAmount": "850000000", "TransactionNumber": "5000",
+        "Change": "+15",
+    },
+]
+
+
+def test_fetch_all_daily_prices_bulk_combines_twse_tpex(monkeypatch):
+    """TWSE + TPEx 兩邊資料合併,日期該轉成西元。"""
+    def fake_get(url, timeout=30):
+        if "STOCK_DAY_ALL" in url:
+            return _FAKE_TWSE_BULK
+        if "tpex_mainboard_quotes" in url:
+            return _FAKE_TPEX_BULK
+        return []
+    monkeypatch.setattr(fetcher, "_fetch_bulk_url", fake_get)
+    df = fetcher.fetch_all_daily_prices_bulk()
+    assert len(df) == 3
+    sids = sorted(df["stock_id"].tolist())
+    assert sids == ["2330", "2454", "3680"]
+    # 民國 1150428 → 西元 2026-04-28
+    assert df["date"].iloc[0] == "2026-04-28"
+    # TPEx schema 也 normalize
+    tpex_row = df[df["stock_id"] == "3680"].iloc[0]
+    assert tpex_row["close"] == 850
+    assert tpex_row["high"] == 860
+
+
+def test_fetch_all_daily_prices_bulk_partial_failure(monkeypatch):
+    """TWSE 失敗 → 仍回 TPEx 資料(部分降級)。"""
+    def fake_get(url, timeout=30):
+        if "STOCK_DAY_ALL" in url:
+            raise RuntimeError("TWSE blocked")
+        return _FAKE_TPEX_BULK
+    monkeypatch.setattr(fetcher, "_fetch_bulk_url", fake_get)
+    df = fetcher.fetch_all_daily_prices_bulk()
+    assert len(df) == 1
+    assert df["stock_id"].iloc[0] == "3680"
+
+
+def test_fetch_all_daily_prices_bulk_both_fail(monkeypatch):
+    def boom(url, timeout=30):
+        raise RuntimeError("both blocked")
+    monkeypatch.setattr(fetcher, "_fetch_bulk_url", boom)
+    df = fetcher.fetch_all_daily_prices_bulk()
+    assert df.empty
+    # 欄位仍齊全
+    assert set(df.columns) >= {
+        "stock_id", "date", "open", "high", "low", "close", "volume",
+    }
+
+
+def test_fetch_all_daily_prices_bulk_uses_60s_cache(monkeypatch):
+    """同 process 60 秒內第二次該走 cache。"""
+    calls = {"n": 0}
+    def fake_get(url, timeout=30):
+        calls["n"] += 1
+        if "STOCK_DAY_ALL" in url:
+            return _FAKE_TWSE_BULK
+        return _FAKE_TPEX_BULK
+    monkeypatch.setattr(fetcher, "_fetch_bulk_url", fake_get)
+    fetcher.fetch_all_daily_prices_bulk()
+    fetcher.fetch_all_daily_prices_bulk()
+    fetcher.fetch_all_daily_prices_bulk()
+    # 第一次:打 2 次(TWSE + TPEx),之後走 cache
+    assert calls["n"] == 2
+
+
+def test_parse_roc_date():
+    assert fetcher._parse_roc_date("1150428") == "2026-04-28"
+    assert fetcher._parse_roc_date("1131231") == "2024-12-31"
+    assert fetcher._parse_roc_date("") == ""
+    assert fetcher._parse_roc_date("badformat") == ""
+
+
 # === ensure_stock_info(自動補 stocks 表的 name / industry) ===
 
 _FAKE_STOCK_INFO = [

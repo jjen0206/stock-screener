@@ -19,6 +19,7 @@ from src.backtester import backtest_short
 from src.data_fetcher import (
     FinMindAPIError,
     ensure_stock_info,
+    fetch_all_daily_prices_bulk,
     fetch_daily_price,
     fetch_dividend,
     fetch_institutional,
@@ -37,7 +38,9 @@ from src.strategies import (
     STRATEGY_LABELS,
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
-from src.universe import TW_TOP_50, WATCHLIST_PATH, load_watchlist
+from src.universe import (
+    TW_TOP_50, WATCHLIST_PATH, get_full_universe, load_watchlist,
+)
 
 
 PAGES = [
@@ -299,8 +302,13 @@ def _page_short() -> None:
     target_date = cols[0].date_input("選股日期", value=date.today())
     universe_choice = cols[1].selectbox(
         "選股範圍",
-        ["快速:50 檔大型股", "我的關注清單", "全部台股 (慢)"],
-        help="無 token 模式抓全台股容易被 FinMind 頻率限制,建議先用 50 檔",
+        [
+            "全市場 (約 2360 檔, twse + tpex + ETF)",
+            "快速:50 檔大型股",
+            "我的關注清單",
+        ],
+        index=0,
+        help="全市場走 SQLite cache,30 秒內掃完;不夠新請先按 sidebar『更新全市場價量』",
     )
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[2].button("執行選股", type="primary", use_container_width=True)
@@ -426,6 +434,25 @@ def _page_short() -> None:
 
 def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
     """根據使用者選擇回傳個股清單;回 None 表示已 render 提示、外層直接 return。"""
+    if choice.startswith("全市場"):
+        # 從 SQLite stocks 拿(全市場 ~2360 檔已 init);沒 init 觸發 get_full_universe
+        sids = get_full_universe()
+        if not sids:
+            st.error(
+                "全市場 universe 還沒 init。"
+                "請按 sidebar『🔄 更新全市場價量』(會順便 init)。"
+            )
+            return None
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT stock_id, name FROM stocks "
+                "WHERE market='TW' AND name IS NOT NULL AND name != ''"
+            ).fetchall()
+        universe = [(r["stock_id"], r["name"]) for r in rows]
+        if not universe:
+            st.error("stocks 表內無資料。請先按 sidebar『🔄 更新全市場價量』。")
+            return None
+        return universe
     if choice == "快速:50 檔大型股":
         return TW_TOP_50
     if choice == "我的關注清單":
@@ -438,23 +465,7 @@ def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
             )
             return None
         return wl
-    # 全部台股
-    st.warning(
-        "⚠️ 無 token 模式抓全部台股會被 FinMind 頻率限制(可能 5–10 分鐘且容易失敗)。"
-        "建議先升級 FinMind token,或改選「快速:50 檔大型股」。"
-    )
-    with db.get_conn() as conn:
-        rows = conn.execute(
-            "SELECT stock_id, name FROM stocks WHERE market='TW'"
-        ).fetchall()
-    universe = [(r["stock_id"], r["name"]) for r in rows]
-    if not universe:
-        st.error(
-            "stocks 表為空。請先在 sidebar 點「🔄 更新今日資料」初始化 50 檔大型股,"
-            "或執行一次「快速:50 檔大型股」選股。"
-        )
-        return None
-    return universe
+    return None
 
 
 # === 長線口袋名單頁(占位) ===
@@ -1457,9 +1468,14 @@ def _get_table_counts() -> dict[str, object]:
 def _render_sidebar_update() -> None:
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔄 資料更新")
-    if st.sidebar.button("更新 50 檔大型股", use_container_width=True):
+    if st.sidebar.button("🔄 更新全市場價量", use_container_width=True):
+        _run_update_full_market()
+    st.sidebar.caption(
+        "📅 全市場 ~2360 檔(twse + tpex)bulk endpoint,30 秒內。"
+    )
+    if st.sidebar.button("更新 50 檔大型股 (1 年)", use_container_width=True):
         _run_update_top_50()
-    st.sidebar.caption("📅 每檔抓過去 1 年(供回測用),首次約 4–6 分鐘。")
+    st.sidebar.caption("📅 每檔抓過去 1 年(供回測用),約 4–6 分鐘。")
     if st.sidebar.button("📊 更新財報資料(免費版)", use_container_width=True):
         _run_update_long_term_free()
     st.sidebar.caption(
@@ -1492,6 +1508,28 @@ def _render_sidebar_update() -> None:
 
 # 50 檔大型股抓取的回望天數(過去 1 年,讓回測有足夠歷史)
 _TOP_50_LOOKBACK_DAYS = 365
+
+
+def _run_update_full_market() -> None:
+    """全市場 bulk 抓 OHLCV(TWSE + TPEx),約 30 秒。
+
+    順手 init universe(把全市場 stock_id 寫入 stocks 表)。
+    """
+    with st.spinner("Init universe(TaiwanStockInfo)..."):
+        sids = get_full_universe()
+    st.toast(f"universe = {len(sids)} 檔", icon="📊")
+
+    progress = st.progress(0.0, text="bulk 抓全市場 OHLCV...")
+    bulk_df = fetch_all_daily_prices_bulk()
+    progress.progress(0.7, text=f"寫入 SQLite ({len(bulk_df)} 筆)...")
+    if not bulk_df.empty:
+        n = db.upsert_daily_prices(bulk_df.to_dict("records"))
+        progress.progress(1.0)
+        progress.empty()
+        st.toast(f"✅ 全市場 {n} 筆寫入", icon="✅")
+    else:
+        progress.empty()
+        st.error("❌ TWSE + TPEx 都失敗 — 雲端 IP 被擋?看 console logs。")
 
 
 def _run_update_top_50() -> None:

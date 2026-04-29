@@ -1,19 +1,19 @@
-"""scripts/daily_fetch.py 單元測試。
+"""scripts/daily_fetch.py 單元測試(全市場 bulk 版)。
 
-scripts/ 不是 package,用 importlib 載入。然後 monkeypatch 該 module 內
-的 fetch_daily_price / fetch_institutional / TW_TOP_50 來避免打網路與全跑 50 檔。
+scripts/ 不是 package,用 importlib 載入。
+mock fetch_all_daily_prices_bulk + get_full_universe + fetch_institutional。
 """
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src import config, database as db
 
 
-# 動態載 scripts/daily_fetch.py 為 module
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "daily_fetch.py"
 _spec = importlib.util.spec_from_file_location("daily_fetch", _SCRIPT)
 daily_fetch = importlib.util.module_from_spec(_spec)
@@ -29,89 +29,98 @@ def tmp_db(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def mini_universe(monkeypatch):
-    """縮小 universe 加速測試。"""
+def mock_universe(monkeypatch):
+    """縮小 universe 到 3 檔加速測試。"""
+    fake_universe = ["2330", "2454", "3680"]
+    monkeypatch.setattr(daily_fetch, "get_full_universe", lambda: fake_universe)
+    # TW_TOP_50 也縮減
     monkeypatch.setattr(daily_fetch, "TW_TOP_50", [
-        ("2330", "台積電"),
-        ("2454", "聯發科"),
-        ("2317", "鴻海"),
+        ("2330", "台積電"), ("2454", "聯發科"),
     ])
+    monkeypatch.setattr(daily_fetch, "load_watchlist", lambda: [])
+    return fake_universe
 
 
-def test_run_calls_both_fetchers_per_stock(tmp_db, mini_universe, monkeypatch, capsys):
-    """每檔該呼叫 daily_price + institutional 各 1 次。"""
-    calls = {"price": [], "inst": []}
+def test_run_calls_bulk_and_writes_daily_prices(tmp_db, mock_universe, monkeypatch):
+    """全市場 bulk 該被叫一次,結果寫進 daily_prices 表。"""
+    fake_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-04-28", "open": 2245, "high": 2280,
+         "low": 2215, "close": 2215, "volume": 57336004,
+         "trading_money": None, "trading_turnover": None, "spread": -50.0},
+        {"stock_id": "2454", "date": "2026-04-28", "open": 1200, "high": 1220,
+         "low": 1190, "close": 1210, "volume": 5000000,
+         "trading_money": None, "trading_turnover": None, "spread": 10.0},
+    ])
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: fake_df)
+    monkeypatch.setattr(daily_fetch, "fetch_institutional",
+                        lambda sid, s, e: None)
 
-    monkeypatch.setattr(
-        daily_fetch, "fetch_daily_price",
-        lambda sid, s, e: calls["price"].append(sid),
-    )
-    monkeypatch.setattr(
-        daily_fetch, "fetch_institutional",
-        lambda sid, s, e: calls["inst"].append(sid),
-    )
-
-    summary = daily_fetch.run(days=7)
-    captured = capsys.readouterr()
-
-    assert calls["price"] == ["2330", "2454", "2317"]
-    assert calls["inst"] == ["2330", "2454", "2317"]
-    assert summary == {"price_ok": 3, "inst_ok": 3, "total": 3, "days": 7}
-    # 每檔該印一行進度
-    assert "[1/3] 2330" in captured.out
-    assert "[3/3] 2317" in captured.out
-    assert "done. price ok=3/3, inst ok=3/3" in captured.out
-
-
-def test_run_continues_on_failure(tmp_db, mini_universe, monkeypatch, capsys):
-    """單檔 raise 不中斷整批,summary 反映實際成功數。"""
-    def fake_price(sid, s, e):
-        if sid == "2454":
-            raise RuntimeError("simulated FinMind 429")
-    def fake_inst(sid, s, e):
-        if sid == "2317":
-            raise RuntimeError("simulated network")
-
-    monkeypatch.setattr(daily_fetch, "fetch_daily_price", fake_price)
-    monkeypatch.setattr(daily_fetch, "fetch_institutional", fake_inst)
-
-    summary = daily_fetch.run(days=7)
-    captured = capsys.readouterr()
-
-    assert summary["price_ok"] == 2  # 2454 失敗
-    assert summary["inst_ok"] == 2  # 2317 失敗
-    assert summary["total"] == 3
-    # 失敗該印 FAIL
-    assert "2454" in captured.out and "FAIL" in captured.out
-    assert "2317" in captured.out
-    assert "done. price ok=2/3, inst ok=2/3" in captured.out
-
-
-def test_run_seeds_stocks_table(tmp_db, mini_universe, monkeypatch):
-    """run() 該把 universe 的個股灌進 stocks 表(讓 screen_short 能找到)。"""
-    monkeypatch.setattr(daily_fetch, "fetch_daily_price", lambda *a: None)
-    monkeypatch.setattr(daily_fetch, "fetch_institutional", lambda *a: None)
-
-    daily_fetch.run(days=7)
+    summary = daily_fetch.run(institutional_days=7)
+    assert summary["bulk_rows"] == 2
+    assert summary["universe_size"] == 3
 
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT stock_id, name FROM stocks WHERE market='TW' ORDER BY stock_id"
+            "SELECT stock_id FROM daily_prices ORDER BY stock_id"
         ).fetchall()
-    sids = [r["stock_id"] for r in rows]
-    assert "2330" in sids and "2454" in sids and "2317" in sids
+    assert sorted(r["stock_id"] for r in rows) == ["2330", "2454"]
+
+
+def test_run_calls_institutional_for_top50_only(tmp_db, mock_universe, monkeypatch):
+    """institutional 只該對 TW_TOP_50 + watchlist 抓,不對全 universe。"""
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    inst_calls = []
+    monkeypatch.setattr(
+        daily_fetch, "fetch_institutional",
+        lambda sid, s, e: inst_calls.append(sid),
+    )
+
+    summary = daily_fetch.run(institutional_days=7)
+    # Mock 的 TW_TOP_50 = 2 檔(2330, 2454),watchlist 0 檔 → 該 2 次
+    assert summary["institutional_ok"] == 2
+    assert sorted(inst_calls) == ["2330", "2454"]
+    # 不該對 3680 抓(在 universe 但不在 TW_TOP_50)
+    assert "3680" not in inst_calls
+
+
+def test_run_continues_on_institutional_failure(tmp_db, mock_universe, monkeypatch):
+    """單檔 institutional 失敗不中斷,記錄到 fail count。"""
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    def fake_inst(sid, s, e):
+        if sid == "2330":
+            raise RuntimeError("FinMind 429")
+    monkeypatch.setattr(daily_fetch, "fetch_institutional", fake_inst)
+
+    summary = daily_fetch.run(institutional_days=7)
+    assert summary["institutional_ok"] == 1  # 只 2454 成功
+    assert summary["institutional_fail"] == 1  # 2330 失敗
+
+
+def test_run_continues_when_bulk_returns_empty(tmp_db, mock_universe, monkeypatch):
+    """bulk 完全失敗 → bulk_rows=0 但 institutional 仍跑。"""
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    monkeypatch.setattr(daily_fetch, "fetch_institutional",
+                        lambda sid, s, e: None)
+
+    summary = daily_fetch.run(institutional_days=7)
+    assert summary["bulk_rows"] == 0
+    assert summary["institutional_ok"] == 2
 
 
 def test_main_returns_zero_even_on_partial_failure(
-    tmp_db, mini_universe, monkeypatch
+    tmp_db, mock_universe, monkeypatch,
 ):
-    """exit code 0 即使部分失敗(GitHub Actions 不要因部分失敗整個紅)。"""
-    def fake_price(sid, s, e):
-        raise RuntimeError("all fail")
-    monkeypatch.setattr(daily_fetch, "fetch_daily_price", fake_price)
-    monkeypatch.setattr(daily_fetch, "fetch_institutional", lambda *a: None)
-    # mock argv 給 argparse
-    monkeypatch.setattr("sys.argv", ["daily_fetch.py", "--days", "7"])
-
+    """exit 0 即使部分失敗(GitHub Actions 不要因部分失敗整個紅)。"""
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    monkeypatch.setattr(
+        daily_fetch, "fetch_institutional",
+        lambda sid, s, e: (_ for _ in ()).throw(RuntimeError("all fail")),
+    )
+    monkeypatch.setattr("sys.argv", ["daily_fetch.py"])
     code = daily_fetch.main()
     assert code == 0
