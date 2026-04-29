@@ -584,6 +584,17 @@ def _page_stock_query() -> None:
                 db.remove_from_watchlist(sid_clean)
                 st.toast(f"已從關注移除 {sid_clean}", icon="☆")
             else:
+                # 加入前先抓 90 天歷史(補 ATR(14) / 漲跌% 等需要歷史的指標)
+                today_iso = date.today().isoformat()
+                start_iso = (date.today() - timedelta(days=90)).isoformat()
+                with st.spinner(f"抓 {sid_clean} 過去 90 日歷史..."):
+                    try:
+                        fetch_daily_price(sid_clean, start_iso, today_iso)
+                    except Exception as e:  # noqa: BLE001
+                        st.warning(
+                            f"歷史抓取失敗 ({type(e).__name__}):仍會加入,"
+                            "但目標價需要 14+ 日歷史可能算不出"
+                        )
                 db.add_to_watchlist(sid_clean)
                 st.toast(f"已加入關注 {sid_clean} {display_name}", icon="⭐")
             st.rerun()
@@ -1085,6 +1096,52 @@ def _make_returns_histogram(trades_df: pd.DataFrame) -> go.Figure:
 
 # === ⭐ 我的關注頁 ===
 
+def _count_missing_history(sids: list[str], min_required: int = 15) -> int:
+    """回有幾檔個股 daily_prices < min_required 筆(需 backfill)。"""
+    if not sids:
+        return 0
+    placeholders = ",".join(["?"] * len(sids))
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT stock_id, COUNT(*) AS c FROM daily_prices "
+            f"WHERE stock_id IN ({placeholders}) GROUP BY stock_id",
+            sids,
+        ).fetchall()
+    cnt_map = {r["stock_id"]: r["c"] for r in rows}
+    return sum(1 for s in sids if cnt_map.get(s, 0) < min_required)
+
+
+def _backfill_watchlist_history(sids: list[str], min_required: int = 15) -> int:
+    """對 watchlist 中 daily_prices 不足 min_required 筆的個股自動補 90 天。
+
+    回實際補了幾檔。預期 cache 命中時是 no-op。
+    """
+    if not sids:
+        return 0
+    placeholders = ",".join(["?"] * len(sids))
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT stock_id, COUNT(*) AS c FROM daily_prices "
+            f"WHERE stock_id IN ({placeholders}) GROUP BY stock_id",
+            sids,
+        ).fetchall()
+    cnt_map = {r["stock_id"]: r["c"] for r in rows}
+    need_fetch = [s for s in sids if cnt_map.get(s, 0) < min_required]
+    if not need_fetch:
+        return 0
+
+    today_iso = date.today().isoformat()
+    start_iso = (date.today() - timedelta(days=90)).isoformat()
+    success = 0
+    for sid in need_fetch:
+        try:
+            fetch_daily_price(sid, start_iso, today_iso)
+            success += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return success
+
+
 def _page_watchlist() -> None:
     st.header("⭐ 我的關注")
     db.init_db()
@@ -1096,6 +1153,15 @@ def _page_watchlist() -> None:
             "到「個股查詢」頁,輸入代號查詢後按 ☆ 圖示即可加入關注。"
         )
         return
+
+    # 對歷史不足 15 日的個股(算不出 ATR)自動補 90 天 — 第一次會 spinner
+    sids_in_wl = [it["stock_id"] for it in items]
+    need_fetch_count = _count_missing_history(sids_in_wl, min_required=15)
+    if need_fetch_count > 0:
+        with st.spinner(f"補 {need_fetch_count} 檔歷史中(首次較慢)..."):
+            backfilled = _backfill_watchlist_history(sids_in_wl, min_required=15)
+        if backfilled > 0:
+            st.toast(f"已補 {backfilled} 檔 90 日歷史", icon="📅")
 
     # 把關注清單組成 DataFrame:代號 / 名稱 / 收盤 / 漲跌% / MA5 / 備註
     rows = []

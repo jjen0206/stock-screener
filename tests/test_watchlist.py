@@ -112,6 +112,39 @@ def test_query_page_toggle_second_add_after_changing_stock(monkeypatch, tmp_path
     assert db.is_in_watchlist("2330")
 
 
+def test_backfill_watchlist_history_skips_full_cache(monkeypatch, tmp_path):
+    """daily_prices 已 >= 15 筆的個股不該被 fetch。"""
+    from src import config as cfg
+    cfg.DATABASE_PATH = str(tmp_path / "bf.db")
+    db.init_db()
+    db.upsert_stocks([{"stock_id": "FULL", "name": "X", "market": "TW"}])
+    # 灌 20 筆假 daily_prices
+    db.upsert_daily_prices([
+        {"stock_id": "FULL", "date": f"2024-01-{i:02d}", "open": 100,
+         "high": 101, "low": 99, "close": 100, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None}
+        for i in range(1, 21)
+    ])
+    # 模擬 backfill helper(import 從 app.py)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "app", tmp_path.parent.parent.parent / "app.py"
+    )
+    # 直接用 backfill 邏輯:對 daily_prices < 15 的補
+    fetch_calls = []
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_daily_price",
+        lambda sid, s, e: fetch_calls.append(sid),
+    )
+    # 只 import 函式,不跑整個 app
+    import sys
+    sys.path.insert(0, str(tmp_path.parent.parent.parent))
+    from app import _backfill_watchlist_history
+    n = _backfill_watchlist_history(["FULL"], min_required=15)
+    assert n == 0
+    assert fetch_calls == []
+
+
 def test_query_page_toggle_remove_existing(monkeypatch, tmp_path):
     """情境 3:對已關注的股票按 toggle → 取消關注。"""
     from streamlit.testing.v1 import AppTest

@@ -25,6 +25,7 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     fetch_all_daily_prices_bulk,
+    fetch_daily_price,
     fetch_institutional,
 )
 from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E402
@@ -82,16 +83,51 @@ def run(institutional_days: int = 7) -> dict:
         if i % 10 == 0:
             print(f"[FETCH]   institutional {i}/{n_inst}...", flush=True)
 
+    # 4. 對 watchlist 個股抓 90 天 daily_price 歷史(補 ATR/漲跌% 等需要歷史的指標)
+    #    這個與 bulk 的差別:bulk 只給「當日 1 筆」,90 天才足以算 ATR(14)
+    wl_sids = [s for s, _ in load_watchlist()]
+    hist_ok = 0
+    hist_fail = 0
+    if wl_sids:
+        hist_start = (date.today() - timedelta(days=90)).isoformat()
+        print(
+            f"[FETCH] 對 {len(wl_sids)} 檔 watchlist 抓 90 天 daily_price 歷史...",
+            flush=True,
+        )
+        for i, sid in enumerate(wl_sids, start=1):
+            try:
+                fetch_daily_price(sid, hist_start, today)
+                hist_ok += 1
+            except Exception as e:  # noqa: BLE001
+                hist_fail += 1
+                if i <= 5:
+                    print(
+                        f"[FETCH]   {sid} 90 day fail: {type(e).__name__}",
+                        flush=True,
+                    )
+            if i % 10 == 0:
+                print(
+                    f"[FETCH]   watchlist 90 day {i}/{len(wl_sids)}...",
+                    flush=True,
+                )
+        print(
+            f"[FETCH]   watchlist 90 day ok={hist_ok}/{len(wl_sids)}, "
+            f"fail={hist_fail}",
+            flush=True,
+        )
+
     print(
         f"\n[FETCH] done. "
         f"daily_prices={bulk_rows}, "
-        f"institutional ok={inst_ok}/{n_inst}, fail={inst_fail}",
+        f"institutional ok={inst_ok}/{n_inst}, fail={inst_fail}, "
+        f"watchlist 90day ok={hist_ok}/{len(wl_sids)}",
         flush=True,
     )
     return {
         "bulk_rows": bulk_rows,
         "institutional_ok": inst_ok,
         "institutional_fail": inst_fail,
+        "watchlist_history_ok": hist_ok,
         "universe_size": len(universe_sids),
     }
 

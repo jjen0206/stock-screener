@@ -121,6 +121,30 @@ def test_main_returns_zero_even_on_partial_failure(
         daily_fetch, "fetch_institutional",
         lambda sid, s, e: (_ for _ in ()).throw(RuntimeError("all fail")),
     )
+    monkeypatch.setattr(daily_fetch, "fetch_daily_price",
+                        lambda sid, s, e: None)
     monkeypatch.setattr("sys.argv", ["daily_fetch.py"])
     code = daily_fetch.main()
     assert code == 0
+
+
+def test_run_fetches_90day_history_for_watchlist(tmp_db, mock_universe, monkeypatch):
+    """對 watchlist 個股該抓 90 天 daily_price 歷史(補 ATR 用)。"""
+    # mock_universe fixture 的 load_watchlist 是 [],改成有 2 檔
+    monkeypatch.setattr(daily_fetch, "load_watchlist", lambda: [
+        ("3680", "家登"), ("8069", "元太"),
+    ])
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    monkeypatch.setattr(daily_fetch, "fetch_institutional",
+                        lambda sid, s, e: None)
+    history_calls = []
+    monkeypatch.setattr(
+        daily_fetch, "fetch_daily_price",
+        lambda sid, s, e: history_calls.append(sid),
+    )
+
+    summary = daily_fetch.run(institutional_days=7)
+    # 該對 watchlist 兩檔都抓
+    assert "3680" in history_calls and "8069" in history_calls
+    assert summary["watchlist_history_ok"] == 2
