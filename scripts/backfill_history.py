@@ -193,13 +193,26 @@ def main() -> int:
     )
     print("[BACKFILL] 寫 last_backfill.txt", flush=True)
 
-    # 50% 成功門檻 — 太低代表 token 過期 / FinMind 大故障
-    if n > 0 and ok_price < n * 0.5:
+    # 退出邏輯三段:
+    # - >= 50%:正常完成
+    # - 10-50%:部分失敗(可能 FinMind 限額),仍 return 0 讓 workflow commit CSV
+    # - < 10%:極可能 token 過期 / API 大故障,return 1 觸發 GH Actions 標紅
+    if n == 0:
+        return 0
+    success_rate = ok_price / n * 100
+    if success_rate < 10:
         print(
-            f"❌ 成功率 {ok_price/n*100:.0f}% < 50%,可能 token 過期或 FinMind 故障",
+            f"❌ 成功率 {success_rate:.0f}% < 10%,極可能 token 過期 / "
+            f"FinMind 大故障 — exit 1",
             flush=True,
         )
         return 1
+    if success_rate < 50:
+        print(
+            f"⚠️ 成功率 {success_rate:.0f}% 偏低(可能 FinMind 限額),"
+            f"但仍有 {ok_price} 檔 backfill 成功 — 照常 commit CSV",
+            flush=True,
+        )
     return 0
 
 

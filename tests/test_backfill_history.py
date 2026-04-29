@@ -103,7 +103,7 @@ def test_backfill_dumps_csv_to_snapshot(tmp_setup, monkeypatch):
 
 
 def test_backfill_returns_one_when_mostly_failing(tmp_setup, monkeypatch):
-    """成功率 < 50% 該回 exit 1(token 過期 / API 故障警示)。"""
+    """成功率 < 10% 才該 exit 1(token 過期 / API 故障警示)。"""
     db.upsert_stocks([
         {"stock_id": s, "name": "X", "market": "TW"}
         for s in ["A", "B", "C", "D"]
@@ -125,3 +125,39 @@ def test_backfill_returns_one_when_mostly_failing(tmp_setup, monkeypatch):
 
     code = backfill.main()
     assert code == 1
+
+
+def test_backfill_returns_zero_when_partial_success(tmp_setup, monkeypatch):
+    """成功率 10-50% 偏低但仍 commit(避免「1305 檔成果被丟」的 bug)。"""
+    sids = [f"S{i:02d}" for i in range(10)]
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"} for s in sids
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: sids)
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+
+    # 10 檔中 3 檔成功(30% — 落在 10-50% 區間)
+    def fake_fetch_price(sid, s, e):
+        if sid in {"S00", "S01", "S02"}:
+            db.upsert_daily_prices([{
+                "stock_id": sid, "date": "2026-04-28",
+                "open": 100, "high": 101, "low": 99, "close": 100,
+                "volume": 1000, "trading_money": None,
+                "trading_turnover": None, "spread": 0.0,
+            }])
+            return
+        raise RuntimeError(f"FinMind 429 for {sid}")
+
+    monkeypatch.setattr(backfill, "fetch_daily_price", fake_fetch_price)
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv", ["backfill_history.py", "--days", "10"],
+    )
+
+    code = backfill.main()
+    assert code == 0  # 部分成功仍 exit 0,讓 workflow commit CSV
+    # CSV 該有 dump 出來
+    snapshot = tmp_setup / "twse_snapshot"
+    df = pd.read_csv(snapshot / "daily_prices.csv", dtype={"stock_id": str})
+    assert len(df) >= 3  # 3 檔成功的資料

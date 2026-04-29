@@ -73,6 +73,9 @@ jobs:
           python scripts/backfill_history.py $ARGS
 
       - name: Commit & push snapshot CSVs
+        # 即使 backfill exit 非 0(成功率 < 10% 邊界 case)也仍 commit 已產生的 CSV
+        # 避免「跑了 2 小時、1305 檔成果被 runner 清掉」的悲劇
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
