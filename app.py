@@ -41,7 +41,8 @@ from src.strategies import (
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
 from src.universe import (
-    TW_TOP_50, WATCHLIST_PATH, get_full_universe, load_watchlist,
+    TW_TOP_50, WATCHLIST_PATH, get_full_universe, is_pure_stock,
+    load_watchlist,
 )
 
 
@@ -550,15 +551,16 @@ def _page_short() -> None:
     cols = st.columns([2, 3, 1])
     target_date = cols[0].date_input("選股日期", value=date.today())
     universe_options = [
-        f"📊 充足歷史的股 ({eligible_stocks} 檔, 20+ 天)",
+        f"🎯 充足歷史的純股票 ({eligible_stocks} 檔, 20+ 天 / 不含 ETF & 債券)",
+        f"📊 充足歷史的股 ({eligible_stocks} 檔, 20+ 天 / 含 ETF & 債券)",
         "全市場 (約 2360 檔, twse + tpex + ETF)",
         "快速:50 檔大型股",
         "我的關注清單",
     ]
-    # 預設「充足歷史」— 全市場大多缺歷史會 0 入選誤導使用者
+    # 預設「🎯 純股票」— 短線交易主軸是個股 K 線,ETF/債券貝塔太雜
     universe_choice = cols[1].selectbox(
         "選股範圍", universe_options, index=0,
-        help="預設「充足歷史」過濾 cache 還沒回補完的個股。"
+        help="預設「🎯 純股票」排除 ETF (代號 00 開頭) / 債券 / 槓桿反向商品。"
              "全市場 / TOP 50 走 GH Actions 每日更新的 SQLite 快取。",
     )
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
@@ -747,9 +749,11 @@ def _page_short() -> None:
 
 def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
     """根據使用者選擇回傳個股清單;回 None 表示已 render 提示、外層直接 return。"""
-    if choice.startswith("📊 充足歷史") or choice.startswith("📊 僅有充足歷史"):
+    if (choice.startswith("🎯") or choice.startswith("📊 充足歷史")
+            or choice.startswith("📊 僅有充足歷史")):
         # 過濾 daily_prices 天數 >= 20 的個股(量價KD + 乖離率可跑;
         # MA60 多頭排列需 60 天,但 backfill 90 calendar days 只到 ~54 交易日)
+        filter_etf = choice.startswith("🎯")
         sids_set = set(db.stocks_with_min_history(20))
         if not sids_set:
             st.warning(
@@ -765,6 +769,7 @@ def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
         universe = [
             (r["stock_id"], r["name"]) for r in rows
             if r["stock_id"] in sids_set
+            and (not filter_etf or is_pure_stock(r["stock_id"], r["name"]))
         ]
         return universe or None
     if choice.startswith("全市場"):

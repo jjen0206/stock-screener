@@ -95,3 +95,58 @@ def test_get_full_universe_finmind_failure_returns_empty(tmp_db):
     ):
         sids = universe.get_full_universe()
     assert sids == []
+
+
+# === is_pure_stock 過濾 ETF / 債券 / 槓桿反向 ===
+
+def test_is_pure_stock_normal_stock():
+    """純股票 → True。"""
+    assert universe.is_pure_stock("2330", "台積電") is True
+    assert universe.is_pure_stock("3680", "家登") is True
+    assert universe.is_pure_stock("8069", "元太") is True
+
+
+def test_is_pure_stock_etf_by_id():
+    """代號 00 開頭 = ETF/ETN → False。"""
+    assert universe.is_pure_stock("0050", "元大台灣50") is False
+    assert universe.is_pure_stock("00929", "復華台灣科技優息") is False
+    assert universe.is_pure_stock("00631L", "元大台灣50正2") is False
+
+
+def test_is_pure_stock_bond_etf_by_id_and_name():
+    """債券 ETF — 代號 00 + 名稱含「美債/公債/債券」→ False。"""
+    assert universe.is_pure_stock("00764B", "群益25年美債") is False
+    assert universe.is_pure_stock("00679B", "元大美債20年") is False
+    assert universe.is_pure_stock("00687B", "國泰20年美債") is False
+
+
+def test_is_pure_stock_leveraged_inverse_by_name():
+    """槓桿 / 反向商品 — 名稱含「正2 / 反1 / 槓桿 / 反向」 → False。"""
+    assert universe.is_pure_stock("00631L", "元大台灣50正2") is False
+    assert universe.is_pure_stock("00632R", "元大台灣50反1") is False
+    # 假設某檔 4 碼也帶槓桿關鍵字也應過濾(防真實有此狀況)
+    assert universe.is_pure_stock("9999", "ABC 槓桿基金") is False
+
+
+def test_is_pure_stock_etn_by_name_keyword():
+    """名稱含 ETN(英文不分大小寫) → False。"""
+    assert universe.is_pure_stock("020027", "永豐ETN") is False
+    assert universe.is_pure_stock("9999", "Test ETF Fund") is False
+
+
+def test_is_pure_stock_handles_empty_name():
+    """name=None / 空字串 → 保守留著(避免誤殺剛上市股)。"""
+    assert universe.is_pure_stock("2330", None) is True
+    assert universe.is_pure_stock("2330", "") is True
+
+
+def test_is_pure_stock_handles_empty_id():
+    """空 stock_id → False(不可能是有效個股)。"""
+    assert universe.is_pure_stock("", "台積電") is False
+
+
+def test_is_pure_stock_corp_bond_keyword():
+    """金融債 / 投等債 / 高收債 / 可轉債 都該被過濾。"""
+    assert universe.is_pure_stock("9999", "00xxx 投等債") is False
+    assert universe.is_pure_stock("9999", "美國高收債 ETF") is False
+    assert universe.is_pure_stock("9999", "金融債券") is False

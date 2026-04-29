@@ -152,7 +152,47 @@ def get_full_universe(refresh: bool = False) -> list[str]:
     return [r["stock_id"] for r in rows_to_upsert]
 
 
+# === 純股票過濾(排除 ETF / 債券 / 槓桿反向 / ETN 等衍生品)===
+
+# 名稱關鍵字黑名單 — 中文比對用 `in name`(原大小寫即可),英文走 lower-case
+_NAME_KW_ZH = [
+    "美債", "公債", "債券", "投等債", "金融債", "高收債", "可轉債",
+    "槓桿", "反向", "正2", "正二", "反1", "反一",
+]
+_NAME_KW_EN_LOWER = ["etf", "etn"]
+
+
+def is_pure_stock(stock_id: str, name: str | None) -> bool:
+    """判斷是否為「純股票」 — 即非 ETF / 債券 / 槓桿 / ETN 等衍生品。
+
+    短線策略主要在「個股」上找量價籌碼信號,ETF 是組合產品(貝塔不純),
+    債券 ETF 流動性低且漲跌邏輯完全不同,過濾掉避免污染選股結果。
+
+    過濾規則:
+    1. 代號 "00" 開頭 → ETF / ETN(如 0050 / 00929 / 00764B / 00631L)
+    2. 名稱含 ETF / ETN(英文不分大小寫)
+    3. 名稱含「美債 / 公債 / 債券 / 投等債」等債券關鍵字
+    4. 名稱含「槓桿 / 反向 / 正2 / 反1」等槓桿/反向衍生品關鍵字
+
+    回 True = 是純股票,可選股;False = 該過濾掉。
+    """
+    if not stock_id:
+        return False
+    # ETF 慣例:台股 ETF / ETN 一律 4 碼以 "00" 開頭(0050 / 00929 / 00764B)
+    if stock_id.startswith("00"):
+        return False
+    if not name:
+        # 沒名字保守視為不確定 → 留著(避免誤殺剛上市還沒寫進 stocks 表的個股)
+        return True
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in _NAME_KW_EN_LOWER):
+        return False
+    if any(kw in name for kw in _NAME_KW_ZH):
+        return False
+    return True
+
+
 __all__ = [
     "TW_TOP_50", "WATCHLIST_PATH", "load_watchlist",
-    "get_full_universe",
+    "get_full_universe", "is_pure_stock",
 ]
