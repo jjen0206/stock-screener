@@ -125,6 +125,17 @@ button[kind="primary"], button[kind="secondary"], .stButton button {
     font-size: 14px !important;
     color: #888;
 }
+
+/* 黏性「執行」主按鈕 — 手機捲動時按鈕仍貼底,不用滾回頂端 */
+/* 注意:Streamlit 父層若加 overflow:hidden 會破壞 sticky;
+   實測 Streamlit 1.56 主流 layout 的 [data-testid="stMain"] 是 scroll container,
+   primary button 在 stVerticalBlock 內,sticky 可生效。 */
+div[data-testid="stButton"] > button[kind="primary"] {
+    position: sticky !important;
+    bottom: 0.75rem;
+    z-index: 999;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
 </style>
 """
 
