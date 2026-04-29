@@ -349,22 +349,22 @@ def _page_short() -> None:
     )
     enabled_keys = [label_to_key[lbl] for lbl in selected_labels]
 
-    # sidebar 參數區
-    st.sidebar.markdown("### 短線參數(策略 1)")
-    vol_mult = st.sidebar.number_input(
-        "均量倍數", min_value=1.0, max_value=5.0,
-        value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
-        help="當日量 > 過去 5 日均量 × 此倍數",
-    )
-    kd_low = st.sidebar.number_input(
-        "KD 門檻 K_low", min_value=0.0, max_value=80.0,
-        value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
-        help="K 黃金交叉 D 後,K 至少要超過此值才入選",
-    )
-    inst_days = st.sidebar.number_input(
-        "法人連續買超天數", min_value=1, max_value=10,
-        value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
-    )
+    # sidebar 參數區(預設收起,進階使用者再展開)
+    with st.sidebar.expander("⚙️ 進階參數(策略 1)", expanded=False):
+        vol_mult = st.number_input(
+            "均量倍數", min_value=1.0, max_value=5.0,
+            value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+            help="當日量 > 過去 5 日均量 × 此倍數",
+        )
+        kd_low = st.number_input(
+            "KD 門檻 K_low", min_value=0.0, max_value=80.0,
+            value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+            help="K 黃金交叉 D 後,K 至少要超過此值才入選",
+        )
+        inst_days = st.number_input(
+            "法人連續買超天數", min_value=1, max_value=10,
+            value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+        )
 
     # cache 健康度(供下方 selectbox + caption 用)
     health = db.cache_health_summary()
@@ -1027,36 +1027,37 @@ def _page_backtest() -> None:
     st.header("📈 簡易回測")
     st.caption("把目前的短線策略套到歷史資料,看勝率與累積報酬。**不含交易成本/滑價/資金管理**。")
 
-    # sidebar 參數(與短線頁同名,共用值)
-    st.sidebar.markdown("### 短線參數(回測共用)")
-    vol_mult = st.sidebar.number_input(
-        "均量倍數", min_value=1.0, max_value=5.0,
-        value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
-        key="bt_vol_mult",
-    )
-    kd_low = st.sidebar.number_input(
-        "KD 門檻 K_low", min_value=0.0, max_value=80.0,
-        value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
-        key="bt_kd_low",
-    )
-    inst_days = st.sidebar.number_input(
-        "法人連續買超天數", min_value=1, max_value=10,
-        value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
-        key="bt_inst_days",
-    )
+    # sidebar 參數(與短線頁同名,共用值;預設收起)
+    with st.sidebar.expander("⚙️ 進階參數(回測)", expanded=False):
+        vol_mult = st.number_input(
+            "均量倍數", min_value=1.0, max_value=5.0,
+            value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+            key="bt_vol_mult",
+        )
+        kd_low = st.number_input(
+            "KD 門檻 K_low", min_value=0.0, max_value=80.0,
+            value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+            key="bt_kd_low",
+        )
+        inst_days = st.number_input(
+            "法人連續買超天數", min_value=1, max_value=10,
+            value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+            key="bt_inst_days",
+        )
+        hold_days = st.selectbox(
+            "持有天數", [1, 3, 5, 10, 20], index=2,
+            key="bt_hold_days",
+            help="每筆入選收盤買進,持有 N 個交易日後收盤賣出",
+        )
 
     today = date.today()
-    cols = st.columns([2, 2, 2, 1])
+    cols = st.columns([2, 2, 1])
     start = cols[0].date_input(
         "回測起始", value=today - timedelta(days=180), key="bt_start"
     )
     end = cols[1].date_input("回測結束", value=today, key="bt_end")
-    hold_days = cols[2].selectbox(
-        "持有天數", [1, 3, 5, 10, 20], index=2,
-        help="每筆入選收盤買進,持有 N 個交易日後收盤賣出",
-    )
-    cols[3].markdown("&nbsp;", unsafe_allow_html=True)
-    submit = cols[3].button(
+    cols[2].markdown("&nbsp;", unsafe_allow_html=True)
+    submit = cols[2].button(
         "執行回測", type="primary", use_container_width=True
     )
 
