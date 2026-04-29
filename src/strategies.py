@@ -320,20 +320,25 @@ def _evaluate_strategy(
     lookback_days: int,
     min_required: int,
 ) -> pd.DataFrame:
+    """跑單一策略;**用單一 connection 包整個 loop**(profile 顯示 8000+ 次
+    connect/close 是 hot path,改成單一 connection 省 ~70% 時間)。
+    """
     if not sids:
         return pd.DataFrame(columns=cols)
     placeholders = ",".join(["?"] * len(sids))
+
     with db.get_conn() as conn:
+        # 1. 一次查 stocks 表所有名字
         meta = conn.execute(
             f"SELECT stock_id, name FROM stocks WHERE stock_id IN ({placeholders})",
             sids,
         ).fetchall()
-    name_map = {r["stock_id"]: r["name"] for r in meta}
+        name_map = {r["stock_id"]: r["name"] for r in meta}
 
-    rows: list[dict] = []
-    for sid in sids:
-        try:
-            with db.get_conn() as conn:
+        # 2. loop 個股 — 重用同一個 conn(不開新 connection)
+        rows: list[dict] = []
+        for sid in sids:
+            try:
                 price_rows = conn.execute(
                     "SELECT date, open, high, low, close, volume "
                     "FROM daily_prices "
@@ -341,19 +346,18 @@ def _evaluate_strategy(
                     "ORDER BY date DESC LIMIT ?",
                     (sid, date, lookback_days),
                 ).fetchall()
-            if len(price_rows) < min_required:
+                if len(price_rows) < min_required:
+                    continue
+                df = pd.DataFrame([dict(r) for r in price_rows])
+                df["stock_id"] = sid
+                df = df.iloc[::-1].reset_index(drop=True)
+                result = evaluate_fn(df, name_map.get(sid, sid))
+                if result is not None:
+                    result["stock_id"] = sid
+                    rows.append(result)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[STRATEGY] %s 跳過: %s", sid, e)
                 continue
-            df = pd.DataFrame([dict(r) for r in price_rows])
-            df["stock_id"] = sid
-            df = df.iloc[::-1].reset_index(drop=True)
-            result = evaluate_fn(df, name_map.get(sid, sid))
-            if result is not None:
-                # 確保 stock_id 正確(evaluate_fn 內可能漏)
-                result["stock_id"] = sid
-                rows.append(result)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("[STRATEGY] %s 跳過: %s", sid, e)
-            continue
     return pd.DataFrame(rows, columns=cols)
 
 

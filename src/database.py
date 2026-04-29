@@ -33,13 +33,30 @@ from src import config
 
 # === 連線與初始化 ===
 
+_resolved_path_cache: dict[str, Path] = {}
+
+
 def _resolve_db_path(db_path: str | Path | None = None) -> Path:
-    """把相對路徑轉為以 PROJECT_ROOT 為基準的絕對路徑。"""
-    raw = db_path if db_path is not None else config.DATABASE_PATH
+    """把相對路徑轉為以 PROJECT_ROOT 為基準的絕對路徑。
+
+    用 module-level cache 避免每次 get_conn 都 mkdir(profile 顯示 mkdir 是 hot path:
+    8000+ 次 query 等於 8000+ 次 mkdir = 0.35s 純 overhead)。
+    """
+    raw = str(db_path) if db_path is not None else str(config.DATABASE_PATH)
+    cached = _resolved_path_cache.get(raw)
+    if cached is not None:
+        return cached
     p = Path(raw)
     if not p.is_absolute():
         p = config.PROJECT_ROOT / p
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _resolved_path_cache[raw] = p
     return p
+
+
+def _reset_path_cache() -> None:
+    """測試用:測試切 DATABASE_PATH 時清掉 cache。"""
+    _resolved_path_cache.clear()
 
 
 @contextmanager
@@ -52,7 +69,7 @@ def get_conn(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
             conn.execute("SELECT * FROM stocks")
     """
     path = _resolve_db_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # mkdir 已在 _resolve_db_path 內 cache 處理過,這裡不重複
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:

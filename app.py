@@ -362,7 +362,9 @@ def _page_short() -> None:
         st.warning("⚠️ 至少要選一套策略")
         return
     sids_only = [s for s, _ in universe]
-    with st.spinner(f"執行 {len(enabled_keys)} 套策略並行..."):
+    with st.spinner(
+        f"掃描 {len(sids_only)} 檔 × {len(enabled_keys)} 套策略並行..."
+    ):
         agg = run_all_strategies(
             today_iso, enabled=enabled_keys, params=params,
             stock_ids=sids_only,

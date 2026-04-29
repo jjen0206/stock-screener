@@ -85,14 +85,18 @@ def screen_short(
 
     rows: list[dict] = []
     skipped = 0
-    for s in stocks:
-        try:
-            row = _evaluate_short(s["stock_id"], s["name"], date, p)
-        except _SkipStock:
-            skipped += 1
-            continue
-        if row is not None:
-            rows.append(row)
+    # 單一 connection 包整個 loop(profile 顯示 per-stock connection 是 hot path)
+    with db.get_conn() as conn:
+        for s in stocks:
+            try:
+                row = _evaluate_short(
+                    s["stock_id"], s["name"], date, p, conn=conn,
+                )
+            except _SkipStock:
+                skipped += 1
+                continue
+            if row is not None:
+                rows.append(row)
 
     if skipped:
         logger.warning(
@@ -110,25 +114,40 @@ def _evaluate_short(
     name: str,
     target_date: str,
     p: dict,
+    conn=None,
 ) -> dict | None:
-    """評估單檔。回 dict = 入選;回 None = 三條件未全部過;raise _SkipStock = 資料不足。"""
+    """評估單檔。回 dict = 入選;回 None = 三條件未全部過;raise _SkipStock = 資料不足。
+
+    conn 可由 caller 傳入(避免 per-stock 開新 connection,大 universe 顯著加速)。
+    """
     min_price_rows = max(p["ma_volume_period"] + 1, p["kd_period"] + 1)
 
-    with db.get_conn() as conn:
+    if conn is not None:
         price_rows = conn.execute(
-            """SELECT date, open, high, low, close, volume
-               FROM daily_prices
-               WHERE stock_id=? AND date<=?
-               ORDER BY date DESC LIMIT ?""",
+            "SELECT date, open, high, low, close, volume "
+            "FROM daily_prices WHERE stock_id=? AND date<=? "
+            "ORDER BY date DESC LIMIT ?",
             (stock_id, target_date, _LOOKBACK_DAYS),
         ).fetchall()
         inst_rows = conn.execute(
-            """SELECT date, total_buy_sell
-               FROM institutional
-               WHERE stock_id=? AND date<=?
-               ORDER BY date DESC LIMIT ?""",
+            "SELECT date, total_buy_sell FROM institutional "
+            "WHERE stock_id=? AND date<=? ORDER BY date DESC LIMIT ?",
             (stock_id, target_date, p["inst_buy_days"]),
         ).fetchall()
+    else:
+        # 向後相容:沒傳 conn 自己開
+        with db.get_conn() as own_conn:
+            price_rows = own_conn.execute(
+                "SELECT date, open, high, low, close, volume "
+                "FROM daily_prices WHERE stock_id=? AND date<=? "
+                "ORDER BY date DESC LIMIT ?",
+                (stock_id, target_date, _LOOKBACK_DAYS),
+            ).fetchall()
+            inst_rows = own_conn.execute(
+                "SELECT date, total_buy_sell FROM institutional "
+                "WHERE stock_id=? AND date<=? ORDER BY date DESC LIMIT ?",
+                (stock_id, target_date, p["inst_buy_days"]),
+            ).fetchall()
 
     if len(price_rows) < min_price_rows or len(inst_rows) < p["inst_buy_days"]:
         raise _SkipStock()
