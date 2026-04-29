@@ -35,6 +35,7 @@ from src.market_sentiment import (
 )
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS
+from src.ui_cards import render_picks_cards, view_mode_toggle
 from src.strategies import (
     STRATEGY_LABELS,
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
@@ -482,50 +483,53 @@ def _page_short() -> None:
 
     df = aggregated_to_dataframe(agg)
     t3 = _time.perf_counter()
-    selection = st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        # 手機螢幕優先顯示:代號 / 名稱 / 收盤 / 目標價 / 停損
-        # 信號數 / 信號 / R:R / ATR 排後面(向右 scroll 才看得到)
-        column_order=[
-            "stock_id", "name", "close",
-            "target_low", "target_high", "stop_loss",
-            "信號數", "信號", "risk_reward", "atr14",
-        ],
-        column_config={
-            "stock_id": st.column_config.TextColumn("代號", width="small"),
-            "name": st.column_config.TextColumn("名稱", width="small"),
-            "close": st.column_config.NumberColumn(
-                "收盤", format="%.2f", width="small",
-            ),
-            "target_low": st.column_config.NumberColumn(
-                "🎯 保守目標", format="%.2f",
-                help="收盤 + 1.5 × ATR",
-            ),
-            "target_high": st.column_config.NumberColumn(
-                "🚀 積極目標", format="%.2f",
-                help="收盤 + 3 × ATR",
-            ),
-            "stop_loss": st.column_config.NumberColumn(
-                "🛑 停損", format="%.2f",
-                help="收盤 − 1.5 × ATR",
-            ),
-            "信號數": st.column_config.NumberColumn(
-                "🔥", width="small", help="同時被幾套策略選中",
-            ),
-            "信號": st.column_config.TextColumn("策略", width="medium"),
-            "risk_reward": st.column_config.NumberColumn(
-                "R:R", format="%.1f", width="small",
-                help="(積極目標 - 收盤) / (收盤 - 停損)",
-            ),
-            "atr14": st.column_config.NumberColumn(
-                "ATR(14)", format="%.2f", width="small",
-            ),
-        },
-    )
+
+    # 顯示模式切換(手機預設卡片,桌機可切表格)
+    view_mode = view_mode_toggle("short_view_mode")
+
+    if view_mode == "🃏 卡片":
+        render_picks_cards(df.to_dict("records"))
+        selection = None  # 卡片模式不支援 row selection
+    else:
+        selection = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_order=[
+                "stock_id", "name", "close",
+                "target_low", "target_high", "stop_loss",
+                "信號數", "信號", "risk_reward", "atr14",
+            ],
+            column_config={
+                "stock_id": st.column_config.TextColumn("代號", width="small"),
+                "name": st.column_config.TextColumn("名稱", width="small"),
+                "close": st.column_config.NumberColumn(
+                    "收盤", format="%.2f", width="small",
+                ),
+                "target_low": st.column_config.NumberColumn(
+                    "🎯 保守目標", format="%.2f", help="收盤 + 1.5 × ATR",
+                ),
+                "target_high": st.column_config.NumberColumn(
+                    "🚀 積極目標", format="%.2f", help="收盤 + 3 × ATR",
+                ),
+                "stop_loss": st.column_config.NumberColumn(
+                    "🛑 停損", format="%.2f", help="收盤 − 1.5 × ATR",
+                ),
+                "信號數": st.column_config.NumberColumn(
+                    "🔥", width="small", help="同時被幾套策略選中",
+                ),
+                "信號": st.column_config.TextColumn("策略", width="medium"),
+                "risk_reward": st.column_config.NumberColumn(
+                    "R:R", format="%.1f", width="small",
+                    help="(積極目標 - 收盤) / (收盤 - 停損)",
+                ),
+                "atr14": st.column_config.NumberColumn(
+                    "ATR(14)", format="%.2f", width="small",
+                ),
+            },
+        )
 
     t4 = _time.perf_counter()
     st.caption(
@@ -641,9 +645,18 @@ def _page_long() -> None:
                 )
         else:
             st.success(f"✅ 共 {len(result)} 檔符合長線條件")
-            st.dataframe(
-                result, use_container_width=True, hide_index=True
-            )
+            view_mode = view_mode_toggle("long_view_mode")
+            if view_mode == "🃏 卡片":
+                # 長線結果欄位:stock_id/name/close/pe/pb/yield/avg_roe etc.
+                # 卡片只顯示基本資訊(目標價非長線重點,故關閉)
+                render_picks_cards(
+                    result.to_dict("records"),
+                    show_signal=False, show_targets=False, show_change=False,
+                )
+            else:
+                st.dataframe(
+                    result, use_container_width=True, hide_index=True,
+                )
 
 
 def _has_long_data() -> bool:
@@ -1116,10 +1129,36 @@ def _page_backtest() -> None:
 
     # 交易明細
     st.markdown(f"### 📋 交易明細({len(result['trades'])} 筆)")
-    st.dataframe(
-        result["trades"].sort_values("buy_date", ascending=False),
-        use_container_width=True, hide_index=True,
-    )
+    trades_df = result["trades"].sort_values("buy_date", ascending=False)
+    view_mode = view_mode_toggle("backtest_view_mode")
+    if view_mode == "🃏 卡片":
+        # trade row 欄位:stock_id, buy_date, sell_date, buy_price, sell_price,
+        #                  return_pct, holding_days
+        for _, t in trades_df.iterrows():
+            ret = t.get("return_pct", 0)
+            with st.container(border=True):
+                col1, col2 = st.columns([3, 2])
+                with col1:
+                    st.markdown(
+                        f"**{t.get('stock_id', '?')}** "
+                        f"{t.get('buy_date', '')} → {t.get('sell_date', '')}"
+                    )
+                    st.caption(
+                        f"持有 {int(t.get('holding_days', 0))} 天 | "
+                        f"買 {float(t.get('buy_price', 0)):.2f} → "
+                        f"賣 {float(t.get('sell_price', 0)):.2f}"
+                    )
+                with col2:
+                    arrow = "▲" if ret >= 0 else "▼"
+                    st.metric(
+                        "報酬", f"{ret:+.2f}%",
+                        delta=f"{arrow}",
+                        delta_color="normal" if ret >= 0 else "inverse",
+                    )
+    else:
+        st.dataframe(
+            trades_df, use_container_width=True, hide_index=True,
+        )
 
 
 def _make_equity_chart(
@@ -1337,15 +1376,48 @@ def _page_watchlist() -> None:
         })
     df = pd.DataFrame(rows)
 
-    selection = st.dataframe(
-        df, use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row",
-    )
-    if selection and selection.selection.rows:
-        idx = selection.selection.rows[0]
-        sid = items[idx]["stock_id"]
-        st.session_state["query_stock_id"] = sid
-        st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
+    view_mode = view_mode_toggle("watchlist_view_mode")
+    if view_mode == "🃏 卡片":
+        # 把 watchlist row 轉成 ui_cards 認得的 schema
+        def _to_float(s: str) -> float | None:
+            if not s or s == "—":
+                return None
+            try:
+                return float(str(s).rstrip("%").rstrip("+"))
+            except (TypeError, ValueError):
+                return None
+
+        cards = []
+        for it, r in zip(items, rows):
+            sid = it["stock_id"]
+            tp = target_prices.get(sid)
+            card = {
+                "stock_id": sid,
+                "name": r["名稱"],
+                "close": _to_float(r["收盤"]),
+                "change_pct": _to_float(r["漲跌%"]),
+            }
+            if tp is not None:
+                card.update({
+                    "target_low": tp.get("target_low"),
+                    "target_high": tp.get("target_high"),
+                    "stop_loss": tp.get("stop_loss"),
+                    "risk_reward": tp.get("risk_reward"),
+                })
+            cards.append(card)
+        render_picks_cards(
+            cards, show_signal=False, show_targets=True, show_change=True,
+        )
+    else:
+        selection = st.dataframe(
+            df, use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row",
+        )
+        if selection and selection.selection.rows:
+            idx = selection.selection.rows[0]
+            sid = items[idx]["stock_id"]
+            st.session_state["query_stock_id"] = sid
+            st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")
