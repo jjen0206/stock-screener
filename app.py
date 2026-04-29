@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 
 from src import config, database as db, indicators as ind
 from src.backtester import backtest_short
+from src.cache_utils import clear_all_caches
 from src.data_fetcher import (
     FinMindAPIError,
     ensure_stock_info,
@@ -237,6 +238,17 @@ def main() -> None:
 
     st.sidebar.title("📈 個人選股工具")
     st.sidebar.caption("台股 · 短線 + 長線")
+
+    # 全域「重新載入」按鈕(放最頂端,各頁都看得到)
+    if st.sidebar.button(
+        "🔄 重新載入頁面",
+        use_container_width=True,
+        help="清空所有 in-memory 快取重新抓資料(大盤情緒 / TWSE / FinMind cache 都會打破)",
+    ):
+        clear_all_caches()
+        st.toast("✅ 已清空快取,重新載入...", icon="🔄")
+        st.rerun()
+
     page = st.sidebar.radio("選擇功能", PAGES, index=3)
 
     if page == "短線推薦":
