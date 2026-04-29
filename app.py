@@ -310,20 +310,9 @@ def _load_snapshot_if_needed() -> None:
             db.upsert_institutional(records)
 
     # 灌 watchlist(避免雲端 reboot 後 user 關注清單丟光)
-    # 注意:add_to_watchlist 是 idempotent,本機既有的 watchlist 不會被覆蓋
-    wl_csv = snapshot_dir / "watchlist.csv"
-    if wl_csv.exists():
-        df = pd.read_csv(wl_csv, dtype={"stock_id": str})
-        for _, r in df.iterrows():
-            sid = str(r["stock_id"])
-            if not sid:
-                continue
-            note_val = r.get("note")
-            note = (
-                None if note_val is None or pd.isna(note_val)
-                else str(note_val)
-            )
-            db.add_to_watchlist(sid, note=note)
+    # add_to_watchlist 是 idempotent,本機既有的 watchlist 不會被覆蓋
+    from src import watchlist_snapshot
+    watchlist_snapshot.load_from_csv()
 
     _snapshot_loaded = True
 

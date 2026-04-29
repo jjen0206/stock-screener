@@ -412,12 +412,26 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
 
 # === watchlist helpers(自選股清單) ===
 
+def _dump_watchlist_snapshot(db_path: str | Path | None) -> None:
+    """在 watchlist 變動後把 SQLite 內容 dump 成 CSV(供下次 boot 還原)。
+
+    snapshot 模組自帶 silent skip(snapshot dir 不存在 / DB 不在 repo 內 / load 進行中),
+    所以 tests 跟非標準佈署不會誤寫真實 CSV。lazy import 避免 watchlist_snapshot ↔
+    database 互相 import。
+    """
+    from src.watchlist_snapshot import dump_to_csv
+    dump_to_csv(db_path=db_path)
+
+
 def add_to_watchlist(
     stock_id: str,
     note: str | None = None,
     db_path: str | Path | None = None,
 ) -> None:
-    """加入關注;若已存在則更新 note(added_at 不變)。"""
+    """加入關注;若已存在則更新 note(added_at 不變)。
+
+    成功寫 SQLite 後同步 dump CSV snapshot,讓使用者 ☆ 變動跨容器重啟保留。
+    """
     with get_conn(db_path) as conn:
         conn.execute(
             """
@@ -427,18 +441,25 @@ def add_to_watchlist(
             """,
             (stock_id, _now_iso(), note),
         )
+    _dump_watchlist_snapshot(db_path)
 
 
 def remove_from_watchlist(
     stock_id: str,
     db_path: str | Path | None = None,
 ) -> bool:
-    """從關注移除;回 True 表示真的移掉,False 表示原本就不在。"""
+    """從關注移除;回 True 表示真的移掉,False 表示原本就不在。
+
+    成功從 SQLite 刪掉後同步 dump CSV snapshot,讓刪除動作跨容器重啟生效。
+    """
     with get_conn(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM watchlist WHERE stock_id=?", (stock_id,)
         )
-        return cur.rowcount > 0
+        removed = cur.rowcount > 0
+    if removed:
+        _dump_watchlist_snapshot(db_path)
+    return removed
 
 
 def is_in_watchlist(

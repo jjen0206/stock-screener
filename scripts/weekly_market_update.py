@@ -29,51 +29,17 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
 from src.universe import TW_TOP_50  # noqa: E402
+from src import watchlist_snapshot  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
-
-
-def _preload_watchlist_csv() -> None:
-    """先載入既有 watchlist.csv 進 SQLite,防最後 dump 寫空 clobber repo。"""
-    path = SNAPSHOT_DIR / "watchlist.csv"
-    if not path.exists():
-        return
-    df = pd.read_csv(path, dtype={"stock_id": str})
-    for _, r in df.iterrows():
-        sid = str(r["stock_id"])
-        if not sid:
-            continue
-        note_val = r.get("note")
-        note = (
-            None if note_val is None or pd.isna(note_val)
-            else str(note_val)
-        )
-        db.add_to_watchlist(sid, note=note)
-    print(f"[WEEKLY] 預先載入 {len(df)} 筆 watchlist.csv", flush=True)
-
-
-def _dump_watchlist_csv() -> int:
-    """Dump watchlist 到 watchlist.csv;空就不寫(保留 repo 既有)。"""
-    items = db.get_watchlist()
-    path = SNAPSHOT_DIR / "watchlist.csv"
-    if not items:
-        return 0
-    df = pd.DataFrame([
-        {
-            "stock_id": it["stock_id"],
-            "added_at": it["added_at"],
-            "note": it.get("note"),
-        }
-        for it in items
-    ])
-    df.to_csv(path, index=False)
-    return len(df)
 
 
 def main() -> int:
     sids = [s for s, _ in TW_TOP_50]
     db.init_db()
-    _preload_watchlist_csv()
+    wl_loaded = watchlist_snapshot.load_from_csv()
+    if wl_loaded:
+        print(f"[WEEKLY] 預先載入 {wl_loaded} 筆 watchlist.csv", flush=True)
 
     # 確保 universe 在 stocks 表
     db.upsert_stocks([
@@ -131,9 +97,9 @@ def main() -> int:
         df.to_csv(path, index=False)
         print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
 
-    # 4. watchlist(走 helper,維持既有 schema 一致)
-    wl_n = _dump_watchlist_csv()
-    if wl_n:
+    # 4. watchlist(走共用 helper,維持既有 schema 一致)
+    wl_n = watchlist_snapshot.dump_to_csv()
+    if wl_n >= 0:
         print(f"[WEEKLY] 寫 watchlist.csv: {wl_n} 行", flush=True)
 
     # 寫 timestamp + git/run id 方便事後追溯
