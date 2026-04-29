@@ -46,6 +46,52 @@ from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
 
 
+def _preload_watchlist_csv() -> None:
+    """若 SNAPSHOT_DIR/watchlist.csv 存在,先載入 SQLite(防最後 dump 寫空)。"""
+    path = SNAPSHOT_DIR / "watchlist.csv"
+    if not path.exists():
+        return
+    df = pd.read_csv(path, dtype={"stock_id": str})
+    for _, r in df.iterrows():
+        sid = str(r["stock_id"])
+        if not sid:
+            continue
+        note_val = r.get("note")
+        note = (
+            None if note_val is None or pd.isna(note_val)
+            else str(note_val)
+        )
+        db.add_to_watchlist(sid, note=note)
+    print(
+        f"[BACKFILL] 預先載入 {len(df)} 筆 watchlist.csv 進 SQLite",
+        flush=True,
+    )
+
+
+def _dump_watchlist_csv() -> int:
+    """從 SQLite dump watchlist 到 SNAPSHOT_DIR/watchlist.csv;回傳行數。"""
+    items = db.get_watchlist()
+    path = SNAPSHOT_DIR / "watchlist.csv"
+    if not items:
+        # 空就不寫(避免 clobber 既有 CSV — 雖然 _preload 應該已防止)
+        if path.exists():
+            print(
+                f"[BACKFILL] watchlist 為空,保留既有 {path.name}",
+                flush=True,
+            )
+        return 0
+    df = pd.DataFrame([
+        {
+            "stock_id": it["stock_id"],
+            "added_at": it["added_at"],
+            "note": it.get("note"),
+        }
+        for it in items
+    ])
+    df.to_csv(path, index=False)
+    return len(df)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="一次性回補全市場 N 天歷史(daily_price + institutional)",
@@ -69,6 +115,9 @@ def main() -> int:
     args = p.parse_args()
 
     db.init_db()
+    # Preload 既有 watchlist.csv → SQLite(GH runner cache.db 是空的,
+    # 不 preload 的話最後 dump 會 clobber repo 既有 watchlist.csv)
+    _preload_watchlist_csv()
     universe = get_full_universe()
     if not universe:
         print("[BACKFILL] universe 為空 — 先跑 daily_fetch.py 初始化")
@@ -174,6 +223,11 @@ def main() -> int:
         path = SNAPSHOT_DIR / "stocks.csv"
         df.to_csv(path, index=False)
         print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+
+    # watchlist(用 db.get_watchlist 拉,而非 raw SQL,保 schema 對齊)
+    wl_n = _dump_watchlist_csv()
+    if wl_n:
+        print(f"[BACKFILL] 寫 watchlist.csv: {wl_n} 行", flush=True)
 
     # 寫 backfill 專用 timestamp(跟 weekly_market_update 的 last_update.txt 分開)
     import os

@@ -42,7 +42,7 @@ from src.strategies import (
 )
 from src.universe import (
     TW_TOP_50, WATCHLIST_PATH, get_full_universe, is_pure_stock,
-    load_watchlist,
+    load_watchlist, pure_stock_universe,
 )
 
 
@@ -309,6 +309,22 @@ def _load_snapshot_if_needed() -> None:
         if records:
             db.upsert_institutional(records)
 
+    # 灌 watchlist(避免雲端 reboot 後 user 關注清單丟光)
+    # 注意:add_to_watchlist 是 idempotent,本機既有的 watchlist 不會被覆蓋
+    wl_csv = snapshot_dir / "watchlist.csv"
+    if wl_csv.exists():
+        df = pd.read_csv(wl_csv, dtype={"stock_id": str})
+        for _, r in df.iterrows():
+            sid = str(r["stock_id"])
+            if not sid:
+                continue
+            note_val = r.get("note")
+            note = (
+                None if note_val is None or pd.isna(note_val)
+                else str(note_val)
+            )
+            db.add_to_watchlist(sid, note=note)
+
     _snapshot_loaded = True
 
 
@@ -412,15 +428,15 @@ def _page_dashboard() -> None:
     # === 2. 今日短線推薦 Top 3 ===
     st.markdown("### 🔥 今日短線推薦 (Top 3)")
     # 20 天足夠跑量價KD + 乖離率(60+ 天靠 backfill 抓 90 calendar days
-    # 只能換到 ~54 個交易日,湊不到 60 桶)
-    eligible_sids = db.stocks_with_min_history(20)
+    # 只能換到 ~54 個交易日,湊不到 60 桶);ETF/債券過濾(短線是個股取向)
+    eligible_sids = pure_stock_universe(min_history=20)
     if not eligible_sids:
         st.caption(
             "📭 cache 內沒有任何個股累積 20 天歷史。"
             "請按 sidebar『⏳ 一次性回補 90 日歷史』。"
         )
     else:
-        with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天)..."):
+        with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天 / 純股票)..."):
             try:
                 today_iso = date.today().isoformat()
                 agg = run_all_strategies(today_iso, stock_ids=eligible_sids)
@@ -1505,6 +1521,21 @@ def _backfill_watchlist_history(sids: list[str], min_required: int = 15) -> int:
 def _page_watchlist() -> None:
     st.header("⭐ 我的關注")
     db.init_db()
+
+    # 雲端持久化警語(短線是 cloud reboot 容器會清光 SQLite,只 watchlist.csv 會被讀回)
+    with st.expander("ℹ️ 關於關注清單持久化(雲端使用者注意)", expanded=False):
+        st.markdown(
+            "**雲端關注清單儲存方式**:\n"
+            "- 雲端 SQLite 在容器重啟時會被清光 → 只有 "
+            "`data/twse_snapshot/watchlist.csv` (commit 進 repo) 會被保留\n"
+            "- 雲端 UI 加的關注是**暫時的**,直到下次 `weekly_market_update` "
+            "或 `backfill_history` workflow 跑完(會 dump 到 CSV 並 commit)\n"
+            "- **永久保存的方法**:\n"
+            "  1. 本機 git pull → 跑 streamlit → 加股票 → 跑 "
+            "`python scripts/weekly_market_update.py` → push commit\n"
+            "  2. 或直接在 GitHub 網頁編 "
+            "`data/twse_snapshot/watchlist.csv`(stock_id 一欄即可)"
+        )
 
     items = db.get_watchlist()
     if not items:

@@ -127,6 +127,39 @@ def test_backfill_returns_one_when_mostly_failing(tmp_setup, monkeypatch):
     assert code == 1
 
 
+def test_backfill_dumps_and_preloads_watchlist(tmp_setup, monkeypatch):
+    """watchlist.csv 該被 preload 進 SQLite + dump 出來不 clobber。"""
+    snapshot = tmp_setup / "twse_snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    # 預先放一份 watchlist.csv 在 snapshot dir(模擬 repo 既有狀態)
+    pd.DataFrame([
+        {"stock_id": "2330", "added_at": "2026-04-01T00:00:00", "note": "台積"},
+        {"stock_id": "2454", "added_at": "2026-04-02T00:00:00", "note": None},
+    ]).to_csv(snapshot / "watchlist.csv", index=False)
+
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積", "market": "TW"},
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: ["2330"])
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+    monkeypatch.setattr(backfill, "fetch_daily_price", lambda *a: None)
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_history.py", "--days", "10", "--no-institutional"],
+    )
+
+    code = backfill.main()
+    assert code == 0
+    # CSV 該被 preserve(2 筆都還在,不被 empty SQLite clobber)
+    df = pd.read_csv(snapshot / "watchlist.csv", dtype={"stock_id": str})
+    assert sorted(df["stock_id"].tolist()) == ["2330", "2454"]
+    # 同時 SQLite 也該被 preload(get_watchlist 該回 2 筆)
+    items = db.get_watchlist()
+    assert sorted(it["stock_id"] for it in items) == ["2330", "2454"]
+
+
 def test_backfill_returns_zero_when_partial_success(tmp_setup, monkeypatch):
     """成功率 10-50% 偏低但仍 commit(避免「1305 檔成果被丟」的 bug)。"""
     sids = [f"S{i:02d}" for i in range(10)]

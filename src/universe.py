@@ -192,7 +192,29 @@ def is_pure_stock(stock_id: str, name: str | None) -> bool:
     return True
 
 
+def pure_stock_universe(min_history: int = 20) -> list[str]:
+    """回 stock_id 清單(過濾 ETF / 債券 / 槓桿反向 + 歷史天數 >= min_history)。
+
+    給 dashboard / 短線推薦 / 推播 等多個 caller 共用,避免 ETF/債券 noise。
+
+    回傳順序穩定:依 stocks 表的 stock_id 升序。
+    """
+    sids_with_history = set(db.stocks_with_min_history(min_history))
+    if not sids_with_history:
+        return []
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id, name FROM stocks WHERE market='TW' "
+            "ORDER BY stock_id"
+        ).fetchall()
+    return [
+        r["stock_id"] for r in rows
+        if r["stock_id"] in sids_with_history
+        and is_pure_stock(r["stock_id"], r["name"])
+    ]
+
+
 __all__ = [
     "TW_TOP_50", "WATCHLIST_PATH", "load_watchlist",
-    "get_full_universe", "is_pure_stock",
+    "get_full_universe", "is_pure_stock", "pure_stock_universe",
 ]

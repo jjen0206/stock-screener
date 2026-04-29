@@ -150,3 +150,42 @@ def test_is_pure_stock_corp_bond_keyword():
     assert universe.is_pure_stock("9999", "00xxx 投等債") is False
     assert universe.is_pure_stock("9999", "美國高收債 ETF") is False
     assert universe.is_pure_stock("9999", "金融債券") is False
+
+
+# === pure_stock_universe(整合 stocks_with_min_history + is_pure_stock) ===
+
+def test_pure_stock_universe_filters_etf_and_history(tmp_db):
+    """過濾 ETF + 歷史天數雙條件。"""
+    from datetime import date, timedelta
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "0050", "name": "元大台灣50", "market": "TW"},  # ETF
+        {"stock_id": "00929", "name": "復華科技", "market": "TW"},   # ETF
+        {"stock_id": "3680", "name": "家登", "market": "TW"},
+        {"stock_id": "9999", "name": "美債 20年", "market": "TW"},   # 債券
+        {"stock_id": "8888", "name": "X", "market": "TW"},           # 歷史不足
+    ])
+    today = date(2026, 4, 28)
+    rows = []
+    for sid, n in [
+        ("2330", 30), ("0050", 30), ("00929", 30), ("3680", 30),
+        ("9999", 30), ("8888", 5),  # 歷史不足
+    ]:
+        for i in range(n):
+            d = (today - timedelta(days=i)).isoformat()
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": 100, "high": 105, "low": 95, "close": 100,
+                "volume": 1000, "trading_money": None,
+                "trading_turnover": None, "spread": 0.0,
+            })
+    db.upsert_daily_prices(rows)
+
+    sids = universe.pure_stock_universe(min_history=20)
+    assert sorted(sids) == ["2330", "3680"]
+
+
+def test_pure_stock_universe_empty_when_no_history(tmp_db):
+    """完全沒歷史 → 回空 list,不爆。"""
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    assert universe.pure_stock_universe(min_history=20) == []
