@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
@@ -517,6 +517,72 @@ def test_parse_roc_date():
     assert fetcher._parse_roc_date("1131231") == "2024-12-31"
     assert fetcher._parse_roc_date("") == ""
     assert fetcher._parse_roc_date("badformat") == ""
+
+
+# === validate_daily_price_sanity ===
+
+def test_validate_sanity_clean_data():
+    df = pd.DataFrame([
+        {"stock_id": "2330", "close": 100, "high": 105, "low": 95},
+        {"stock_id": "2454", "close": 50, "high": 52, "low": 48},
+    ])
+    issues = fetcher.validate_daily_price_sanity(df)
+    assert issues == []
+
+
+def test_validate_sanity_detects_close_zero():
+    df = pd.DataFrame([
+        {"stock_id": "BAD", "close": 0, "high": 100, "low": 90},
+    ])
+    issues = fetcher.validate_daily_price_sanity(df)
+    assert len(issues) == 1
+    assert issues[0][0] == "BAD"
+    assert "close" in issues[0][1]
+
+
+def test_validate_sanity_detects_high_below_low():
+    df = pd.DataFrame([
+        {"stock_id": "INVERTED", "close": 100, "high": 90, "low": 95},
+    ])
+    issues = fetcher.validate_daily_price_sanity(df)
+    assert len(issues) == 1
+    assert issues[0][0] == "INVERTED"
+
+
+def test_validate_sanity_detects_close_outside_range():
+    df = pd.DataFrame([
+        {"stock_id": "OUT", "close": 200, "high": 100, "low": 95},
+    ])
+    issues = fetcher.validate_daily_price_sanity(df)
+    assert len(issues) >= 1
+
+
+def test_validate_sanity_empty_df():
+    assert fetcher.validate_daily_price_sanity(pd.DataFrame()) == []
+
+
+# === _api_call retry 行為 ===
+
+def test_api_call_retries_on_transient_failure(tmp_db, monkeypatch):
+    """前 2 次 raise,第 3 次成功 → _api_call 該回成功結果。"""
+    calls = {"n": 0}
+    fake_response = Mock()
+    fake_response.status_code = 200
+    fake_response.json.return_value = {"status": 200, "data": [{"x": 1}]}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise fetcher.requests.ConnectionError(f"fail {calls['n']}")
+        return fake_response
+
+    monkeypatch.setattr(fetcher.requests, "get", fake_get)
+    # 用 monkeypatch 加速 sleep
+    monkeypatch.setattr("src._retry.time.sleep", lambda d: None)
+
+    result = fetcher._api_call("TestDataset")
+    assert result == [{"x": 1}]
+    assert calls["n"] == 3
 
 
 # === ensure_stock_info(自動補 stocks 表的 name / industry) ===

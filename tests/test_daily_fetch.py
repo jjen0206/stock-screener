@@ -114,9 +114,18 @@ def test_run_continues_when_bulk_returns_empty(tmp_db, mock_universe, monkeypatc
 def test_main_returns_zero_even_on_partial_failure(
     tmp_db, mock_universe, monkeypatch,
 ):
-    """exit 0 即使部分失敗(GitHub Actions 不要因部分失敗整個紅)。"""
+    """exit 0 即使 institutional 部分失敗(只要 bulk 健康)。"""
+    # 給足 ≥ _MIN_BULK_ROWS_HEALTHY (2000) 行 bulk 資料,通過健康警戒
+    fake_rows = [
+        {"stock_id": f"{9000 + i:04d}", "date": "2026-04-28",
+         "open": 100, "high": 110, "low": 95, "close": 105,
+         "volume": 1000, "trading_money": None,
+         "trading_turnover": None, "spread": 0.0}
+        for i in range(2100)
+    ]
+    fake_df = pd.DataFrame(fake_rows)
     monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
-                        lambda: pd.DataFrame())
+                        lambda: fake_df)
     monkeypatch.setattr(
         daily_fetch, "fetch_institutional",
         lambda sid, s, e: (_ for _ in ()).throw(RuntimeError("all fail")),
@@ -126,6 +135,21 @@ def test_main_returns_zero_even_on_partial_failure(
     monkeypatch.setattr("sys.argv", ["daily_fetch.py"])
     code = daily_fetch.main()
     assert code == 0
+
+
+def test_main_returns_one_when_bulk_below_health_threshold(
+    tmp_db, mock_universe, monkeypatch,
+):
+    """bulk 抓不到夠多資料(< 2000)→ exit 1 讓 GH Actions 標紅。"""
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    monkeypatch.setattr(daily_fetch, "fetch_institutional",
+                        lambda sid, s, e: None)
+    monkeypatch.setattr(daily_fetch, "fetch_daily_price",
+                        lambda sid, s, e: None)
+    monkeypatch.setattr("sys.argv", ["daily_fetch.py"])
+    code = daily_fetch.main()
+    assert code == 1
 
 
 def test_run_fetches_90day_history_for_watchlist(tmp_db, mock_universe, monkeypatch):

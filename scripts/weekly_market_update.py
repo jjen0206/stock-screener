@@ -93,6 +93,19 @@ def main() -> int:
         df.to_csv(path, index=False)
         print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
 
+    # 寫 timestamp + git/run id 方便事後追溯
+    import os
+    from datetime import datetime, timezone
+    (SNAPSHOT_DIR / "last_update.txt").write_text(
+        f"updated_at={datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+        f"git_sha={os.environ.get('GITHUB_SHA', 'local')}\n"
+        f"run_id={os.environ.get('GITHUB_RUN_ID', 'local')}\n"
+        f"daily_metrics_rows={result['success_metrics'].__len__()}\n"
+        f"eps_rows={result['success_eps'].__len__()}\n",
+        encoding="utf-8",
+    )
+    print("[WEEKLY] 寫 last_update.txt", flush=True)
+
     print("[WEEKLY] 完成", flush=True)
     return 0
 

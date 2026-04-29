@@ -123,44 +123,44 @@ def _twse_get_via_httpx(url: str, timeout: int = 30):
 
 
 def _twse_get(url: str, timeout: int = 30):
-    """先試 requests + _LegacySSLAdapter,失敗 fallback 到 httpx,兩個都失敗才 raise。
-
-    回 response-like 物件(`.json()` 可呼叫),caller 不用區分 client。
-    每次成敗都印一行到 stderr/log,雲端 logs 可看出走哪條路徑。
+    """先試 requests + _LegacySSLAdapter,失敗 fallback 到 httpx,
+    整個流程外包 3 次 retry(指數退避 1s/2s/4s)。
     """
-    errors: list[tuple[str, Exception]] = []
-    # try 1: requests + custom adapter
-    try:
-        r = _twse_session().get(url, timeout=timeout, verify=False)
-        r.raise_for_status()
-        return r
-    except Exception as e:  # noqa: BLE001
-        errors.append(("requests", e))
-        msg = (
-            f"[TWSE-WARN-REQUESTS] {url}: "
-            f"({type(e).__name__}) {str(e)[:200]} — 試 httpx fallback"
-        )
-        logger.warning(msg)
-        print(msg, file=sys.stderr, flush=True)
+    def _attempt():
+        errors: list[tuple[str, Exception]] = []
+        # try 1: requests + custom adapter
+        try:
+            r = _twse_session().get(url, timeout=timeout, verify=False)
+            r.raise_for_status()
+            return r
+        except Exception as e:  # noqa: BLE001
+            errors.append(("requests", e))
+            msg = (
+                f"[TWSE-WARN-REQUESTS] {url}: "
+                f"({type(e).__name__}) {str(e)[:200]} — 試 httpx fallback"
+            )
+            logger.warning(msg)
+            print(msg, file=sys.stderr, flush=True)
+        # try 2: httpx fallback
+        try:
+            r = _twse_get_via_httpx(url, timeout)
+            msg = f"[TWSE-OK-HTTPX] {url} via httpx fallback"
+            logger.info(msg)
+            print(msg, file=sys.stderr, flush=True)
+            return r
+        except Exception as e:  # noqa: BLE001
+            errors.append(("httpx", e))
+            msg = (
+                f"[TWSE-ERROR-HTTPX] {url}: "
+                f"({type(e).__name__}) {str(e)[:200]}"
+            )
+            logger.error(msg)
+            print(msg, file=sys.stderr, flush=True)
+        # 兩 client 都失敗 → 拋,讓外層 retry 接手
+        raise errors[0][1]
 
-    # try 2: httpx fallback
-    try:
-        r = _twse_get_via_httpx(url, timeout)
-        msg = f"[TWSE-OK-HTTPX] {url} via httpx fallback"
-        logger.info(msg)
-        print(msg, file=sys.stderr, flush=True)
-        return r
-    except Exception as e:  # noqa: BLE001
-        errors.append(("httpx", e))
-        msg = (
-            f"[TWSE-ERROR-HTTPX] {url}: "
-            f"({type(e).__name__}) {str(e)[:200]}"
-        )
-        logger.error(msg)
-        print(msg, file=sys.stderr, flush=True)
-
-    # 兩個都失敗 → 拋第一個 exception(通常是 requests 的,主公比較熟)
-    raise errors[0][1]
+    from src._retry import with_retry
+    return with_retry(_attempt, max_attempts=3, label=f"TWSE {url[:60]}")
 
 # 全市場資料記憶體 cache(5 分鐘 TTL,避免 batch 50 檔重複拉)
 _metrics_cache: dict | None = None

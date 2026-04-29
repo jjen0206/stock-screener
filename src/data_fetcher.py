@@ -66,33 +66,46 @@ class FinMindAPIError(RuntimeError):
 # === 共用工具 ===
 
 def _api_call(dataset: str, **params: Any) -> list[dict]:
-    """呼叫 FinMind v4 API。
+    """呼叫 FinMind v4 API,含 3 次 retry(指數退避 1s/2s/4s)。
 
     自動帶 token(若 .env 有設定);無 token 模式下不帶。
-    回傳 data 陣列(list of dict)。
+    回傳 data 陣列(list of dict)。response 驗證:status=200 且 data 是 list。
     """
     p: dict[str, Any] = {"dataset": dataset}
     if config.FINMIND_TOKEN:
         p["token"] = config.FINMIND_TOKEN
     p.update(params)
-    logger.info("[FETCH] FinMind API call: dataset=%s params=%s", dataset, params)
-    print(f"[FETCH] FinMind API call: dataset={dataset} params={params}", flush=True)
-    try:
-        r = requests.get(FINMIND_URL, params=p, timeout=30)
-    except requests.RequestException as ex:
-        raise FinMindAPIError(f"網路錯誤: {ex}") from ex
-    try:
-        payload = r.json()
-    except ValueError as ex:
-        raise FinMindAPIError(
-            f"FinMind 回傳非 JSON (status={r.status_code}): {r.text[:200]}"
-        ) from ex
-    if payload.get("status") != 200:
-        raise FinMindAPIError(
-            f"FinMind 回傳錯誤: dataset={dataset} status={payload.get('status')} "
-            f"msg={payload.get('msg')}"
+
+    def _attempt() -> list[dict]:
+        logger.info("[FETCH] FinMind API call: dataset=%s params=%s", dataset, params)
+        print(
+            f"[FETCH] FinMind API call: dataset={dataset} params={params}",
+            flush=True,
         )
-    return payload.get("data", [])
+        try:
+            r = requests.get(FINMIND_URL, params=p, timeout=30)
+        except requests.RequestException as ex:
+            raise FinMindAPIError(f"網路錯誤: {ex}") from ex
+        try:
+            payload = r.json()
+        except ValueError as ex:
+            raise FinMindAPIError(
+                f"FinMind 回傳非 JSON (status={r.status_code}): {r.text[:200]}"
+            ) from ex
+        if payload.get("status") != 200:
+            raise FinMindAPIError(
+                f"FinMind 回傳錯誤: dataset={dataset} "
+                f"status={payload.get('status')} msg={payload.get('msg')}"
+            )
+        data = payload.get("data", [])
+        if not isinstance(data, list):
+            raise FinMindAPIError(
+                f"FinMind data 欄位非 list: type={type(data).__name__}"
+            )
+        return data
+
+    from src._retry import with_retry
+    return with_retry(_attempt, max_attempts=3, label=f"FinMind {dataset}")
 
 
 def _next_day(d: str) -> str:
@@ -821,11 +834,43 @@ def ensure_stock_info(stock_id: str) -> dict | None:
     return {"stock_id": sid, "name": name, "industry": industry}
 
 
+def validate_daily_price_sanity(df: pd.DataFrame) -> list[tuple[str, str]]:
+    """偵測 daily_price 異常,回 [(stock_id, reason), ...]。
+
+    當前 check:
+    - close <= 0 (或 NaN):全部視為異常
+    - high < low:資料矛盾
+    - close 不在 [low, high] 之間:資料矛盾
+    不阻擋寫入,僅 print warning 給 daily_fetch summary 用。
+    """
+    if df is None or df.empty:
+        return []
+    issues: list[tuple[str, str]] = []
+    for _, r in df.iterrows():
+        sid = str(r.get("stock_id", "?"))
+        c = r.get("close")
+        h = r.get("high")
+        low = r.get("low")
+        if c is None or pd.isna(c) or float(c) <= 0:
+            issues.append((sid, f"close={c}"))
+            continue
+        if h is not None and low is not None:
+            try:
+                if float(h) < float(low):
+                    issues.append((sid, f"high {h} < low {low}"))
+                elif not (float(low) <= float(c) <= float(h)):
+                    issues.append((sid, f"close {c} 不在 [{low}, {h}] 區間"))
+            except (TypeError, ValueError):
+                pass
+    return issues
+
+
 __all__ = [
     "FinMindAPIError",
     "list_tw_stocks",
     "ensure_stock_info",
     "fetch_all_daily_prices_bulk",
+    "validate_daily_price_sanity",
     "fetch_daily_price",
     "fetch_institutional",
     "fetch_monthly_revenue",

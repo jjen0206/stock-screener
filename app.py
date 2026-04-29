@@ -1457,6 +1457,22 @@ def _page_settings() -> None:
     cols[0].metric("SQLite 路徑", config.DATABASE_PATH)
     cols[1].metric("預設市場", config.DEFAULT_MARKET)
 
+    # 資料新鮮度:cache 內 daily_prices 最新日 + snapshot timestamp
+    st.markdown("### 📅 資料新鮮度")
+    fresh_cols = st.columns(2)
+    latest_date = _get_latest_data_date()
+    fresh_cols[0].metric(
+        "daily_prices 最新日",
+        latest_date or "(無)",
+        help="cache 內最新一筆 daily_prices 的日期",
+    )
+    snapshot_info = _get_snapshot_last_update()
+    fresh_cols[1].metric(
+        "TWSE snapshot",
+        snapshot_info or "(無)",
+        help="data/twse_snapshot/last_update.txt 的 updated_at",
+    )
+
     st.markdown("### 目前 cache 內容")
     counts = _get_table_counts()
     df = pd.DataFrame(
@@ -1528,6 +1544,33 @@ GitHub repo Settings → Secrets 也補一份。Telegram + Discord 並行送,
 任一個成功就算 OK,GitHub Actions 不會紅。
             """
         )
+
+
+def _get_latest_data_date() -> str | None:
+    """SQLite daily_prices 內最新一筆日期。"""
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            row = conn.execute(
+                "SELECT MAX(date) AS latest FROM daily_prices"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return row["latest"] if row and row["latest"] else None
+
+
+def _get_snapshot_last_update() -> str | None:
+    """讀 data/twse_snapshot/last_update.txt 的 updated_at 行。"""
+    path = config.PROJECT_ROOT / "data" / "twse_snapshot" / "last_update.txt"
+    if not path.exists():
+        return None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("updated_at="):
+                return line.split("=", 1)[1].strip()[:19]  # 取 ISO 前 19 字
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _get_table_counts() -> dict[str, object]:
