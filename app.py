@@ -144,6 +144,64 @@ def _inject_global_css() -> None:
     st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
 
 
+# === PWA(iOS Safari「加到主畫面」全螢幕體驗) ===
+
+@st.cache_data(show_spinner=False)
+def _build_pwa_html() -> str:
+    """組 PWA meta tags + manifest(都用 data URI,不依賴 static folder)。
+
+    iOS Safari 把 app 加到主畫面後:
+    - apple-mobile-web-app-capable=yes → 全螢幕(無 Safari 網址列)
+    - apple-touch-icon → 主畫面圖示
+    - manifest → Android Chrome 也支援 PWA 安裝
+    """
+    import base64
+    import json
+
+    icon_path = config.PROJECT_ROOT / "static" / "icon-180.png"
+    if icon_path.exists():
+        with open(icon_path, "rb") as f:
+            icon_b64 = base64.b64encode(f.read()).decode("ascii")
+        icon_uri = f"data:image/png;base64,{icon_b64}"
+    else:
+        icon_uri = ""
+
+    manifest = {
+        "name": "個人選股工具",
+        "short_name": "股票 Pro",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0e1117",
+        "theme_color": "#1f77b4",
+        "icons": (
+            [{"src": icon_uri, "sizes": "180x180", "type": "image/png"}]
+            if icon_uri else []
+        ),
+    }
+    manifest_b64 = base64.b64encode(
+        json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
+    ).decode("ascii")
+
+    return f"""
+<link rel="manifest" href="data:application/manifest+json;base64,{manifest_b64}"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="股票 Pro"/>
+<meta name="theme-color" content="#1f77b4"/>
+{f'<link rel="apple-touch-icon" href="{icon_uri}"/>' if icon_uri else ''}
+{f'<link rel="icon" type="image/png" sizes="180x180" href="{icon_uri}"/>' if icon_uri else ''}
+"""
+
+
+def _inject_pwa() -> None:
+    """注入 PWA meta + manifest;失敗不阻擋 app 啟動。"""
+    try:
+        st.markdown(_build_pwa_html(), unsafe_allow_html=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # === 雲端 fallback:從 CSV snapshot 灌資料(TWSE OpenAPI 在 Streamlit Cloud 被擋) ===
 
 _snapshot_loaded = False
@@ -279,6 +337,7 @@ def main() -> None:
         layout="wide",
     )
     _inject_global_css()
+    _inject_pwa()
     _load_snapshot_if_needed()
 
     st.sidebar.title("📈 個人選股工具")
