@@ -46,7 +46,7 @@ from src.universe import (
 
 
 PAGES = [
-    "🔥 短線", "💎 長線", "📈 回測",
+    "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
     "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 設定",
 ]
 
@@ -295,11 +295,11 @@ def main() -> None:
         st.rerun()
 
     # 上方水平 tabs 取代 sidebar radio(手機優先)
-    # 註:用 segmented_control 而非 st.tabs — st.tabs 會把 7 頁全部渲染,
+    # 註:用 segmented_control 而非 st.tabs — st.tabs 會把所有頁渲染,
     # 觸發不必要的選股 + 大盤情緒抓取。segmented_control 走 session_state
     # 單頁路由,行為等同舊版 radio 但放在主區頂端。
     if "active_page" not in st.session_state:
-        st.session_state["active_page"] = PAGES[3]  # 預設個股查詢
+        st.session_state["active_page"] = PAGES[0]  # 預設首頁 Dashboard
     page = st.segmented_control(
         "頁面", PAGES,
         default=st.session_state["active_page"],
@@ -308,7 +308,9 @@ def main() -> None:
     ) or st.session_state["active_page"]
     st.session_state["active_page"] = page
 
-    if page == "🔥 短線":
+    if page == "🏠 首頁":
+        _page_dashboard()
+    elif page == "🔥 短線":
         _page_short()
     elif page == "💎 長線":
         _page_long()
@@ -331,6 +333,134 @@ def main() -> None:
     )
 
     _render_footer()
+
+
+# === 首頁 Dashboard ===
+
+def _page_dashboard() -> None:
+    """4 區塊速覽:大盤 / 今日推薦 Top 3 / 關注 Top 3 / 系統狀態。"""
+    st.header("🏠 今日速覽")
+    st.caption("一頁看完台股最新狀況。詳細分析請切上方 tabs。")
+
+    # === 1. 大盤速覽 ===
+    st.markdown("### 📊 大盤速覽")
+    try:
+        taiex_df = fetch_taiex(days=10)
+    except Exception:  # noqa: BLE001
+        taiex_df = pd.DataFrame()
+    if taiex_df.empty:
+        st.caption("加權指數抓取失敗(可能 FinMind 限流),稍後再試。")
+    else:
+        last_close = float(taiex_df["close"].iloc[-1])
+        prev_close = (
+            float(taiex_df["close"].iloc[-2])
+            if len(taiex_df) >= 2 else last_close
+        )
+        delta = last_close - prev_close
+        delta_pct = delta / prev_close * 100 if prev_close else 0
+        with st.container(border=True):
+            st.metric(
+                f"加權指數 ({taiex_df['date'].iloc[-1]})",
+                f"{last_close:,.2f}",
+                f"{delta:+.2f} ({delta_pct:+.2f}%)",
+                delta_color="normal" if delta >= 0 else "inverse",
+            )
+
+    # === 2. 今日短線推薦 Top 3 ===
+    st.markdown("### 🔥 今日短線推薦 (Top 3)")
+    eligible_sids = db.stocks_with_min_history(60)
+    if not eligible_sids:
+        st.caption(
+            "📭 cache 內沒有任何個股累積 60 天歷史。"
+            "請按 sidebar『⏳ 一次性回補 90 日歷史』。"
+        )
+    else:
+        with st.spinner(f"掃描 {len(eligible_sids)} 檔(60+ 天)..."):
+            try:
+                today_iso = date.today().isoformat()
+                agg = run_all_strategies(today_iso, stock_ids=eligible_sids)
+                df_picks = aggregated_to_dataframe(agg).head(3)
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"掃描失敗:{type(e).__name__}: {e}")
+                df_picks = pd.DataFrame()
+        if df_picks.empty:
+            st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
+        else:
+            render_picks_cards(df_picks.to_dict("records"))
+
+    # === 3. 我的關注 Top 3 ===
+    st.markdown("### ⭐ 我的關注 (前 3 檔)")
+    items = db.get_watchlist()
+    if not items:
+        st.caption(
+            "目前沒有關注的個股。請到「🔍 個股」頁查詢後按 ☆ 圖示加入。"
+        )
+    else:
+        wl_cards: list[dict] = []
+        for it in items[:3]:
+            sid = it["stock_id"]
+            with db.get_conn() as conn:
+                meta = conn.execute(
+                    "SELECT name FROM stocks WHERE stock_id=?", (sid,),
+                ).fetchone()
+                recent = conn.execute(
+                    "SELECT date, close FROM daily_prices "
+                    "WHERE stock_id=? ORDER BY date DESC LIMIT 2",
+                    (sid,),
+                ).fetchall()
+            name = meta["name"] if meta and meta["name"] else "—"
+            close = (
+                float(recent[0]["close"])
+                if recent and recent[0]["close"] else None
+            )
+            prev = (
+                float(recent[1]["close"])
+                if len(recent) > 1 and recent[1]["close"] else None
+            )
+            change_pct = (
+                (close - prev) / prev * 100
+                if (close and prev) else None
+            )
+            wl_cards.append({
+                "stock_id": sid, "name": name,
+                "close": close, "change_pct": change_pct,
+            })
+        render_picks_cards(
+            wl_cards, show_signal=False, show_targets=False, show_change=True,
+        )
+
+    # === 4. 系統狀態 ===
+    st.markdown("### 📅 系統狀態")
+    health = db.cache_health_summary()
+    b = health["buckets"]
+    latest_date = _get_latest_data_date() or "(無)"
+    cols = st.columns(2)
+    with cols[0]:
+        with st.container(border=True):
+            st.metric("daily_prices 最新日", latest_date)
+            st.caption(
+                f"全 TW 股 {health['total_stocks']} 檔 / "
+                f"有價量 {health['with_prices']} 檔"
+            )
+    with cols[1]:
+        with st.container(border=True):
+            st.metric(
+                "可跑全策略個股 (60+ 天)",
+                f"{b['60+']}",
+                delta=(
+                    f"另有 {b['20-59']} 檔可跑乖離率"
+                    if b["20-59"] else None
+                ),
+                delta_color="off",
+            )
+            st.caption(
+                f"分布:60+ {b['60+']}・20-59 {b['20-59']}"
+                f"・14-19 {b['14-19']}・<14 {b['<14']}"
+            )
+            if b["60+"] + b["20-59"] < 100:
+                st.caption(
+                    "⏳ 多數歷史不足,請按 sidebar『⏳ 一次性回補 90 日歷史』"
+                )
 
 
 # === 短線推薦頁 ===
