@@ -25,10 +25,18 @@ on:
         required: false
         default: "false"
 
+# 防止新 push 把長 backfill workflow cancel 掉(同 group 同時最多 1 個,
+# 但已在跑的不被新觸發 supersede)
+concurrency:
+  group: backfill-history
+  cancel-in-progress: false
+
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # FinMind 免費 token 限額 600/hr,2700 檔 daily_price 至少需 4.5 小時。
+    # 設 350 分鐘(GH Actions 免費上限 360),留 10 分緩衝給 commit + push。
+    timeout-minutes: 350
     permissions:
       contents: write
     steps:
