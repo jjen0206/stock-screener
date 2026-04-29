@@ -17,6 +17,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from src import database as db, indicators as ind
+from src._bulk_load import bulk_load_prices
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
 
@@ -80,12 +81,20 @@ def _enrich_with_targets(
                 df[col] = pd.Series(dtype=float)
         return df
 
+    # **Bulk load**:對所有入選個股一次拉 ATR 期歷史(避免 N 次 SELECT)
+    sids_for_atr = [str(s) for s in df["stock_id"].tolist()]
+    with db.get_conn() as conn:
+        atr_history = bulk_load_prices(
+            conn, sids_for_atr, target_date,
+            lookback_days=max(atr_period * 2, 30),
+        )
+
     rows: list[dict] = []
     for _, row in df.iterrows():
-        sid = row["stock_id"]
+        sid = str(row["stock_id"])
         close = float(row.get("close") or 0)
         new_row = row.to_dict()
-        atr14 = _compute_atr_for_stock(sid, target_date, atr_period)
+        atr14 = _compute_atr_from_df(atr_history.get(sid), atr_period)
         if atr14 is not None and atr14 > 0 and close > 0:
             target_low = close + TARGET_LOW_MULT * atr14
             target_high = close + TARGET_HIGH_MULT * atr14
@@ -107,33 +116,30 @@ def _enrich_with_targets(
     return pd.DataFrame(rows)
 
 
-def _compute_atr_for_stock(
-    stock_id: str, target_date: str, period: int = 14,
+def _compute_atr_from_df(
+    df: pd.DataFrame | None, period: int = 14,
 ) -> float | None:
-    """從 SQLite 拉個股近 N 日,算 ATR(period) 取最後一筆。
-
-    需要至少 period+1 筆才有 ATR;否則回 None。
-    """
-    lookback = max(period * 2, 30)  # 留足夠資料給 ATR Wilder 平滑收斂
-    with db.get_conn() as conn:
-        rows = conn.execute(
-            "SELECT date, high, low, close FROM daily_prices "
-            "WHERE stock_id=? AND date<=? "
-            "ORDER BY date DESC LIMIT ?",
-            (stock_id, target_date, lookback),
-        ).fetchall()
-    if len(rows) < period + 1:
+    """從已載入的 DataFrame 算 ATR(period) 最後一筆;資料不足回 None。"""
+    if df is None or len(df) < period + 1:
         return None
-    df = (
-        pd.DataFrame([dict(r) for r in rows])
-        .iloc[::-1]
-        .reset_index(drop=True)
-    )
     series = ind.atr(df, period=period)
     last = series.iloc[-1]
     if pd.isna(last) or last <= 0:
         return None
     return float(last)
+
+
+def _compute_atr_for_stock(
+    stock_id: str, target_date: str, period: int = 14,
+) -> float | None:
+    """單檔 ATR(包裝 bulk_load_prices + _compute_atr_from_df)。
+
+    給 compute_target_prices() 等對外 helper 用;選股流程已改走 bulk load。
+    """
+    lookback = max(period * 2, 30)
+    with db.get_conn() as conn:
+        history = bulk_load_prices(conn, [stock_id], target_date, lookback)
+    return _compute_atr_from_df(history.get(stock_id), period)
 
 
 def compute_target_prices(
@@ -320,44 +326,46 @@ def _evaluate_strategy(
     lookback_days: int,
     min_required: int,
 ) -> pd.DataFrame:
-    """跑單一策略;**用單一 connection 包整個 loop**(profile 顯示 8000+ 次
-    connect/close 是 hot path,改成單一 connection 省 ~70% 時間)。
+    """跑單一策略;**Bulk SQL load**:一次拉全 universe 歷史,避免 N 次 SELECT。
+
+    Profile:per-stock SELECT × 2360 = 4720 次 SQL,雲端 SQLite IO 是主要瓶頸;
+    改 bulk load 後本機 0.22s → 0.04s,雲端再快數倍。
     """
     if not sids:
         return pd.DataFrame(columns=cols)
-    placeholders = ",".join(["?"] * len(sids))
 
     with db.get_conn() as conn:
-        # 1. 一次查 stocks 表所有名字
-        meta = conn.execute(
-            f"SELECT stock_id, name FROM stocks WHERE stock_id IN ({placeholders})",
-            sids,
-        ).fetchall()
+        # 1. stocks 名稱(若 sids 太大則直接撈 TW 全表,避免 IN clause 變數爆量)
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
         name_map = {r["stock_id"]: r["name"] for r in meta}
 
-        # 2. loop 個股 — 重用同一個 conn(不開新 connection)
-        rows: list[dict] = []
-        for sid in sids:
-            try:
-                price_rows = conn.execute(
-                    "SELECT date, open, high, low, close, volume "
-                    "FROM daily_prices "
-                    "WHERE stock_id=? AND date<=? "
-                    "ORDER BY date DESC LIMIT ?",
-                    (sid, date, lookback_days),
-                ).fetchall()
-                if len(price_rows) < min_required:
-                    continue
-                df = pd.DataFrame([dict(r) for r in price_rows])
-                df["stock_id"] = sid
-                df = df.iloc[::-1].reset_index(drop=True)
-                result = evaluate_fn(df, name_map.get(sid, sid))
-                if result is not None:
-                    result["stock_id"] = sid
-                    rows.append(result)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("[STRATEGY] %s 跳過: %s", sid, e)
-                continue
+        # 2. **Bulk load** 全 universe 的 lookback_days 歷史
+        prices_by_sid = bulk_load_prices(conn, sids, date, lookback_days)
+
+    # 3. loop 個股 — 從 dict 拿,不再進 DB
+    rows: list[dict] = []
+    for sid in sids:
+        df = prices_by_sid.get(sid)
+        if df is None or len(df) < min_required:
+            continue
+        try:
+            result = evaluate_fn(df, name_map.get(sid, sid))
+            if result is not None:
+                result["stock_id"] = sid
+                rows.append(result)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[STRATEGY] %s 跳過: %s", sid, e)
+            continue
     return pd.DataFrame(rows, columns=cols)
 
 

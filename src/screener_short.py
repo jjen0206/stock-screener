@@ -21,6 +21,7 @@ from typing import Any
 import pandas as pd
 
 from src import database as db, indicators as ind
+from src._bulk_load import bulk_load_institutional_totals, bulk_load_prices
 
 
 logger = logging.getLogger(__name__)
@@ -68,97 +69,85 @@ def screen_short(
 
     with db.get_conn() as conn:
         if stock_ids:
-            placeholders = ",".join(["?"] * len(stock_ids))
-            stocks = conn.execute(
-                f"SELECT stock_id, name FROM stocks "
-                f"WHERE market='TW' AND stock_id IN ({placeholders})",
-                stock_ids,
-            ).fetchall()
+            if len(stock_ids) <= 500:
+                placeholders = ",".join(["?"] * len(stock_ids))
+                stocks = conn.execute(
+                    f"SELECT stock_id, name FROM stocks "
+                    f"WHERE market='TW' AND stock_id IN ({placeholders})",
+                    stock_ids,
+                ).fetchall()
+            else:
+                # 大 universe 不用 IN clause(避開 SQLITE_LIMIT_VARIABLE_NUMBER 風險)
+                rows_meta = conn.execute(
+                    "SELECT stock_id, name FROM stocks WHERE market='TW'"
+                ).fetchall()
+                wanted = set(stock_ids)
+                stocks = [r for r in rows_meta if r["stock_id"] in wanted]
         else:
             stocks = conn.execute(
                 "SELECT stock_id, name FROM stocks WHERE market='TW'"
             ).fetchall()
 
-    if not stocks:
-        logger.warning("[SCREEN_SHORT] stocks 表為空,無法選股")
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        if not stocks:
+            logger.warning("[SCREEN_SHORT] stocks 表為空,無法選股")
+            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+        sids = [s["stock_id"] for s in stocks]
+
+        # **Bulk load** — 一次拉所有 sids 的歷史(避免 N 次 SELECT)
+        prices_by_sid = bulk_load_prices(conn, sids, date, _LOOKBACK_DAYS)
+        # institutional 只需最近 inst_buy_days 筆,但 bulk lookback 多取一點防漏
+        inst_by_sid = bulk_load_institutional_totals(
+            conn, sids, date, max(p["inst_buy_days"] * 3, 14),
+        )
 
     rows: list[dict] = []
     skipped = 0
-    # 單一 connection 包整個 loop(profile 顯示 per-stock connection 是 hot path)
-    with db.get_conn() as conn:
-        for s in stocks:
-            try:
-                row = _evaluate_short(
-                    s["stock_id"], s["name"], date, p, conn=conn,
-                )
-            except _SkipStock:
-                skipped += 1
-                continue
-            if row is not None:
-                rows.append(row)
+    min_price_rows = max(p["ma_volume_period"] + 1, p["kd_period"] + 1)
+
+    for s in stocks:
+        sid = s["stock_id"]
+        name = s["name"]
+        price_df = prices_by_sid.get(sid)
+        inst_list = inst_by_sid.get(sid, [])
+
+        if (price_df is None or len(price_df) < min_price_rows
+                or len(inst_list) < p["inst_buy_days"]):
+            skipped += 1
+            continue
+
+        try:
+            row = _evaluate_short_from_data(
+                sid, name, date, p, price_df, inst_list,
+            )
+        except _SkipStock:
+            skipped += 1
+            continue
+        if row is not None:
+            rows.append(row)
 
     if skipped:
         logger.warning(
             "[SCREEN_SHORT] %d 檔資料不足跳過(需至少 %d 日價格 + %d 筆法人)",
-            skipped,
-            max(p["ma_volume_period"] + 1, p["kd_period"] + 1),
-            p["inst_buy_days"],
+            skipped, min_price_rows, p["inst_buy_days"],
         )
 
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
 
-def _evaluate_short(
+def _evaluate_short_from_data(
     stock_id: str,
     name: str,
     target_date: str,
     p: dict,
-    conn=None,
+    price_df: pd.DataFrame,
+    inst_list: list[dict],
 ) -> dict | None:
-    """評估單檔。回 dict = 入選;回 None = 三條件未全部過;raise _SkipStock = 資料不足。
+    """評估單檔(資料已 bulk-loaded)。回 dict=入選 / None=未過 / raise _SkipStock=資料不足。
 
-    conn 可由 caller 傳入(避免 per-stock 開新 connection,大 universe 顯著加速)。
+    price_df: 日線歷史(date 升序),最後一筆必須是 target_date。
+    inst_list: 法人歷史(date 升序),取最後 inst_buy_days 筆當「最近 N 日」。
     """
-    min_price_rows = max(p["ma_volume_period"] + 1, p["kd_period"] + 1)
-
-    if conn is not None:
-        price_rows = conn.execute(
-            "SELECT date, open, high, low, close, volume "
-            "FROM daily_prices WHERE stock_id=? AND date<=? "
-            "ORDER BY date DESC LIMIT ?",
-            (stock_id, target_date, _LOOKBACK_DAYS),
-        ).fetchall()
-        inst_rows = conn.execute(
-            "SELECT date, total_buy_sell FROM institutional "
-            "WHERE stock_id=? AND date<=? ORDER BY date DESC LIMIT ?",
-            (stock_id, target_date, p["inst_buy_days"]),
-        ).fetchall()
-    else:
-        # 向後相容:沒傳 conn 自己開
-        with db.get_conn() as own_conn:
-            price_rows = own_conn.execute(
-                "SELECT date, open, high, low, close, volume "
-                "FROM daily_prices WHERE stock_id=? AND date<=? "
-                "ORDER BY date DESC LIMIT ?",
-                (stock_id, target_date, _LOOKBACK_DAYS),
-            ).fetchall()
-            inst_rows = own_conn.execute(
-                "SELECT date, total_buy_sell FROM institutional "
-                "WHERE stock_id=? AND date<=? ORDER BY date DESC LIMIT ?",
-                (stock_id, target_date, p["inst_buy_days"]),
-            ).fetchall()
-
-    if len(price_rows) < min_price_rows or len(inst_rows) < p["inst_buy_days"]:
-        raise _SkipStock()
-
-    # SQL 取的是 DESC,反轉成升序給指標計算
-    price_df = (
-        pd.DataFrame([dict(r) for r in price_rows])
-        .iloc[::-1]
-        .reset_index(drop=True)
-    )
-
     # target_date 必須剛好是當日收盤(否則表示 target_date 沒交易)
     if price_df["date"].iloc[-1] != target_date:
         raise _SkipStock()
@@ -185,8 +174,9 @@ def _evaluate_short(
         and curr_k > p["kd_threshold_low"]
     )
 
-    # === 條件 C: 法人連續買超 ===
-    inst_totals = [float(r["total_buy_sell"] or 0) for r in inst_rows]
+    # === 條件 C: 法人連續買超(取最近 inst_buy_days 筆) ===
+    recent_inst = inst_list[-p["inst_buy_days"]:]
+    inst_totals = [float(r["total_buy_sell"] or 0) for r in recent_inst]
     cond_c = all(t > 0 for t in inst_totals)
     inst_sum = float(sum(inst_totals))
 
@@ -204,6 +194,45 @@ def _evaluate_short(
         "inst_total_3d": inst_sum,
         "matched_at": target_date,
     }
+
+
+def _evaluate_short(
+    stock_id: str,
+    name: str,
+    target_date: str,
+    p: dict,
+    conn=None,
+) -> dict | None:
+    """評估單檔(向後相容入口;內部走 bulk_load + _evaluate_short_from_data)。
+
+    保留給舊測試 / 外部呼叫。新流程 screen_short 已直接走 bulk path。
+    """
+    min_price_rows = max(p["ma_volume_period"] + 1, p["kd_period"] + 1)
+    inst_lookback = max(p["inst_buy_days"] * 3, 14)
+
+    if conn is not None:
+        prices = bulk_load_prices(conn, [stock_id], target_date, _LOOKBACK_DAYS)
+        insts = bulk_load_institutional_totals(
+            conn, [stock_id], target_date, inst_lookback,
+        )
+    else:
+        with db.get_conn() as own_conn:
+            prices = bulk_load_prices(
+                own_conn, [stock_id], target_date, _LOOKBACK_DAYS,
+            )
+            insts = bulk_load_institutional_totals(
+                own_conn, [stock_id], target_date, inst_lookback,
+            )
+
+    price_df = prices.get(stock_id)
+    inst_list = insts.get(stock_id, [])
+    if (price_df is None or len(price_df) < min_price_rows
+            or len(inst_list) < p["inst_buy_days"]):
+        raise _SkipStock()
+
+    return _evaluate_short_from_data(
+        stock_id, name, target_date, p, price_df, inst_list,
+    )
 
 
 __all__ = ["screen_short", "DEFAULT_SHORT_PARAMS", "OUTPUT_COLUMNS"]

@@ -328,41 +328,58 @@ def _page_short() -> None:
     if not submit:
         st.info(
             "選好參數後按「執行選股」。\n\n"
-            "首次執行會逐檔抓取最新資料(已在 cache 的不重抓),"
-            "建議先用「快速:50 檔大型股」測試。"
+            "全市場 / TOP 50 走 GH Actions 每日更新的 SQLite 快取,秒級回應;"
+            "我的關注清單會即時補抓最新資料。"
         )
         return
+
+    import time as _time
+    t0 = _time.perf_counter()
 
     # 取選股範圍
     universe = _resolve_universe(universe_choice)
     if universe is None:
         return
 
-    # 抓資料(進度條)
     today_iso = target_date.isoformat()
     start_iso = (target_date - timedelta(days=90)).isoformat()
-    progress = st.progress(0.0, text="準備資料...")
-    status = st.empty()
-    n = len(universe)
     failures: list[str] = []
-    for i, (sid, name) in enumerate(universe):
-        progress.progress(
-            (i + 1) / n,
-            text=f"抓取 {i + 1}/{n}: {sid} {name}",
-        )
-        try:
-            db.upsert_stocks([{"stock_id": sid, "name": name, "market": "TW"}])
-            fetch_daily_price(sid, start_iso, today_iso)
-            fetch_institutional(sid, start_iso, today_iso)
-        except FinMindAPIError as e:
-            failures.append(f"{sid}({e})")
-        except Exception as e:  # noqa: BLE001
-            failures.append(f"{sid}({type(e).__name__}: {e})")
-    progress.empty()
-    status.empty()
+    skipped_prefetch = False
+
+    # 只對「我的關注清單」做即時 prefetch — 全市場 / TOP 50 已由
+    # daily_fetch.py (GH Actions cron) 每日更新,逐檔 prefetch 是純浪費。
+    if universe_choice == "我的關注清單" and universe:
+        progress = st.progress(0.0, text="抓取關注清單最新資料...")
+        n = len(universe)
+        update_every = max(1, n // 20)  # 最多更新 20 次進度條
+        for i, (sid, name) in enumerate(universe):
+            if (i + 1) % update_every == 0 or i == n - 1:
+                progress.progress(
+                    (i + 1) / n,
+                    text=f"抓取 {i + 1}/{n}: {sid} {name}",
+                )
+            try:
+                db.upsert_stocks([
+                    {"stock_id": sid, "name": name, "market": "TW"},
+                ])
+                fetch_daily_price(sid, start_iso, today_iso)
+                fetch_institutional(sid, start_iso, today_iso)
+            except FinMindAPIError as e:
+                failures.append(f"{sid}({e})")
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"{sid}({type(e).__name__}: {e})")
+        progress.empty()
+    else:
+        skipped_prefetch = True
+
+    t1 = _time.perf_counter()
 
     if failures:
-        st.warning(f"⚠️ {len(failures)} 檔抓取失敗(可能無 token 被限制):{', '.join(failures[:5])}{'...' if len(failures) > 5 else ''}")
+        st.warning(
+            f"⚠️ {len(failures)} 檔抓取失敗(可能無 token 被限制):"
+            f"{', '.join(failures[:5])}"
+            f"{'...' if len(failures) > 5 else ''}"
+        )
 
     # 跑多策略並行
     params = {
@@ -375,16 +392,24 @@ def _page_short() -> None:
         return
     sids_only = [s for s, _ in universe]
     with st.spinner(
-        f"掃描 {len(sids_only)} 檔 × {len(enabled_keys)} 套策略並行..."
+        f"掃描 {len(sids_only)} 檔 × {len(enabled_keys)} 套策略 "
+        f"(bulk SQL load)..."
     ):
         agg = run_all_strategies(
             today_iso, enabled=enabled_keys, params=params,
             stock_ids=sids_only,
         )
 
+    t2 = _time.perf_counter()
+
     if not agg:
         st.info(
             "📭 任一啟用的策略都無入選。可放寬參數或加開更多策略。"
+        )
+        st.caption(
+            f"⏱️ 載入={t1-t0:.2f}s,選股={t2-t1:.2f}s,共 {t2-t0:.2f}s "
+            f"({len(sids_only)} 檔)"
+            f"{' [跳過 prefetch — 走 daily_fetch 快取]' if skipped_prefetch else ''}"
         )
         return
 
@@ -394,6 +419,7 @@ def _page_short() -> None:
     )
 
     df = aggregated_to_dataframe(agg)
+    t3 = _time.perf_counter()
     selection = st.dataframe(
         df,
         use_container_width=True,
@@ -437,6 +463,14 @@ def _page_short() -> None:
                 "ATR(14)", format="%.2f", width="small",
             ),
         },
+    )
+
+    t4 = _time.perf_counter()
+    st.caption(
+        f"⏱️ 載入={t1-t0:.2f}s,選股={t2-t1:.2f}s,"
+        f"DataFrame={t3-t2:.2f}s,渲染={t4-t3:.2f}s,共 {t4-t0:.2f}s "
+        f"({len(sids_only)} 檔 → {len(agg)} 中)"
+        f"{' [跳過 prefetch — 走 daily_fetch 快取]' if skipped_prefetch else ''}"
     )
 
     if selection and selection.selection.rows:
