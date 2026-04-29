@@ -80,8 +80,8 @@ def test_query_page_toggle_first_add(monkeypatch, tmp_path):
     cfg.DATABASE_PATH = str(tmp_path / "ux1.db")
     db.init_db()
 
+    # 預設導航就停在「🔍 個股」(PAGES[3]),不需手動切
     at = AppTest.from_file("app.py").run(timeout=30)
-    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
     add_btn = next(
         (b for b in at.button if "2330" in b.label and "加入" in b.label),
         None,
@@ -99,7 +99,7 @@ def test_query_page_toggle_second_add_after_changing_stock(monkeypatch, tmp_path
     db.init_db()
 
     at = AppTest.from_file("app.py").run(timeout=30)
-    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
+    # 預設導航就停在「🔍 個股」
     # 第一次加 2330
     btn = next(b for b in at.button if "2330" in b.label and "加入" in b.label)
     btn.click().run(timeout=30)
@@ -154,7 +154,7 @@ def test_query_page_toggle_remove_existing(monkeypatch, tmp_path):
     db.add_to_watchlist("2330")  # 預先加入
 
     at = AppTest.from_file("app.py").run(timeout=30)
-    at.sidebar.radio[0].set_value("個股查詢").run(timeout=30)
+    # 預設導航就停在「🔍 個股」
     # 該顯示「已關注 2330」按鈕
     remove_btn = next(
         (b for b in at.button if "2330" in b.label and "已關注" in b.label),

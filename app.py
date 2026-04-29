@@ -46,8 +46,8 @@ from src.universe import (
 
 
 PAGES = [
-    "短線推薦", "長線口袋名單", "📈 簡易回測",
-    "個股查詢", "⭐ 我的關注", "📊 大盤情緒", "設定",
+    "🔥 短線", "💎 長線", "📈 回測",
+    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -283,21 +283,33 @@ def main() -> None:
         st.toast("✅ 已清空快取,重新載入...", icon="🔄")
         st.rerun()
 
-    page = st.sidebar.radio("選擇功能", PAGES, index=3)
+    # 上方水平 tabs 取代 sidebar radio(手機優先)
+    # 註:用 segmented_control 而非 st.tabs — st.tabs 會把 7 頁全部渲染,
+    # 觸發不必要的選股 + 大盤情緒抓取。segmented_control 走 session_state
+    # 單頁路由,行為等同舊版 radio 但放在主區頂端。
+    if "active_page" not in st.session_state:
+        st.session_state["active_page"] = PAGES[3]  # 預設個股查詢
+    page = st.segmented_control(
+        "頁面", PAGES,
+        default=st.session_state["active_page"],
+        key="nav_segmented",
+        label_visibility="collapsed",
+    ) or st.session_state["active_page"]
+    st.session_state["active_page"] = page
 
-    if page == "短線推薦":
+    if page == "🔥 短線":
         _page_short()
-    elif page == "長線口袋名單":
+    elif page == "💎 長線":
         _page_long()
-    elif page == "📈 簡易回測":
+    elif page == "📈 回測":
         _page_backtest()
-    elif page == "個股查詢":
+    elif page == "🔍 個股":
         _page_stock_query()
-    elif page == "⭐ 我的關注":
+    elif page == "⭐ 關注":
         _page_watchlist()
-    elif page == "📊 大盤情緒":
+    elif page == "📊 大盤":
         _page_market_sentiment()
-    elif page == "設定":
+    elif page == "⚙️ 設定":
         _page_settings()
 
     _render_sidebar_update()
