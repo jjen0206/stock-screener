@@ -22,7 +22,7 @@ from datetime import date as _date
 import pandas as pd
 import requests
 
-from src import config
+from src import config, database as db
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
 
@@ -93,13 +93,33 @@ def send_telegram_message(
     return False
 
 
+def _empty_pick_suffix() -> str:
+    """0 入選時的補充說明:多數情況不是 bug 而是 cache 歷史不足。
+
+    顯示 cache 健康度;若多數個股 < 60 天,加註「歷史累積中」避免誤判。
+    """
+    try:
+        health = db.cache_health_summary()
+    except Exception:  # noqa: BLE001
+        return ""
+    b = health["buckets"]
+    eligible = b["60+"] + b["20-59"]
+    suffix = (
+        f"\n\n📦 Cache: 60+天 {b['60+']}・20-59天 {b['20-59']}"
+        f"・<20天 {b['<14'] + b['14-19']}"
+    )
+    if eligible < 100:
+        suffix += "\n⏳ 多數個股歷史累積中(短線策略需 14-60 天),請等待 1-2 週"
+    return suffix
+
+
 def format_short_picks(picks: pd.DataFrame, date: str) -> str:
     """把短線選股結果包成 Telegram Markdown 訊息。
 
     空 picks → 回「📭 今日無符合條件」訊息。
     """
     if picks is None or picks.empty:
-        return f"📭 *{date}* 今日無符合條件的個股"
+        return f"📭 *{date}* 今日無符合條件的個股{_empty_pick_suffix()}"
 
     lines: list[str] = [f"📈 *{date} 短線推薦* ({len(picks)} 檔)", ""]
     for i, (_, row) in enumerate(picks.iterrows(), start=1):
@@ -169,7 +189,7 @@ def format_multi_strategy_picks(
     優先列 信號數 多的(多策略同時看好 = 信心強)。
     """
     if not aggregated:
-        return f"📭 *{date}* 今日無任一策略選中個股"
+        return f"📭 *{date}* 今日無任一策略選中個股{_empty_pick_suffix()}"
 
     # 按信號數降序、stock_id 升序
     sorted_items = sorted(

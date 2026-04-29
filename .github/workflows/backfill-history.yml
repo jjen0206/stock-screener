@@ -1,0 +1,77 @@
+name: Backfill 90-day history
+
+# 一次性回補全市場 daily_price + institutional 90 天歷史。
+# 因 TWSE bulk endpoint 每天只回 1 筆,新部署 cache 必然歷史不足;
+# 在 GH Actions 跑 FinMind per-stock(避開 Streamlit Cloud IP 被擋),
+# dump 成 CSV commit 進 repo,Cloud 啟動時讀進 SQLite。
+# 預估 30-45 分鐘(視 FinMind token 限額)。
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回補幾天歷史 (預設 90)"
+        required: false
+        default: "90"
+      min_existing:
+        description: "已有 >= N 天就跳過該檔 (預設 60)"
+        required: false
+        default: "60"
+      limit:
+        description: "只跑前 N 檔 (debug 用,留空 = 全跑)"
+        required: false
+        default: ""
+      no_institutional:
+        description: "跳過 institutional (true / false,預設 false)"
+        required: false
+        default: "false"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Init universe + bulk daily prices (確保 stocks 表完整)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+        continue-on-error: true
+
+      - name: Run backfill
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          ARGS="--days ${{ inputs.days }} --min-existing ${{ inputs.min_existing }}"
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ inputs.no_institutional }}" = "true" ]; then
+            ARGS="$ARGS --no-institutional"
+          fi
+          echo "Running: python scripts/backfill_history.py $ARGS"
+          python scripts/backfill_history.py $ARGS
+
+      - name: Commit & push snapshot CSVs
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/
+          if git diff --staged --quiet; then
+            echo "No changes to snapshot CSVs"
+          else
+            git commit -m "chore(snapshot): backfill 90-day history [skip ci]"
+            git push
+          fi

@@ -204,3 +204,82 @@ def test_get_conn_returns_row_factory(tmp_db):
         assert conn.row_factory is sqlite3.Row
         row = conn.execute("SELECT * FROM stocks LIMIT 1").fetchone()
         assert row["stock_id"] == "2330"
+
+
+# === cache_health_summary / stocks_with_min_history ===
+
+def _seed_history(sids_with_days: dict[str, int]) -> None:
+    """灌入指定股票的 daily_prices,各 N 天(date 從今往回推)。"""
+    from datetime import date, timedelta
+    today = date(2026, 4, 28)
+    rows = []
+    for sid, n in sids_with_days.items():
+        for i in range(n):
+            d = (today - timedelta(days=i)).isoformat()
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": 100.0, "high": 105.0, "low": 95.0, "close": 100.0,
+                "volume": 1000,
+                "trading_money": None, "trading_turnover": None, "spread": 0.0,
+            })
+    db.upsert_daily_prices(rows)
+
+
+def test_cache_health_summary_buckets(tmp_db):
+    """正確按天數分桶。"""
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"}
+        for s in ["A", "B", "C", "D", "E"]
+    ])
+    _seed_history({
+        "A": 5,    # <14
+        "B": 13,   # <14
+        "C": 18,   # 14-19
+        "D": 30,   # 20-59
+        "E": 90,   # 60+
+    })
+    h = db.cache_health_summary()
+    assert h["total_stocks"] == 5
+    assert h["with_prices"] == 5
+    assert h["buckets"] == {"<14": 2, "14-19": 1, "20-59": 1, "60+": 1}
+
+
+def test_cache_health_summary_empty(tmp_db):
+    """空 DB 不爆 — 全桶歸零。"""
+    h = db.cache_health_summary()
+    assert h["total_stocks"] == 0
+    assert h["with_prices"] == 0
+    assert h["buckets"] == {"<14": 0, "14-19": 0, "20-59": 0, "60+": 0}
+
+
+def test_cache_health_summary_only_other_market(tmp_db):
+    """non-TW 不算入 total_stocks(但仍計入 with_prices)。"""
+    db.upsert_stocks([
+        {"stock_id": "AAPL", "name": "Apple", "market": "US"},
+    ])
+    _seed_history({"AAPL": 5})
+    h = db.cache_health_summary()
+    assert h["total_stocks"] == 0  # market='TW' 過濾
+    assert h["with_prices"] == 1   # daily_prices 不分 market
+
+
+def test_stocks_with_min_history_filter(tmp_db):
+    """只回傳達到天數門檻的個股。"""
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"}
+        for s in ["A", "B", "C"]
+    ])
+    _seed_history({"A": 30, "B": 60, "C": 120})
+    assert sorted(db.stocks_with_min_history(60)) == ["B", "C"]
+    assert sorted(db.stocks_with_min_history(20)) == ["A", "B", "C"]
+    assert db.stocks_with_min_history(200) == []
+
+
+def test_stocks_with_min_history_default_60(tmp_db):
+    """預設 60 天門檻。"""
+    db.upsert_stocks([
+        {"stock_id": "A", "name": "X", "market": "TW"},
+        {"stock_id": "B", "name": "Y", "market": "TW"},
+    ])
+    _seed_history({"A": 59, "B": 60})
+    assert db.stocks_with_min_history() == ["B"]

@@ -164,11 +164,18 @@ def _load_snapshot_if_needed() -> None:
             fin_cnt = conn.execute(
                 "SELECT COUNT(*) AS c FROM financials WHERE period_type='quarterly'"
             ).fetchone()["c"]
+            prices_cnt = conn.execute(
+                "SELECT COUNT(*) AS c FROM daily_prices"
+            ).fetchone()["c"]
+            inst_cnt = conn.execute(
+                "SELECT COUNT(*) AS c FROM institutional"
+            ).fetchone()["c"]
         except sqlite3.OperationalError:
-            metrics_cnt = fin_cnt = 0
+            metrics_cnt = fin_cnt = prices_cnt = inst_cnt = 0
 
-    # 已有資料就不灌(避免覆蓋使用者本機跑出來的更新版)
-    if metrics_cnt > 0 and fin_cnt > 0:
+    # 已有 long-term 資料 + daily_prices 也夠 → 全部跳過
+    # (daily_prices < 1000 行視為「幾乎是空的」,需要 backfill snapshot 灌進來)
+    if metrics_cnt > 0 and fin_cnt > 0 and prices_cnt >= 1000:
         _snapshot_loaded = True
         return
 
@@ -221,6 +228,32 @@ def _load_snapshot_if_needed() -> None:
             })
         if rows:
             db.upsert_financials(rows)
+
+    # 灌 daily_prices(從 backfill_history.py 產生的 snapshot)
+    prices_csv = snapshot_dir / "daily_prices.csv"
+    if prices_csv.exists() and prices_cnt < 1000:
+        df = pd.read_csv(prices_csv, dtype={"stock_id": str})
+        # 用 to_dict('records') 比 iterrows 快 30-50x(180K 行差很大)
+        records = df.to_dict("records")
+        # NaN → None(SQLite 不接受 NaN)
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            db.upsert_daily_prices(records)
+
+    # 灌 institutional(同樣從 backfill snapshot)
+    inst_csv = snapshot_dir / "institutional.csv"
+    if inst_csv.exists() and inst_cnt == 0:
+        df = pd.read_csv(inst_csv, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            db.upsert_institutional(records)
 
     _snapshot_loaded = True
 
@@ -309,21 +342,40 @@ def _page_short() -> None:
         value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
     )
 
+    # cache 健康度(供下方 selectbox + caption 用)
+    health = db.cache_health_summary()
+    eligible_stocks = health["buckets"]["60+"] + health["buckets"]["20-59"]
+
     # 上方控制列
     cols = st.columns([2, 3, 1])
     target_date = cols[0].date_input("選股日期", value=date.today())
+    universe_options = [
+        f"📊 僅有充足歷史的股 ({health['buckets']['60+']} 檔, 60+ 天)",
+        "全市場 (約 2360 檔, twse + tpex + ETF)",
+        "快速:50 檔大型股",
+        "我的關注清單",
+    ]
+    # 預設「僅有充足歷史」— 全市場大多缺歷史會 0 入選誤導使用者
     universe_choice = cols[1].selectbox(
-        "選股範圍",
-        [
-            "全市場 (約 2360 檔, twse + tpex + ETF)",
-            "快速:50 檔大型股",
-            "我的關注清單",
-        ],
-        index=0,
-        help="全市場走 SQLite cache,30 秒內掃完;不夠新請先按 sidebar『更新全市場價量』",
+        "選股範圍", universe_options, index=0,
+        help="預設「僅有充足歷史」過濾 cache 還沒回補完的個股。"
+             "全市場 / TOP 50 走 GH Actions 每日更新的 SQLite 快取。",
     )
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[2].button("執行選股", type="primary", use_container_width=True)
+
+    # cache 健康度 caption
+    b = health["buckets"]
+    st.caption(
+        f"📦 Cache 健康度:總 {health['total_stocks']} 檔 / "
+        f"有價量 {health['with_prices']} 檔 — "
+        f"60+ 天 {b['60+']}・20-59 天 {b['20-59']}・"
+        f"14-19 天 {b['14-19']}・<14 天 {b['<14']}"
+        + (
+            "  ⚠️ 多數個股歷史不足,請按 sidebar『⏳ 一次性回補 90 日歷史』"
+            if eligible_stocks < 100 else ""
+        )
+    )
 
     if not submit:
         st.info(
@@ -403,9 +455,19 @@ def _page_short() -> None:
     t2 = _time.perf_counter()
 
     if not agg:
-        st.info(
-            "📭 任一啟用的策略都無入選。可放寬參數或加開更多策略。"
-        )
+        # 多數情況 0 入選不是 bug,而是歷史累積中(全市場 bulk 每天 1 筆)
+        st.info("📭 任一啟用的策略都無入選。")
+        if eligible_stocks < 100:
+            st.warning(
+                f"⏳ **歷史資料累積中**:目前只有 **{eligible_stocks}** 檔有 20+ 天歷史"
+                f"(策略需要 14-60 天)。\n\n"
+                "**解法**:\n"
+                "1. 按 sidebar『⏳ 一次性回補 90 日歷史』觸發 backfill\n"
+                "2. 或選「快速:50 檔大型股」(已有完整歷史)\n"
+                "3. 等 daily_fetch 自動累積(每日 +1 天)"
+            )
+        else:
+            st.caption("可放寬參數或加開更多策略。")
         st.caption(
             f"⏱️ 載入={t1-t0:.2f}s,選股={t2-t1:.2f}s,共 {t2-t0:.2f}s "
             f"({len(sids_only)} 檔)"
@@ -482,6 +544,25 @@ def _page_short() -> None:
 
 def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
     """根據使用者選擇回傳個股清單;回 None 表示已 render 提示、外層直接 return。"""
+    if choice.startswith("📊 僅有充足歷史"):
+        # 過濾 daily_prices 天數 >= 60 的個股(可跑 MA60 全策略)
+        sids_set = set(db.stocks_with_min_history(60))
+        if not sids_set:
+            st.warning(
+                "目前沒有任何個股累積到 60 天歷史。"
+                "請按 sidebar『⏳ 一次性回補 90 日歷史』觸發 GH Actions backfill。"
+            )
+            return None
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT stock_id, name FROM stocks "
+                "WHERE market='TW' AND name IS NOT NULL AND name != ''"
+            ).fetchall()
+        universe = [
+            (r["stock_id"], r["name"]) for r in rows
+            if r["stock_id"] in sids_set
+        ]
+        return universe or None
     if choice.startswith("全市場"):
         # 從 SQLite stocks 拿(全市場 ~2360 檔已 init);沒 init 觸發 get_full_universe
         sids = get_full_universe()
@@ -1639,6 +1720,26 @@ def _render_sidebar_update() -> None:
         "📊 用 TWSE OpenAPI + FinMind 免費版,**不需 token**;"
         "PE/PB/殖利率/EPS 來自證交所,ROE 用 PB 反推(Du Pont 簡化)。"
     )
+
+    # === 一次性 backfill(觸發 GH Actions workflow) ===
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("⏳ 一次性回補 90 日歷史"):
+        st.markdown(
+            "**用途**:全市場個股短線策略需要 14-60 天歷史,而日常 TWSE bulk "
+            "endpoint 每天只回當日 1 筆 → 累積要等 1-2 個月。\n\n"
+            "**做法**:在 GitHub Actions 跑 backfill 一次抓全市場 90 天 daily_price"
+            "(via FinMind),dump 成 CSV commit 進 repo,Streamlit Cloud 啟動時"
+            "讀進 SQLite。\n\n"
+            "**時間**:預估 30-45 分鐘(視 FinMind token 限額)。"
+        )
+        st.markdown(
+            "**手動觸發**:\n"
+            "1. 進 GitHub repo → Actions tab\n"
+            "2. 找『Backfill 90-day history』workflow\n"
+            "3. 點 **Run workflow** → main branch → Run\n"
+            "4. 等 30-45 分鐘 → 自動 commit CSV → "
+            "Streamlit Cloud 自動 redeploy"
+        )
 
     # 只在 token 有設定時顯示測試按鈕
     if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:

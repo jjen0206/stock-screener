@@ -508,6 +508,66 @@ def update_synced_range(
         )
 
 
+# === 健康檢查 / 篩選 helpers ===
+
+def cache_health_summary(db_path: str | Path | None = None) -> dict:
+    """回 daily_prices 歷史天數分布(給 UI / 推播訊息加註「歷史不足」用)。
+
+    回 {
+        "total_stocks": int,        # stocks 表 TW 市場總數
+        "with_prices": int,         # daily_prices 有任何資料的個股數
+        "buckets": {
+            "<14": int,   # 任何策略都跑不了
+            "14-19": int, # 可跑量價KD
+            "20-59": int, # 可跑乖離率
+            "60+": int,   # 可跑全策略(含 MA60)
+        },
+    }
+    """
+    with get_conn(db_path) as conn:
+        total_stocks = conn.execute(
+            "SELECT COUNT(*) AS c FROM stocks WHERE market='TW'"
+        ).fetchone()["c"]
+        rows = conn.execute(
+            "SELECT stock_id, COUNT(*) AS cnt FROM daily_prices GROUP BY stock_id"
+        ).fetchall()
+
+    buckets = {"<14": 0, "14-19": 0, "20-59": 0, "60+": 0}
+    for r in rows:
+        cnt = r["cnt"]
+        if cnt >= 60:
+            buckets["60+"] += 1
+        elif cnt >= 20:
+            buckets["20-59"] += 1
+        elif cnt >= 14:
+            buckets["14-19"] += 1
+        else:
+            buckets["<14"] += 1
+
+    return {
+        "total_stocks": int(total_stocks),
+        "with_prices": len(rows),
+        "buckets": buckets,
+    }
+
+
+def stocks_with_min_history(
+    min_days: int = 60, db_path: str | Path | None = None,
+) -> list[str]:
+    """回 stock_id 清單(只含 daily_prices 天數 >= min_days 的 TW 個股)。
+
+    給「僅有充足歷史的股」selectbox option 用 — 過濾 cache 還沒回補完的個股,
+    避免全市場 2700 檔大多 1-2 天 → 全部 skip → 0 入選的鬼扯結果。
+    """
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT stock_id FROM daily_prices "
+            "GROUP BY stock_id HAVING COUNT(*) >= ?",
+            (min_days,),
+        ).fetchall()
+    return [r["stock_id"] for r in rows]
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -523,5 +583,7 @@ __all__ = [
     "get_watchlist",
     "get_synced_range",
     "update_synced_range",
+    "cache_health_summary",
+    "stocks_with_min_history",
     "SCHEMA",
 ]

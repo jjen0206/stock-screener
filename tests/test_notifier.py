@@ -138,6 +138,50 @@ def test_format_short_picks_handles_zero_ma_volume():
     assert "0.0x" in msg  # 量比顯示 0.0x
 
 
+def test_format_short_picks_empty_includes_cache_health(monkeypatch):
+    """0 入選時該附 cache 健康度,並在歷史不足時加註「累積中」。"""
+    monkeypatch.setattr(
+        notifier.db, "cache_health_summary",
+        lambda: {
+            "total_stocks": 2700, "with_prices": 2700,
+            "buckets": {"<14": 2600, "14-19": 50, "20-59": 30, "60+": 20},
+        },
+    )
+    msg = notifier.format_short_picks(pd.DataFrame(), "2026-04-25")
+    assert "Cache" in msg
+    assert "60+" in msg
+    # eligible (60+ + 20-59) = 50 < 100 → 該加「累積中」
+    assert "累積中" in msg
+
+
+def test_format_short_picks_empty_no_warning_when_healthy(monkeypatch):
+    """eligible >= 100 時不該加「累積中」(避免誤導已健康的 cache)。"""
+    monkeypatch.setattr(
+        notifier.db, "cache_health_summary",
+        lambda: {
+            "total_stocks": 2700, "with_prices": 2700,
+            "buckets": {"<14": 100, "14-19": 0, "20-59": 100, "60+": 2500},
+        },
+    )
+    msg = notifier.format_short_picks(pd.DataFrame(), "2026-04-25")
+    assert "Cache" in msg
+    assert "累積中" not in msg
+
+
+def test_format_multi_strategy_empty_includes_cache_health(monkeypatch):
+    """multi-strategy 空 aggregated 也該附 cache 健康度。"""
+    monkeypatch.setattr(
+        notifier.db, "cache_health_summary",
+        lambda: {
+            "total_stocks": 2700, "with_prices": 2700,
+            "buckets": {"<14": 2700, "14-19": 0, "20-59": 0, "60+": 0},
+        },
+    )
+    msg = notifier.format_multi_strategy_picks({}, "2026-04-25")
+    assert "Cache" in msg
+    assert "累積中" in msg
+
+
 def test_format_multi_strategy_telegram_includes_targets():
     """有 target_low/high/stop_loss 該印「🎯 目標 / 🛑 停損」。"""
     agg = {

@@ -129,9 +129,10 @@ def send_discord_message(
 
 def format_short_picks_discord(picks: pd.DataFrame, date: str) -> str:
     """Discord Markdown 格式;與 Telegram 類似但開頭加 banner。"""
+    from src.notifier import _empty_pick_suffix
     banner = f"📊 **stock-screener** | {date}"
     if picks is None or picks.empty:
-        return f"{banner}\n\n📭 今日無符合條件的個股"
+        return f"{banner}\n\n📭 今日無符合條件的個股{_empty_pick_suffix()}"
 
     lines = [banner, f"📈 短線推薦 ({len(picks)} 檔)", ""]
     for i, (_, row) in enumerate(picks.iterrows(), start=1):
@@ -168,8 +169,9 @@ def format_multi_strategy_picks_discord(
         date_label = date
     banner = f"📊 **stock-screener** | {date_label}"
 
+    from src.notifier import _empty_pick_suffix
     if not aggregated:
-        return f"{banner}\n\n📭 今日無任一策略選中個股"
+        return f"{banner}\n\n📭 今日無任一策略選中個股{_empty_pick_suffix()}"
 
     sorted_items = sorted(
         aggregated.items(),
