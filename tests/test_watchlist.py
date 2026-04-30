@@ -236,6 +236,71 @@ def test_safe_boot_load_swallows_import_error(tmp_db, monkeypatch):
             sys.modules.pop("src.github_sync", None)
 
 
+# === bulk_add_to_watchlist ===
+
+
+def test_bulk_add_basic_split(tmp_db):
+    """合法/重複/無效混合輸入 → 分類正確,SQLite 入庫只 ok 那批。"""
+    db.add_to_watchlist("2330")  # 已在 watchlist
+    result = db.bulk_add_to_watchlist(
+        ["2330", "2454", "abc!", "3680", "2330", " 2317 "],
+    )
+    assert result["ok"] == 3
+    assert sorted(result["ok_ids"]) == ["2317", "2454", "3680"]
+    assert result["dup"] == 1
+    assert result["dup_ids"] == ["2330"]
+    assert result["invalid"] == 1
+    assert result["invalid_ids"] == ["ABC!"]
+    items = {it["stock_id"] for it in db.get_watchlist()}
+    assert items == {"2330", "2454", "3680", "2317"}
+
+
+def test_bulk_add_does_not_overwrite_existing_note(tmp_db):
+    """已在 watchlist 的不更新 note(避免覆寫使用者既有備註)。"""
+    db.add_to_watchlist("2330", note="本機既有備註")
+    db.bulk_add_to_watchlist(["2330"], notes={"2330": "新備註"})
+    items = db.get_watchlist()
+    assert items[0]["note"] == "本機既有備註"
+
+
+def test_bulk_add_empty_returns_zero(tmp_db):
+    """空輸入 / 全無效 → 不 raise,計數正確。"""
+    r1 = db.bulk_add_to_watchlist([])
+    assert r1["ok"] == 0 and r1["dup"] == 0 and r1["invalid"] == 0
+    r2 = db.bulk_add_to_watchlist(["", "  ", "ZZ"])
+    assert r2["ok"] == 0 and r2["invalid"] == 1
+
+
+def test_bulk_add_dump_called_only_once(tmp_db, monkeypatch):
+    """N 筆 ok 應只觸發一次 _dump_watchlist_snapshot,避免 N 次 push spam。"""
+    calls: list = []
+    monkeypatch.setattr(
+        db, "_dump_watchlist_snapshot",
+        lambda *a, **kw: calls.append(1),
+    )
+    db.bulk_add_to_watchlist(["2330", "2454", "3680", "2317"])
+    assert len(calls) == 1
+
+
+def test_bulk_add_no_dump_when_all_dup_or_invalid(tmp_db, monkeypatch):
+    """全是 dup 或 invalid → 不該 dump(沒新內容)。"""
+    db.add_to_watchlist("2330")
+    calls: list = []
+    monkeypatch.setattr(
+        db, "_dump_watchlist_snapshot",
+        lambda *a, **kw: calls.append(1),
+    )
+    db.bulk_add_to_watchlist(["2330", "ABC", "  "])
+    assert len(calls) == 0
+
+
+def test_bulk_add_normalises_case_and_dedupe_within_batch(tmp_db):
+    """同 batch 出現 2 次同一檔 → 只算一次。"""
+    result = db.bulk_add_to_watchlist(["2330", "2330", "2330"])
+    assert result["ok"] == 1
+    assert db.is_in_watchlist("2330")
+
+
 def test_safe_boot_load_handles_load_from_string_failure(
     tmp_db, monkeypatch,
 ):

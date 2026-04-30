@@ -40,12 +40,17 @@ def render_pick_card(
     show_signal: bool = True,
     show_targets: bool = True,
     show_change: bool = False,
+    show_add_button: bool = False,
+    button_key_prefix: str = "card",
 ) -> None:
     """渲染單檔股票卡片。
 
     row 必含:stock_id, name, close
     可選:信號數, 信號, target_low/high, stop_loss, risk_reward, atr14,
           change_pct (漲跌%), volume, ma5
+
+    show_add_button=True 會在卡片下方加 ☆ 加關注按鈕(短線 / 長線推薦頁用,
+    我的關注頁不用 — 自己加自己沒意義)。
     """
     sid = row.get("stock_id", "?")
     name = row.get("name") or row.get("名稱") or "—"
@@ -99,11 +104,38 @@ def render_pick_card(
                     f"🛑 {_fmt_num(sl)}{rr_str}"
                 )
 
+        if show_add_button:
+            from src import database as db
+            already = db.is_in_watchlist(sid)
+            label = "✅ 已關注" if already else "⭐ 加入關注"
+            if st.button(
+                label,
+                key=f"{button_key_prefix}_add_{sid}",
+                disabled=already,
+                use_container_width=True,
+            ):
+                db.add_to_watchlist(sid)
+                st.toast(f"已加入 {sid}", icon="⭐")
+                st.rerun()
+
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
     """批次渲染多張卡片。"""
     for row in rows:
         render_pick_card(row, **kwargs)
+
+
+def add_to_watchlist_inline_button(stock_id: str, key: str) -> None:
+    """單獨用的「加入關注」按鈕(用於表格 view 上方的多選操作 / 個股頁)。"""
+    from src import database as db
+    already = db.is_in_watchlist(stock_id)
+    if st.button(
+        "✅ 已關注" if already else f"⭐ 關注 {stock_id}",
+        key=key, disabled=already,
+    ):
+        db.add_to_watchlist(stock_id)
+        st.toast(f"已加入 {stock_id}", icon="⭐")
+        st.rerun()
 
 
 def view_mode_toggle(

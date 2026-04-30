@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -484,6 +485,81 @@ def add_to_watchlist(
     _dump_watchlist_snapshot(db_path)
 
 
+_VALID_STOCK_ID_RE = re.compile(r"^[0-9]{4,6}[A-Z]?$")
+
+
+def bulk_add_to_watchlist(
+    stock_ids: Iterable[str],
+    notes: dict[str, str | None] | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, int | list[str]]:
+    """批量加入關注。一次 SQLite 寫入,完事後只 dump+push 一次。
+
+    輸入經 strip + 大寫,過濾條件:
+      - 格式合法(4-6 位數字 + 可選一英文字母,如 2330 / 00878 / 1101A)
+      - 同 batch 內去重
+      - 已在 watchlist → 計入 dup,**不**更新 note(避免覆寫使用者既有備註)
+
+    Returns:
+        {
+          "ok": int,          已成功新加(不含 dup)
+          "dup": int,         已在 watchlist 的數
+          "invalid": int,     格式不合法的數
+          "ok_ids": list[str],
+          "dup_ids": list[str],
+          "invalid_ids": list[str],
+        }
+
+    add_to_watchlist 是 N 次 dump+push;這個函式對 N 筆只 dump+push 一次,
+    用於 UI 批量貼上場景避免 GitHub spam commits。
+    """
+    notes = notes or {}
+    seen: set[str] = set()
+    valid: list[str] = []
+    invalid_ids: list[str] = []
+    for raw in stock_ids:
+        sid = str(raw or "").strip().upper()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        if _VALID_STOCK_ID_RE.match(sid):
+            valid.append(sid)
+        else:
+            invalid_ids.append(sid)
+
+    if not valid:
+        return {
+            "ok": 0, "dup": 0, "invalid": len(invalid_ids),
+            "ok_ids": [], "dup_ids": [], "invalid_ids": invalid_ids,
+        }
+
+    placeholders = ",".join(["?"] * len(valid))
+    with get_conn(db_path) as conn:
+        existing = {
+            r[0] for r in conn.execute(
+                f"SELECT stock_id FROM watchlist WHERE stock_id IN ({placeholders})",
+                valid,
+            )
+        }
+        ok_ids = [s for s in valid if s not in existing]
+        dup_ids = [s for s in valid if s in existing]
+        if ok_ids:
+            now = _now_iso()
+            conn.executemany(
+                "INSERT INTO watchlist (stock_id, added_at, note) "
+                "VALUES (?, ?, ?)",
+                [(sid, now, notes.get(sid)) for sid in ok_ids],
+            )
+
+    if ok_ids:
+        _dump_watchlist_snapshot(db_path)
+
+    return {
+        "ok": len(ok_ids), "dup": len(dup_ids), "invalid": len(invalid_ids),
+        "ok_ids": ok_ids, "dup_ids": dup_ids, "invalid_ids": invalid_ids,
+    }
+
+
 def remove_from_watchlist(
     stock_id: str,
     db_path: str | Path | None = None,
@@ -639,6 +715,7 @@ __all__ = [
     "upsert_dividend",
     "upsert_daily_metrics",
     "add_to_watchlist",
+    "bulk_add_to_watchlist",
     "remove_from_watchlist",
     "is_in_watchlist",
     "get_watchlist",
