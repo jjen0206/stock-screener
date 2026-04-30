@@ -68,6 +68,55 @@ def _preload_watchlist_csv() -> None:
     )
 
 
+def _csv_records_nan_to_none(df: pd.DataFrame) -> list[dict]:
+    """把 DataFrame 轉 records,並把 NaN 替換成 None(SQLite 不接受 NaN)。"""
+    records = df.to_dict("records")
+    for r in records:
+        for k, v in list(r.items()):
+            if pd.isna(v):
+                r[k] = None
+    return records
+
+
+def _preload_daily_prices_csv() -> None:
+    """讀回 SNAPSHOT_DIR/daily_prices.csv 進 SQLite。
+
+    解決 cross-run checkpoint 失效:GH Actions runner 每次都是新的空 SQLite,
+    若不先把上一輪 commit 進 repo 的 CSV 讀回,existing_counts 會永遠 0、
+    --min-existing 過濾失效,導致每次都全市場 todo 全跑。
+    """
+    path = SNAPSHOT_DIR / "daily_prices.csv"
+    if not path.exists():
+        return
+    df = pd.read_csv(path, dtype={"stock_id": str})
+    if df.empty:
+        return
+    records = _csv_records_nan_to_none(df)
+    db.upsert_daily_prices(records)
+    n_stocks = df["stock_id"].nunique()
+    print(
+        f"[PRELOAD] 從 daily_prices.csv 讀回 {len(df)} 筆 / {n_stocks} 檔股票",
+        flush=True,
+    )
+
+
+def _preload_institutional_csv() -> None:
+    """讀回 SNAPSHOT_DIR/institutional.csv 進 SQLite(同 daily_prices 的 cross-run preload)。"""
+    path = SNAPSHOT_DIR / "institutional.csv"
+    if not path.exists():
+        return
+    df = pd.read_csv(path, dtype={"stock_id": str})
+    if df.empty:
+        return
+    records = _csv_records_nan_to_none(df)
+    db.upsert_institutional(records)
+    n_stocks = df["stock_id"].nunique()
+    print(
+        f"[PRELOAD] 從 institutional.csv 讀回 {len(df)} 筆 / {n_stocks} 檔股票",
+        flush=True,
+    )
+
+
 def _dump_watchlist_csv() -> int:
     """從 SQLite dump watchlist 到 SNAPSHOT_DIR/watchlist.csv;回傳行數。"""
     items = db.get_watchlist()
@@ -101,8 +150,8 @@ def main() -> int:
         help="回補幾天歷史(預設 90,至少要 60 才能跑 MA60 策略)",
     )
     p.add_argument(
-        "--min-existing", type=int, default=60,
-        help="既有 daily_prices >= 此數字就跳過該檔(預設 60)",
+        "--min-existing", type=int, default=30,
+        help="既有 daily_prices >= 此數字就跳過該檔(預設 30,短線需求 10 日 + KD9 + buffer)",
     )
     p.add_argument(
         "--limit", type=int, default=None,
@@ -115,9 +164,13 @@ def main() -> int:
     args = p.parse_args()
 
     db.init_db()
-    # Preload 既有 watchlist.csv → SQLite(GH runner cache.db 是空的,
-    # 不 preload 的話最後 dump 會 clobber repo 既有 watchlist.csv)
+    # Preload 既有 CSV → SQLite(GH runner cache.db 是空的,不 preload 的話:
+    #   1. watchlist:最後 dump 會 clobber repo 既有 watchlist.csv
+    #   2. daily_prices / institutional:existing_counts 永遠 0,--min-existing
+    #      checkpoint 失效,每次跑都全市場 todo 全跑、累積 1167 → 永遠跑不滿
     _preload_watchlist_csv()
+    _preload_daily_prices_csv()
+    _preload_institutional_csv()
     universe = get_full_universe()
     if not universe:
         print("[BACKFILL] universe 為空 — 先跑 daily_fetch.py 初始化")

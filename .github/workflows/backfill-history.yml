@@ -13,9 +13,9 @@ on:
         required: false
         default: "90"
       min_existing:
-        description: "已有 >= N 天就跳過該檔 (預設 60)"
+        description: "已有 >= N 天就跳過該檔 (預設 30,短線需求 10 日 + KD9)"
         required: false
-        default: "60"
+        default: "30"
       limit:
         description: "只跑前 N 檔 (debug 用,留空 = 全跑)"
         required: false

@@ -160,6 +160,115 @@ def test_backfill_dumps_and_preloads_watchlist(tmp_setup, monkeypatch):
     assert sorted(it["stock_id"] for it in items) == ["2330", "2454"]
 
 
+# === preload daily_prices / institutional CSV(cross-run checkpoint) ===
+
+
+def test_preload_daily_prices_csv_loads_into_sqlite(tmp_setup):
+    """有 daily_prices.csv → 該 upsert 進 SQLite,行數 / 股票數要對。"""
+    snapshot = tmp_setup / "twse_snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for sid in ["2330", "2454"]:
+        for i in range(5):
+            rows.append({
+                "stock_id": sid, "date": f"2026-04-{20+i:02d}",
+                "open": 100, "high": 101, "low": 99, "close": 100,
+                "volume": 1000, "trading_money": None,
+                "trading_turnover": None, "spread": 0.0,
+            })
+    pd.DataFrame(rows).to_csv(snapshot / "daily_prices.csv", index=False)
+
+    backfill._preload_daily_prices_csv()
+
+    with db.get_conn() as conn:
+        cnt = conn.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+        stocks = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT stock_id FROM daily_prices"
+            )
+        }
+    assert cnt == 10
+    assert stocks == {"2330", "2454"}
+
+
+def test_preload_daily_prices_csv_silent_when_missing(tmp_setup):
+    """沒 CSV 時不該 raise(本機 dev 路徑)。"""
+    # snapshot dir 不存在
+    backfill._preload_daily_prices_csv()
+    # 也包含 dir 存在但 csv 缺
+    snapshot = tmp_setup / "twse_snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    backfill._preload_daily_prices_csv()
+
+
+def test_preload_institutional_csv_loads_into_sqlite(tmp_setup):
+    """institutional.csv 同樣該被讀回。"""
+    snapshot = tmp_setup / "twse_snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {
+            "stock_id": "2330", "date": "2026-04-25",
+            "foreign": 1000, "investment_trust": 200, "dealer": -50,
+        },
+        {
+            "stock_id": "2330", "date": "2026-04-26",
+            "foreign": -300, "investment_trust": 0, "dealer": 100,
+        },
+    ]).to_csv(snapshot / "institutional.csv", index=False)
+
+    backfill._preload_institutional_csv()
+
+    with db.get_conn() as conn:
+        cnt = conn.execute("SELECT COUNT(*) FROM institutional").fetchone()[0]
+    assert cnt == 2
+
+
+def test_preload_institutional_csv_silent_when_missing(tmp_setup):
+    """沒 institutional.csv 也不炸。"""
+    backfill._preload_institutional_csv()
+
+
+def test_main_skips_preloaded_stocks_via_csv(tmp_setup, monkeypatch):
+    """整合測試:把已有 CSV 當 checkpoint,main() 該 skip 已達閾值的個股。"""
+    snapshot = tmp_setup / "twse_snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    # 預寫 daily_prices.csv 給 2330(35 天 >= min-existing 30)
+    rows = []
+    for i in range(35):
+        rows.append({
+            "stock_id": "2330", "date": f"2026-03-{i+1:02d}",
+            "open": 100, "high": 101, "low": 99, "close": 100,
+            "volume": 1000, "trading_money": None,
+            "trading_turnover": None, "spread": 0.0,
+        })
+    pd.DataFrame(rows).to_csv(snapshot / "daily_prices.csv", index=False)
+
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積", "market": "TW"},
+        {"stock_id": "2454", "name": "聯發", "market": "TW"},
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: ["2330", "2454"])
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+
+    fetch_calls = []
+    monkeypatch.setattr(
+        backfill, "fetch_daily_price",
+        lambda sid, s, e: fetch_calls.append(sid),
+    )
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_history.py", "--days", "10", "--min-existing", "30",
+         "--no-institutional"],
+    )
+
+    code = backfill.main()
+    assert code == 0
+    # 2330 從 CSV preload 進來 35 天 >= 30,該跳過;只該抓 2454
+    assert fetch_calls == ["2454"]
+
+
 def test_backfill_returns_zero_when_partial_success(tmp_setup, monkeypatch):
     """成功率 10-50% 偏低但仍 commit(避免「1305 檔成果被丟」的 bug)。"""
     sids = [f"S{i:02d}" for i in range(10)]
