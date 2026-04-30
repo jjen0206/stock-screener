@@ -22,11 +22,16 @@ DB 路徑來源:
 """
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
+
+logger = logging.getLogger(__name__)
 
 from src import config
 
@@ -412,15 +417,45 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
 
 # === watchlist helpers(自選股清單) ===
 
+def _spawn_github_push_thread(csv_content: str) -> None:
+    """fire-and-forget thread:把 csv_content 推到 GitHub。
+
+    雲端容器(Streamlit Cloud)會設 GITHUB_PAT,push 後讓 watchlist 跨重啟保留。
+    本地 dev / tests 沒設 PAT 時 caller 不會呼叫此函式。
+    thread 內任何錯誤只 log 不 raise,避免 UI 死掉。
+    """
+    def _worker() -> None:
+        try:
+            from src.github_sync import push_watchlist_to_github
+            push_watchlist_to_github(csv_content)
+        except Exception as ex:  # noqa: BLE001
+            logger.error("[GH_SYNC] thread 內未預期錯誤:%s", ex)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def _dump_watchlist_snapshot(db_path: str | Path | None) -> None:
     """在 watchlist 變動後把 SQLite 內容 dump 成 CSV(供下次 boot 還原)。
 
     snapshot 模組自帶 silent skip(snapshot dir 不存在 / DB 不在 repo 內 / load 進行中),
     所以 tests 跟非標準佈署不會誤寫真實 CSV。lazy import 避免 watchlist_snapshot ↔
     database 互相 import。
+
+    若 dump 真的有寫(回傳 ≥0)且環境有設 GITHUB_PAT,會 fire-and-forget 推到 GitHub;
+    沒設 PAT 時不開 thread,本機行為完全不變。
     """
-    from src.watchlist_snapshot import dump_to_csv
-    dump_to_csv(db_path=db_path)
+    from src.watchlist_snapshot import dump_to_csv, dump_to_string
+    n = dump_to_csv(db_path=db_path)
+    if n < 0:
+        return
+    if not os.environ.get("GITHUB_PAT"):
+        return
+    try:
+        csv_content = dump_to_string(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] 取 csv 字串失敗:%s", ex)
+        return
+    _spawn_github_push_thread(csv_content)
 
 
 def add_to_watchlist(
