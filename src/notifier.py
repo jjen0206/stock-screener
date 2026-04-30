@@ -272,10 +272,99 @@ def notify_multi_strategy(
     return results
 
 
+def format_manual_picks(picks_df: "pd.DataFrame", date: str, limit: int = 7) -> str:
+    """把雲端 App 的當前推薦 DataFrame 包成 Telegram 訊息(手動推播專用)。
+
+    跟 cron 推播訊息差別:
+      - 限制 limit 檔(避免使用者選一堆把訊息撐爆 / Telegram 4096 字元)
+      - footer 加 `📲 來源:雲端 App 手動推播` 區別自動推播
+    """
+    if picks_df is None or picks_df.empty:
+        return f"📭 *{date}* 雲端 App 手動推播:當前無推薦個股"
+
+    # 接受兩種 schema:cron 用的「stock_id/name/close + 量價技術指標」或
+    # 短線頁 aggregated_to_dataframe 出的「stock_id/name/close + 信號數/信號 + targets」
+    df = picks_df.head(limit)
+    n_total = len(picks_df)
+    n_show = len(df)
+    truncated = f"(顯示前 {n_show} / 共 {n_total})" if n_total > limit else f"({n_show} 檔)"
+
+    try:
+        d = _date.fromisoformat(date)
+        wk = ["一", "二", "三", "四", "五", "六", "日"][d.weekday()]
+        date_label = f"{date} (週{wk})"
+    except Exception:  # noqa: BLE001
+        date_label = date
+
+    lines = [f"📈 *{date_label} 短線推薦* {truncated}", ""]
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        sid = r.get("stock_id", "?")
+        name = r.get("name", "")
+        close = r.get("close")
+        n_sig = r.get("信號數") or r.get("n_signals") or 0
+        signals = r.get("信號") or r.get("signals") or ""
+        target_low = r.get("target_low")
+        target_high = r.get("target_high")
+        stop_loss = r.get("stop_loss")
+        rr = r.get("risk_reward")
+
+        confidence = "🔥" * int(n_sig) if n_sig else ""
+        lines.append(f"{i}. *{sid} {name}* {confidence}".rstrip())
+        if close is not None:
+            try:
+                close_str = f"{float(close):.2f}"
+                if signals:
+                    lines.append(f"   收 {close_str} | {signals}")
+                else:
+                    lines.append(f"   收 {close_str}")
+            except (TypeError, ValueError):
+                pass
+        if target_low and target_high and stop_loss:
+            try:
+                rr_str = f" (R:R {float(rr):.1f}:1)" if rr else ""
+                lines.append(
+                    f"   🎯 {float(target_low):.2f}~{float(target_high):.2f}"
+                    f" / 🛑 {float(stop_loss):.2f}{rr_str}"
+                )
+            except (TypeError, ValueError):
+                pass
+
+    lines.append("")
+    lines.append("⚠️ 僅供研究,非投資建議")
+    lines.append("📲 來源:雲端 App 手動推播")
+    return "\n".join(lines)
+
+
+def notify_manual_picks(
+    picks_df: "pd.DataFrame",
+    date: str | None = None,
+    limit: int = 7,
+    send_telegram: bool = True,
+    send_discord: bool = True,
+) -> dict[str, bool]:
+    """雲端 App「立即推播」按鈕專用:把當前頁面的 picks 推到 Telegram+Discord。
+
+    Returns: {'telegram': bool, 'discord': bool} — 只含實際送的通道;
+             兩者 secrets 都沒設 → 回 {} (caller 該提示沒推任何東西)。
+    """
+    if date is None:
+        date = _date.today().isoformat()
+    msg = format_manual_picks(picks_df, date, limit=limit)
+    results: dict[str, bool] = {}
+    if send_telegram and config.TELEGRAM_BOT_TOKEN:
+        results["telegram"] = send_telegram_message(msg)
+    if send_discord and config.DISCORD_WEBHOOK_URL:
+        from src.discord_notifier import send_discord_message
+        results["discord"] = send_discord_message(msg)
+    return results
+
+
 __all__ = [
     "send_telegram_message",
     "format_short_picks",
     "format_multi_strategy_picks",
+    "format_manual_picks",
     "notify_short_picks",
     "notify_multi_strategy",
+    "notify_manual_picks",
 ]

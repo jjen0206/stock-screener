@@ -289,6 +289,80 @@ def test_notify_short_picks_no_secrets_returns_empty(monkeypatch):
     assert results == {}
 
 
+# === format_manual_picks / notify_manual_picks(雲端 App 手動推播按鈕) ===
+
+
+def _short_page_picks_df(n: int = 3) -> pd.DataFrame:
+    """模擬短線頁 aggregated_to_dataframe 的 schema。"""
+    rows = []
+    for i in range(n):
+        rows.append({
+            "stock_id": f"23{i:02d}",
+            "name": f"股{i}",
+            "close": 100.0 + i,
+            "信號數": (i % 3) + 1,
+            "信號": "量價突破" if i == 0 else "KD 黃金交叉",
+            "target_low": 105.0 + i,
+            "target_high": 115.0 + i,
+            "stop_loss": 95.0 + i,
+            "risk_reward": 2.5,
+            "atr14": 3.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def test_format_manual_picks_includes_manual_footer():
+    df = _short_page_picks_df(2)
+    msg = notifier.format_manual_picks(df, date="2026-04-30")
+    assert "📲 來源:雲端 App 手動推播" in msg
+    assert "短線推薦" in msg
+    assert "2300" in msg
+
+
+def test_format_manual_picks_truncates_to_limit():
+    """超過 limit 該截斷,訊息該標『顯示前 N / 共 M』。"""
+    df = _short_page_picks_df(15)
+    msg = notifier.format_manual_picks(df, date="2026-04-30", limit=7)
+    assert "顯示前 7 / 共 15" in msg
+    # 2307 在前 7 內(2300~2306),2308 不該在
+    assert "2308" not in msg
+
+
+def test_format_manual_picks_empty_dataframe():
+    msg = notifier.format_manual_picks(pd.DataFrame(), date="2026-04-30")
+    assert "當前無推薦" in msg
+
+
+def test_notify_manual_picks_no_secrets_returns_empty(monkeypatch):
+    """兩通道都沒設 secrets → 回 {},不打任何 HTTP。"""
+    from src import config as cfg
+    monkeypatch.setattr(cfg, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(cfg, "DISCORD_WEBHOOK_URL", "")
+    with patch("src.notifier.requests.post") as m:
+        results = notifier.notify_manual_picks(_short_page_picks_df(2))
+    assert results == {}
+    m.assert_not_called()
+
+
+def test_notify_manual_picks_pushes_to_both(with_token, monkeypatch):
+    """secrets 都有 → Telegram + Discord 各推一次,訊息含手動推播 footer。"""
+    from src import config as cfg
+    monkeypatch.setattr(cfg, "DISCORD_WEBHOOK_URL", "https://discord/webhook")
+    fake = Mock(); fake.status_code = 200
+    with patch("requests.post", return_value=fake) as m:
+        results = notifier.notify_manual_picks(
+            _short_page_picks_df(3), date="2026-04-30",
+        )
+    assert results == {"telegram": True, "discord": True}
+    assert m.call_count == 2
+    urls = [c.args[0] for c in m.call_args_list]
+    assert any("telegram" in u for u in urls)
+    assert any("discord" in u for u in urls)
+    # 確認 Telegram payload 含手動推播 footer
+    tg_call = next(c for c in m.call_args_list if "telegram" in c.args[0])
+    assert "手動推播" in tg_call.kwargs["json"]["text"]
+
+
 def test_notify_short_picks_both_channels_when_both_configured(
     with_token, monkeypatch,
 ):

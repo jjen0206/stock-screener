@@ -516,6 +516,72 @@ def _page_dashboard() -> None:
                 )
 
 
+# === 立即推播按鈕(短線頁用) ===
+
+_PUSH_DEBOUNCE_SECS = 30
+
+
+def _render_manual_push_button(picks_df: "pd.DataFrame") -> None:
+    """短線頁「立即推播當前推薦」按鈕。
+
+    防呆:30 秒內按一次後 disable,避免使用者重複狂按 spam Telegram/Discord。
+    最多推前 7 檔(format_manual_picks 內部截斷),footer 標註手動推播來源。
+    """
+    import time as _t
+    from src.notifier import notify_manual_picks
+
+    if picks_df is None or picks_df.empty:
+        return
+
+    last_ts = st.session_state.get("manual_push_last_ts")
+    now = _t.time()
+    remaining = (
+        int(_PUSH_DEBOUNCE_SECS - (now - last_ts))
+        if last_ts is not None else 0
+    )
+    debounce_active = remaining > 0
+
+    cols = st.columns([2, 5])
+    label = (
+        f"⏳ 推播冷卻中 ({remaining}s)"
+        if debounce_active else "📤 立即推播當前推薦"
+    )
+    clicked = cols[0].button(
+        label,
+        key="manual_push_btn",
+        use_container_width=True,
+        disabled=debounce_active,
+        help="把當前頁面的推薦結果(限前 7 檔)即時推到 Telegram + Discord",
+    )
+    cols[1].caption(
+        f"上限 7 檔 / 30 秒內只能推一次 / footer 會標『雲端 App 手動推播』。"
+    )
+    if clicked:
+        try:
+            results = notify_manual_picks(
+                picks_df, date=date.today().isoformat(), limit=7,
+            )
+        except Exception as ex:  # noqa: BLE001
+            st.toast(f"推播失敗:{ex}", icon="❌")
+            return
+        if not results:
+            st.toast(
+                "未設定 TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL,沒推任何通道",
+                icon="⚠️",
+            )
+            return
+        sent = [k for k, v in results.items() if v]
+        failed = [k for k, v in results.items() if not v]
+        msg_parts = []
+        if sent:
+            msg_parts.append("✅ " + ", ".join(sent))
+        if failed:
+            msg_parts.append("❌ " + ", ".join(failed))
+        st.toast("推播完成 — " + " / ".join(msg_parts), icon="📤")
+        st.session_state["manual_push_last_ts"] = _t.time()
+        st.rerun()
+
+
 # === 短線推薦頁 ===
 
 def _page_short() -> None:
@@ -751,6 +817,9 @@ def _page_short() -> None:
         f"({len(sids_only)} 檔 → {len(agg)} 中)"
         f"{' [跳過 prefetch — 走 daily_fetch 快取]' if skipped_prefetch else ''}"
     )
+
+    # === 📤 立即推播按鈕(限 7 檔 + 30 秒 debounce) ===
+    _render_manual_push_button(df)
 
     if selection and selection.selection.rows:
         sel_sids = [df.iloc[i]["stock_id"] for i in selection.selection.rows]
