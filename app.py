@@ -310,19 +310,11 @@ def _load_snapshot_if_needed() -> None:
             db.upsert_institutional(records)
 
     # 灌 watchlist(避免雲端 reboot 後 user 關注清單丟光)
-    # add_to_watchlist 是 idempotent,既有的 watchlist 不會被 added_at 覆寫
-    #
-    # 雲端優先 watchlist-sync 分支(由 app push 維護的最新版本),失敗或無 PAT
-    # fallback 到本機 main 上的 seed CSV — 這份是 deploy 時帶下來的,初次部署
-    # 或遠端分支不存在時當底。
+    # 走 safe_boot_load:會優先嘗試 watchlist-sync 遠端,任何錯誤(ImportError、
+    # 認證失敗、parse error 等)一律 silent fallback 到本機 seed CSV,絕不 raise
+    # — boot 路徑禁止 crash。
     from src import watchlist_snapshot
-    from src.github_sync import fetch_watchlist_from_github
-
-    remote_csv = fetch_watchlist_from_github()
-    if remote_csv is not None:
-        watchlist_snapshot.load_from_string(remote_csv)
-    else:
-        watchlist_snapshot.load_from_csv()
+    watchlist_snapshot.safe_boot_load()
 
     _snapshot_loaded = True
 

@@ -172,6 +172,52 @@ def load_from_string(
     return _ingest_watchlist_dataframe(df, db_path)
 
 
+def safe_boot_load(db_path: str | Path | None = None) -> str:
+    """雲端 boot 容錯入口:嘗試從 watchlist-sync 遠端拉,失敗一律 fallback 本機 seed。
+
+    任何例外(ImportError、AttributeError、HTTP error、parse error)都吞掉並
+    fallback 到 load_from_csv。這個函式承諾「絕不 raise」,因為 caller 是
+    app.py 的 boot 路徑,raise 等於整個 Streamlit app crash。
+
+    Returns: 描述本次走哪條路徑的短字串(供 caller log / debug 用),
+             非錯誤訊號 — caller 不需要 branch 任何邏輯。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from src.github_sync import fetch_watchlist_from_github
+    except Exception as ex:  # noqa: BLE001
+        logger.warning(
+            "[BOOT] github_sync import 失敗 (%s),fallback seed CSV", ex,
+        )
+        load_from_csv(db_path=db_path)
+        return "fallback-import-error"
+
+    try:
+        remote_csv = fetch_watchlist_from_github()
+    except Exception as ex:  # noqa: BLE001
+        logger.warning(
+            "[BOOT] fetch_watchlist_from_github 拋例外 (%s),fallback seed CSV",
+            ex,
+        )
+        load_from_csv(db_path=db_path)
+        return "fallback-fetch-exception"
+
+    if remote_csv is None:
+        load_from_csv(db_path=db_path)
+        return "fallback-no-remote"
+
+    try:
+        load_from_string(remote_csv, db_path=db_path)
+        return "remote"
+    except Exception as ex:  # noqa: BLE001
+        logger.warning(
+            "[BOOT] load_from_string 失敗 (%s),補跑 load_from_csv", ex,
+        )
+        load_from_csv(db_path=db_path)
+        return "fallback-load-error"
+
+
 __all__ = [
     "SNAPSHOT_DIR",
     "WATCHLIST_CSV",
@@ -179,4 +225,5 @@ __all__ = [
     "dump_to_string",
     "load_from_csv",
     "load_from_string",
+    "safe_boot_load",
 ]

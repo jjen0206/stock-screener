@@ -171,6 +171,90 @@ def test_load_from_string_malformed_returns_zero(tmp_db):
     assert n == 0
 
 
+# === safe_boot_load:雲端 boot 容錯入口,絕不 raise ===
+
+
+def test_safe_boot_load_uses_remote_when_fetch_returns_csv(
+    tmp_db, monkeypatch,
+):
+    """fetch 成功 → 走 remote 路徑,SQLite 灌入 remote 的 stocks。"""
+    from src import watchlist_snapshot, github_sync
+    monkeypatch.setattr(
+        github_sync, "fetch_watchlist_from_github",
+        lambda: "stock_id,added_at,note\n9999,2025-01-01T00:00:00+00:00,from remote\n",
+    )
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "remote"
+    items = db.get_watchlist()
+    assert len(items) == 1
+    assert items[0]["stock_id"] == "9999"
+    assert items[0]["note"] == "from remote"
+
+
+def test_safe_boot_load_falls_back_when_fetch_returns_none(
+    tmp_db, monkeypatch,
+):
+    """fetch 回 None(無 PAT / 404)→ 走 load_from_csv fallback。"""
+    from src import watchlist_snapshot, github_sync
+    monkeypatch.setattr(
+        github_sync, "fetch_watchlist_from_github", lambda: None,
+    )
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "fallback-no-remote"
+
+
+def test_safe_boot_load_swallows_fetch_exception(tmp_db, monkeypatch):
+    """fetch 拋任意例外 → 不 raise,fallback 到 seed。"""
+    from src import watchlist_snapshot, github_sync
+
+    def boom():
+        raise RuntimeError("simulated network error")
+
+    monkeypatch.setattr(github_sync, "fetch_watchlist_from_github", boom)
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "fallback-fetch-exception"
+
+
+def test_safe_boot_load_swallows_import_error(tmp_db, monkeypatch):
+    """模擬雲端 module cache 缺 attr:fetch_watchlist_from_github 不存在 → fallback。"""
+    import sys
+    from src import watchlist_snapshot
+
+    # 暫時拔掉 src.github_sync 模組,讓 import 拋 ImportError
+    saved = sys.modules.pop("src.github_sync", None)
+    try:
+        # 偽造一個沒有 fetch_watchlist_from_github 的假模組
+        fake = type(sys)("src.github_sync")
+        # 沒有 fetch_watchlist_from_github attr → from import 會 ImportError
+        sys.modules["src.github_sync"] = fake
+        result = watchlist_snapshot.safe_boot_load()
+        assert result == "fallback-import-error"
+    finally:
+        if saved is not None:
+            sys.modules["src.github_sync"] = saved
+        else:
+            sys.modules.pop("src.github_sync", None)
+
+
+def test_safe_boot_load_handles_load_from_string_failure(
+    tmp_db, monkeypatch,
+):
+    """fetch 給回壞字串導致 load_from_string 拋例外 → fallback 補跑 load_from_csv,絕不 raise。"""
+    from src import watchlist_snapshot, github_sync
+
+    monkeypatch.setattr(
+        github_sync, "fetch_watchlist_from_github", lambda: "ok-string",
+    )
+
+    def explode(csv_text, db_path=None):
+        raise ValueError("simulated parse error")
+
+    monkeypatch.setattr(watchlist_snapshot, "load_from_string", explode)
+    # 不該 raise
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "fallback-load-error"
+
+
 # === UI 整合測試:個股查詢 toggle 第二次新增不該失敗 ===
 # 主公回報 bug:同 session 改 stock_id 後 toggle 失效;root cause = button key 固定。
 # 修法:button key 包含當下 stock_id (key=f"star_toggle_{sid}");每次 render 重查 DB。
