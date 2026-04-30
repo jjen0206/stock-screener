@@ -1,15 +1,20 @@
-"""GitHub Contents API push for watchlist.csv (cloud persistence).
+"""GitHub Contents API push/fetch for watchlist.csv (cloud persistence).
 
 雲端容器(Streamlit Cloud)無法直接 git push,改用 GitHub Contents API 在
 add/remove 後把最新 watchlist.csv 推到 repo,讓重啟後仍能從 CSV 還原。
 
-需要的 secrets / env(雲端設定;本機未設時 push_watchlist_to_github 早早 return False,行為不變):
+設計:推到獨立的 `watchlist-sync` 分支(預設值)避免 Streamlit Cloud 偵測 main
+變動觸發 redeploy。Boot 時先嘗試從 watchlist-sync 拉,沒有就 fallback 用 main 上
+的 seed CSV。
+
+需要的 secrets / env(雲端設定;本機未設時 push/fetch 早早 return False/None,行為不變):
   - GITHUB_PAT: fine-grained PAT,permissions: Contents=Read+Write
   - GITHUB_REPO       (預設 "jjen0206/stock-screener")
-  - GITHUB_BRANCH     (預設 "main")
+  - GITHUB_BRANCH     (預設 "watchlist-sync")
   - GITHUB_WATCHLIST_PATH (預設 "data/twse_snapshot/watchlist.csv")
 
-Caller 用 fire-and-forget thread 呼叫,thread 內部失敗只 log 不 raise。
+Caller 用 fire-and-forget thread 呼叫 push,thread 內部失敗只 log 不 raise。
+Boot 時 fetch 是 sync 呼叫,失敗回 None 讓 caller fallback。
 """
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_REPO = "jjen0206/stock-screener"
-DEFAULT_BRANCH = "main"
+DEFAULT_BRANCH = "watchlist-sync"
 DEFAULT_PATH = "data/twse_snapshot/watchlist.csv"
 COMMITTER = {
     "name": "stock-screener-bot",
@@ -184,4 +189,47 @@ def push_watchlist_to_github(
     return False
 
 
-__all__ = ["push_watchlist_to_github"]
+def fetch_watchlist_from_github() -> str | None:
+    """從 watchlist-sync 分支(或 GITHUB_BRANCH 設定的分支)拉最新 watchlist.csv 內容。
+
+    Returns:
+        str  -> 解碼後的 CSV 文字
+        None -> 無 PAT / 分支或檔案不存在(404) / 認證失敗 / 連線錯誤
+                — caller 應 fallback 到本機 main 上的 seed CSV
+
+    供 app.py boot 時 remote-first 載入用。失敗只 log warning,不 raise。
+    """
+    token = os.environ.get("GITHUB_PAT")
+    if not token:
+        logger.debug("[GH_SYNC] 未設 GITHUB_PAT,跳過遠端 fetch")
+        return None
+
+    repo = os.environ.get("GITHUB_REPO", DEFAULT_REPO)
+    branch = os.environ.get("GITHUB_BRANCH", DEFAULT_BRANCH)
+    path = os.environ.get("GITHUB_WATCHLIST_PATH", DEFAULT_PATH)
+
+    try:
+        _, content = _get_remote_file(repo, path, branch, token)
+    except requests.HTTPError as ex:
+        code = ex.response.status_code if ex.response is not None else "?"
+        if code in (401, 403):
+            logger.warning(
+                "[GH_SYNC] fetch 認證失敗(%s),fallback 到本機 seed CSV", code,
+            )
+        else:
+            logger.warning("[GH_SYNC] fetch 失敗(%s),fallback:%s", code, ex)
+        return None
+    except requests.RequestException as ex:
+        logger.warning("[GH_SYNC] fetch 連線錯誤,fallback:%s", ex)
+        return None
+
+    if content is None:
+        logger.info(
+            "[GH_SYNC] %s@%s 不存在(404),fallback 到本機 seed CSV", path, branch,
+        )
+        return None
+    logger.info("[GH_SYNC] 從 %s@%s 拉到 watchlist.csv", path, branch)
+    return content
+
+
+__all__ = ["push_watchlist_to_github", "fetch_watchlist_from_github"]

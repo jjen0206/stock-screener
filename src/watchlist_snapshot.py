@@ -12,6 +12,7 @@ Schema: stock_id, added_at, note
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pandas as pd
@@ -96,24 +97,18 @@ def dump_to_csv(db_path: str | Path | None = None) -> int:
     return len(df)
 
 
-def load_from_csv(db_path: str | Path | None = None) -> int:
-    """讀 watchlist.csv 灌進 SQLite。idempotent on stock_id。
+def _ingest_watchlist_dataframe(
+    df: pd.DataFrame, db_path: str | Path | None,
+) -> int:
+    """把 schema 對齊的 DataFrame 逐筆 add_to_watchlist。共用給 load_from_csv / load_from_string。
 
-    add_to_watchlist 會更新 note 但保留原 added_at,所以本機既有 watchlist
-    不會被覆蓋(只可能新增 CSV 裡有但 SQLite 沒有的;note 以 CSV 為準)。
-
-    Returns: 處理的 row 數(空檔/不存在/DB 不在 repo 內回 0)。
+    add_to_watchlist 是 idempotent:既有 row 保留 added_at,只覆寫 note。
+    過程中設 _LOAD_IN_PROGRESS 抑制 dump_to_csv 的回呼(避免 N 筆 row 觸發 N 次寫檔
+    + N 次 GitHub push)。
     """
     global _LOAD_IN_PROGRESS
-    if not WATCHLIST_CSV.exists():
-        return 0
-    if not _db_inside_project(db_path):
-        # 跟 dump_to_csv 對稱:tests 用 tmp_path 走這條,避免污染測試 SQLite
-        return 0
-    df = pd.read_csv(WATCHLIST_CSV, dtype={"stock_id": str})
     if df.empty:
         return 0
-
     from src import database as db
     _LOAD_IN_PROGRESS = True
     try:
@@ -137,9 +132,44 @@ def load_from_csv(db_path: str | Path | None = None) -> int:
                 sid, note=note, added_at=added_at, db_path=db_path,
             )
             n += 1
+        return n
     finally:
         _LOAD_IN_PROGRESS = False
-    return n
+
+
+def load_from_csv(db_path: str | Path | None = None) -> int:
+    """讀本機 watchlist.csv 灌進 SQLite。idempotent on stock_id。
+
+    本機 dev / weekly script 用;雲端 boot 時優先走 load_from_string + 遠端 fetch。
+
+    Returns: 處理的 row 數(空檔/不存在/DB 不在 repo 內回 0)。
+    """
+    if not WATCHLIST_CSV.exists():
+        return 0
+    if not _db_inside_project(db_path):
+        # 跟 dump_to_csv 對稱:tests 用 tmp_path 走這條,避免污染測試 SQLite
+        return 0
+    df = pd.read_csv(WATCHLIST_CSV, dtype={"stock_id": str})
+    return _ingest_watchlist_dataframe(df, db_path)
+
+
+def load_from_string(
+    csv_text: str, db_path: str | Path | None = None,
+) -> int:
+    """把 CSV 字串(通常來自 watchlist-sync 分支的遠端拉取)灌進 SQLite。
+
+    跟 load_from_csv 同 schema:stock_id, added_at, note。
+    跳過 _db_inside_project 檢查 — caller(app.py boot)需自行決定何時呼叫。
+
+    Returns: 處理的 row 數(空字串/解析失敗回 0)。
+    """
+    if not csv_text or not csv_text.strip():
+        return 0
+    try:
+        df = pd.read_csv(io.StringIO(csv_text), dtype={"stock_id": str})
+    except Exception:  # noqa: BLE001
+        return 0
+    return _ingest_watchlist_dataframe(df, db_path)
 
 
 __all__ = [
@@ -148,4 +178,5 @@ __all__ = [
     "dump_to_csv",
     "dump_to_string",
     "load_from_csv",
+    "load_from_string",
 ]

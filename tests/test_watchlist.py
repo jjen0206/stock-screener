@@ -118,6 +118,59 @@ def test_load_from_csv_preserves_added_at(tmp_db, tmp_path, monkeypatch):
     assert items["3680"]["note"] is None
 
 
+# === load_from_string:雲端 boot 從 watchlist-sync 分支拉到的 CSV 字串入庫 ===
+
+
+def test_load_from_string_inserts_rows(tmp_db):
+    """合法 CSV 字串應全數寫入,added_at 保留。"""
+    from src import watchlist_snapshot
+    csv_text = (
+        "stock_id,added_at,note\n"
+        "2330,2025-09-01T03:00:00+00:00,test note\n"
+        "3680,2025-10-02T04:00:00+00:00,\n"
+    )
+    n = watchlist_snapshot.load_from_string(csv_text)
+    assert n == 2
+    items = {it["stock_id"]: it for it in db.get_watchlist()}
+    assert items["2330"]["added_at"] == "2025-09-01T03:00:00+00:00"
+    assert items["2330"]["note"] == "test note"
+    assert items["3680"]["added_at"] == "2025-10-02T04:00:00+00:00"
+    assert items["3680"]["note"] is None
+
+
+def test_load_from_string_empty_returns_zero(tmp_db):
+    """空字串 / 只有 header → 0 筆。"""
+    from src import watchlist_snapshot
+    assert watchlist_snapshot.load_from_string("") == 0
+    assert watchlist_snapshot.load_from_string("   \n  ") == 0
+    assert watchlist_snapshot.load_from_string(
+        "stock_id,added_at,note\n"
+    ) == 0
+
+
+def test_load_from_string_idempotent_with_existing_rows(tmp_db):
+    """既有 watchlist + 同一 stock_id 的 CSV 進來,added_at 保留。"""
+    from src import watchlist_snapshot
+    db.add_to_watchlist("2330", note="本機已有", added_at="2024-01-01T00:00:00+00:00")
+    csv_text = (
+        "stock_id,added_at,note\n"
+        "2330,2099-12-31T23:59:59+00:00,新 note\n"
+    )
+    watchlist_snapshot.load_from_string(csv_text)
+    items = db.get_watchlist()
+    # added_at 維持本機原值(由 ON CONFLICT 保留),note 更新為 CSV 版本
+    assert items[0]["added_at"] == "2024-01-01T00:00:00+00:00"
+    assert items[0]["note"] == "新 note"
+
+
+def test_load_from_string_malformed_returns_zero(tmp_db):
+    """parse 失敗也只回 0,不 raise。"""
+    from src import watchlist_snapshot
+    # pandas 對純非 CSV 字串容錯極大,故用 binary noise 確保 raise
+    n = watchlist_snapshot.load_from_string("\x00\x01\x02")
+    assert n == 0
+
+
 # === UI 整合測試:個股查詢 toggle 第二次新增不該失敗 ===
 # 主公回報 bug:同 session 改 stock_id 後 toggle 失效;root cause = button key 固定。
 # 修法:button key 包含當下 stock_id (key=f"star_toggle_{sid}");每次 render 重查 DB。

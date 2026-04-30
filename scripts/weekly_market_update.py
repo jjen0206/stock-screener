@@ -11,6 +11,10 @@ Workaround 流程:
   5. workflow 自動 git commit + push 這些 CSV
   6. Streamlit Cloud app 啟動時讀 CSV 灌進 SQLite (見 app.py _load_snapshot_if_needed)
 
+watchlist.csv 不在這支腳本的負責範圍 — 雲端 add/remove ☆ 會走 GitHub Contents API
+推到獨立的 watchlist-sync 分支(見 src/github_sync.py),main 上的 watchlist.csv
+僅作為初次部署 / fallback seed,由人手或 scripts/commit_watchlist.py 維護。
+
 Exit code:
   0 = 成功(只要 daily_metrics 有寫到任何資料)
   1 = 全部失敗(TWSE 完全不通,連 GitHub Actions runner 都抓不到 — 罕見)
@@ -29,7 +33,6 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
 from src.universe import TW_TOP_50  # noqa: E402
-from src import watchlist_snapshot  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
 
@@ -37,9 +40,6 @@ SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
 def main() -> int:
     sids = [s for s, _ in TW_TOP_50]
     db.init_db()
-    wl_loaded = watchlist_snapshot.load_from_csv()
-    if wl_loaded:
-        print(f"[WEEKLY] 預先載入 {wl_loaded} 筆 watchlist.csv", flush=True)
 
     # 確保 universe 在 stocks 表
     db.upsert_stocks([
@@ -97,10 +97,8 @@ def main() -> int:
         df.to_csv(path, index=False)
         print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
 
-    # 4. watchlist(走共用 helper,維持既有 schema 一致)
-    wl_n = watchlist_snapshot.dump_to_csv()
-    if wl_n >= 0:
-        print(f"[WEEKLY] 寫 watchlist.csv: {wl_n} 行", flush=True)
+    # watchlist.csv 不再由 weekly 維護;改由雲端 app 推到 watchlist-sync 分支
+    # (見 src/github_sync.py)。main 上的 watchlist.csv 保留為 seed。
 
     # 寫 timestamp + git/run id 方便事後追溯
     import os

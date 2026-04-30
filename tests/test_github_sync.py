@@ -1,4 +1,4 @@
-"""github_sync.push_watchlist_to_github 測試(全程 mock requests,絕不打網路)。"""
+"""github_sync push/fetch 測試(全程 mock requests,絕不打網路)。"""
 from __future__ import annotations
 
 import base64
@@ -33,11 +33,20 @@ def _mock_resp(status: int, json_body: dict | None = None, text: str = "") -> Ma
 
 @pytest.fixture
 def with_pat(monkeypatch):
-    """提供測試用 PAT;確保各測試環境一致。"""
+    """提供測試用 PAT,固定 repo / branch / path,讓 body assert 穩定。"""
     monkeypatch.setenv("GITHUB_PAT", "test-token-123")
     monkeypatch.setenv("GITHUB_REPO", "jjen0206/stock-screener")
-    monkeypatch.setenv("GITHUB_BRANCH", "main")
+    monkeypatch.setenv("GITHUB_BRANCH", "watchlist-sync")
     monkeypatch.setenv("GITHUB_WATCHLIST_PATH", "data/twse_snapshot/watchlist.csv")
+
+
+@pytest.fixture
+def with_pat_no_branch(monkeypatch):
+    """只設 PAT,讓 GITHUB_BRANCH 走預設值(驗證 default 是 watchlist-sync)。"""
+    monkeypatch.setenv("GITHUB_PAT", "test-token-123")
+    monkeypatch.delenv("GITHUB_BRANCH", raising=False)
+    monkeypatch.delenv("GITHUB_REPO", raising=False)
+    monkeypatch.delenv("GITHUB_WATCHLIST_PATH", raising=False)
 
 
 @pytest.fixture
@@ -67,8 +76,20 @@ def test_create_new_file_when_remote_404(with_pat):
     body = m_put.call_args.kwargs["json"]
     assert "sha" not in body
     assert body["content"] == _b64(CSV_CONTENT)
-    assert body["branch"] == "main"
+    assert body["branch"] == "watchlist-sync"
     assert body["committer"]["email"] == "actions@users.noreply.github.com"
+
+
+def test_default_branch_is_watchlist_sync(with_pat_no_branch):
+    """未設 GITHUB_BRANCH 時 push 預設打 watchlist-sync。"""
+    get_resp = _mock_resp(404)
+    put_resp = _mock_resp(201, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp) as m_get, \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(CSV_CONTENT)
+    assert ok is True
+    assert m_get.call_args.kwargs["params"] == {"ref": "watchlist-sync"}
+    assert m_put.call_args.kwargs["json"]["branch"] == "watchlist-sync"
 
 
 def test_update_existing_file_carries_sha(with_pat):
@@ -147,3 +168,50 @@ def test_500_retries_once_then_succeeds(with_pat):
     assert ok is True
     assert m_put.call_count == 2
     m_sleep.assert_called_once_with(0.5)
+
+
+# === fetch_watchlist_from_github ===
+
+
+def test_fetch_no_token_returns_none(no_pat):
+    """無 PAT → 直接 None,不發 HTTP。"""
+    with patch.object(github_sync, "requests") as mock_req:
+        result = github_sync.fetch_watchlist_from_github()
+    assert result is None
+    mock_req.get.assert_not_called()
+
+
+def test_fetch_returns_decoded_content(with_pat):
+    """200 OK → 回傳解碼後的 CSV 文字。"""
+    get_resp = _mock_resp(
+        200, {"sha": "abc", "content": _b64(CSV_CONTENT)},
+    )
+    with patch.object(github_sync.requests, "get", return_value=get_resp) as m_get:
+        result = github_sync.fetch_watchlist_from_github()
+    assert result == CSV_CONTENT
+    # 確認打的是 watchlist-sync 分支
+    assert m_get.call_args.kwargs["params"] == {"ref": "watchlist-sync"}
+
+
+def test_fetch_404_returns_none(with_pat):
+    """分支或檔案不存在 → None,讓 caller fallback。"""
+    get_resp = _mock_resp(404)
+    with patch.object(github_sync.requests, "get", return_value=get_resp):
+        result = github_sync.fetch_watchlist_from_github()
+    assert result is None
+
+
+def test_fetch_401_returns_none(with_pat):
+    """token 失效 → None(warning log)。"""
+    get_resp = _mock_resp(401, text="Bad credentials")
+    with patch.object(github_sync.requests, "get", return_value=get_resp):
+        result = github_sync.fetch_watchlist_from_github()
+    assert result is None
+
+
+def test_fetch_network_error_returns_none(with_pat):
+    """連線錯誤 → None。"""
+    with patch.object(github_sync.requests, "get",
+                      side_effect=requests.ConnectionError("DNS fail")):
+        result = github_sync.fetch_watchlist_from_github()
+    assert result is None
