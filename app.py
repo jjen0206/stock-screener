@@ -1346,15 +1346,51 @@ def _page_backtest() -> None:
             help="每筆入選收盤買進,持有 N 個交易日後收盤賣出",
         )
 
-    today = date.today()
-    cols = st.columns([2, 2, 1])
-    start = cols[0].date_input(
-        "回測起始", value=today - timedelta(days=180), key="bt_start"
+    # === 策略多選 ===
+    from src.strategies import ALL_STRATEGIES, STRATEGY_LABELS
+    strategy_keys = list(ALL_STRATEGIES.keys())
+    st.markdown("##### 🧪 選股策略(多選 = OR,任一命中即買進)")
+    enabled = st.multiselect(
+        "策略",
+        strategy_keys,
+        default=["volume_kd"],
+        format_func=lambda k: STRATEGY_LABELS.get(k, k),
+        key="bt_strategies",
+        label_visibility="collapsed",
     )
-    end = cols[1].date_input("回測結束", value=today, key="bt_end")
+    if not enabled:
+        st.warning("請至少選一套策略")
+
+    # === 期間 preset 快選 ===
+    today = date.today()
+    preset_label_to_days = {
+        "近 30 日": 30, "近 60 日": 60, "近 90 日": 90,
+        "近 180 日": 180, "自訂": None,
+    }
+    preset = st.radio(
+        "回測期間",
+        list(preset_label_to_days.keys()),
+        index=2,  # default 近 90 日
+        horizontal=True, key="bt_period_preset",
+    )
+    cols = st.columns([2, 2, 1])
+    if preset == "自訂":
+        start = cols[0].date_input(
+            "回測起始", value=today - timedelta(days=180), key="bt_start"
+        )
+        end = cols[1].date_input("回測結束", value=today, key="bt_end")
+    else:
+        days = preset_label_to_days[preset]
+        start = today - timedelta(days=days)
+        end = today
+        cols[0].metric("起始", start.isoformat())
+        cols[1].metric("結束", end.isoformat())
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[2].button(
-        "執行回測", type="primary", use_container_width=True
+        "執行回測",
+        type="primary",
+        use_container_width=True,
+        disabled=not enabled,
     )
 
     if not submit:
@@ -1383,12 +1419,17 @@ def _page_backtest() -> None:
 
     with st.spinner("執行回測..."):
         try:
+            # 單一 volume_kd 走舊路徑(向下相容);多選 / 非預設走聚合路徑
+            use_multi = (
+                len(enabled) > 1 or (len(enabled) == 1 and enabled[0] != "volume_kd")
+            )
             result = backtest_short(
                 start.isoformat(), end.isoformat(),
                 params=params,
                 hold_days=int(hold_days),
                 universe=universe,
                 on_progress=cb,
+                enabled_strategies=enabled if use_multi else None,
             )
         except Exception as e:  # noqa: BLE001
             progress.empty()
@@ -1416,17 +1457,27 @@ def _page_backtest() -> None:
 
     row2 = st.columns(4)
     row2[0].metric("年化報酬", f"{g('annual_return', 0.0):.2f}%")
-    row2[1].metric("年化波動率", f"{g('annual_volatility', 0.0):.2f}%")
-    row2[2].metric(
+    row2[1].metric(
         "夏普比率",
         f"{g('sharpe', 0.0):.2f}",
         help=f"年化基準 √(252/{hd}) = {(252 / max(hd, 1)) ** 0.5:.2f}",
+    )
+    row2[2].metric(
+        "最大回撤",
+        f"-{g('max_drawdown', 0.0):.2f}%",
+        help="累積報酬曲線從歷史峰值跌至谷底的最大跌幅",
     )
     row2[3].metric(
         "最大單筆",
         f"{g('max_win', 0.0):.2f}%",
         delta=f"最差 {g('max_loss', 0.0):.2f}%",
         delta_color="off",
+    )
+
+    st.caption(
+        f"策略:{' + '.join(STRATEGY_LABELS.get(k, k) for k in enabled)} | "
+        f"期間:{start.isoformat()} ~ {end.isoformat()} | "
+        f"年化波動率:{g('annual_volatility', 0.0):.2f}%"
     )
 
     # 累積報酬曲線(含 0050 對比,失敗就不畫)

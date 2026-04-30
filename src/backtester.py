@@ -50,6 +50,7 @@ def backtest_short(
     hold_days: int = 5,
     universe: list[tuple[str, str]] | None = None,
     on_progress: ProgressCallback | None = None,
+    enabled_strategies: list[str] | None = None,
 ) -> dict:
     """跑短線策略歷史回測。
 
@@ -59,11 +60,15 @@ def backtest_short(
         hold_days: 持有交易日數(預設 5)
         universe: [(stock_id, name), ...] 限縮個股範圍;None 用 TW_TOP_50
         on_progress: callback(idx_1based, total, current_date)
+        enabled_strategies: 策略 key 清單(volume_kd / ma_alignment /
+            bias_convergence)。None = 用 screen_short 單策略(向下相容);
+            ≥1 個 = 走 run_all_strategies 聚合,**任一策略命中即買進**。
 
     回傳 dict:
-        summary       : 總報酬、勝率、夏普…等(預設值見 _empty_summary)
+        summary       : 總報酬、勝率、夏普、最大回撤…等(預設值見 _empty_summary)
         trades        : DataFrame[buy_date, stock_id, name, buy_price,
-                                   sell_date, sell_price, return_pct]
+                                   sell_date, sell_price, return_pct,
+                                   strategy(若多策略路徑)]
         equity_curve  : Series indexed by date,值為「累積報酬 %」(複利)
     """
     db.init_db()
@@ -92,40 +97,43 @@ def backtest_short(
             except Exception:  # noqa: BLE001
                 pass
         try:
-            picked = screen_short(d, params=params, stock_ids=sids)
+            day_picks = _run_strategies_for_day(
+                d, sids, params, enabled_strategies,
+            )
         except Exception:  # noqa: BLE001 — 單日失敗不中斷整個回測
             continue
-        if picked.empty:
-            continue
-        for _, row in picked.iterrows():
-            sid = str(row["stock_id"])
-            buy_price = float(row["close"])
+        for pick in day_picks:
+            sid = pick["stock_id"]
+            buy_price = pick["buy_price"]
             sell_d, sell_price = _find_sell(sid, d, hold_days)
             if sell_d is None or buy_price <= 0:
                 continue
-            trades.append({
+            trade = {
                 "buy_date": d,
                 "stock_id": sid,
-                "name": row.get("name", sid),
+                "name": pick.get("name", sid),
                 "buy_price": buy_price,
                 "sell_date": sell_d,
                 "sell_price": sell_price,
                 "return_pct": (sell_price - buy_price) / buy_price * 100.0,
-            })
+            }
+            if "strategy" in pick:
+                trade["strategy"] = pick["strategy"]
+            trades.append(trade)
 
-    trades_df = pd.DataFrame(
-        trades,
-        columns=[
-            "buy_date", "stock_id", "name", "buy_price",
-            "sell_date", "sell_price", "return_pct",
-        ],
-    )
+    base_cols = [
+        "buy_date", "stock_id", "name", "buy_price",
+        "sell_date", "sell_price", "return_pct",
+    ]
+    cols = base_cols + (["strategy"] if enabled_strategies else [])
+    trades_df = pd.DataFrame(trades, columns=cols)
 
     period_days = (_date.fromisoformat(end_date) - _date.fromisoformat(start_date)).days
     summary = _compute_summary(
         trades_df, hold_days=hold_days, period_days=period_days,
     )
     equity_curve = _compute_equity_curve(trades_df, trading_days)
+    summary["max_drawdown"] = _compute_max_drawdown(equity_curve)
 
     logger.info(
         "[BACKTEST] trades=%d total=%.2f%% sharpe=%.2f equity_curve len=%d "
@@ -144,6 +152,55 @@ def backtest_short(
 
 
 # === 內部工具 ===
+
+def _run_strategies_for_day(
+    d: str,
+    sids: list[str],
+    params: dict | None,
+    enabled_strategies: list[str] | None,
+) -> list[dict]:
+    """單日跑選股,回 [{stock_id, name, buy_price, [strategy]}, ...]。
+
+    enabled_strategies=None → 用 screen_short(向下相容);
+    enabled_strategies=[k1, k2, ...] → 走 run_all_strategies,任一策略命中即列入,
+        並把 strategy 標籤(逗號串接)塞進 pick["strategy"](每筆 trade 標哪些策略命中)。
+    """
+    if enabled_strategies is None:
+        df = screen_short(d, params=params, stock_ids=sids)
+        if df.empty:
+            return []
+        return [
+            {
+                "stock_id": str(r["stock_id"]),
+                "name": r.get("name", r["stock_id"]),
+                "buy_price": float(r["close"]),
+            }
+            for _, r in df.iterrows()
+        ]
+
+    # 多策略聚合路徑
+    from src.strategies import run_all_strategies
+    agg = run_all_strategies(
+        d, enabled=enabled_strategies, params=params, stock_ids=sids,
+    )
+    picks: list[dict] = []
+    for sid, info in agg.items():
+        # 從 details 取任一策略的 close 當買價(各策略 close 應一致)
+        close = None
+        for det in info["details"].values():
+            if det.get("close"):
+                close = float(det["close"])
+                break
+        if close is None:
+            continue
+        picks.append({
+            "stock_id": sid,
+            "name": info.get("name", sid),
+            "buy_price": close,
+            "strategy": " + ".join(info["signals"]),
+        })
+    return picks
+
 
 def _get_trading_days(start: str, end: str, stock_ids: list[str]) -> list[str]:
     """取 [start, end] 區間內,universe 內任一股有交易的所有日期(升序)。"""
@@ -199,8 +256,23 @@ def _empty_summary() -> dict:
         "sharpe": 0.0,
         "annual_return": 0.0,
         "annual_volatility": 0.0,
+        "max_drawdown": 0.0,
         "hold_days": 0,
     }
+
+
+def _compute_max_drawdown(equity_curve: pd.Series) -> float:
+    """從累積報酬曲線(百分比)算最大回撤(回正數,如 12.5 表示曾跌 -12.5%)。
+
+    定義:max(peak - trough) 其中 trough 在 peak 之後;曲線是「累積報酬 %」。
+    把曲線 → equity (1 + curve/100) → drawdown = peak - current。
+    """
+    if equity_curve is None or equity_curve.empty:
+        return 0.0
+    equity = 1.0 + equity_curve / 100.0
+    rolling_peak = equity.cummax()
+    dd_series = (equity - rolling_peak) / rolling_peak * 100.0
+    return float(abs(dd_series.min())) if len(dd_series) else 0.0
 
 
 def _empty_result() -> dict:

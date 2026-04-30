@@ -303,11 +303,105 @@ def test_empty_summary_has_all_fields(tmp_db):
     for key in [
         "trades", "win_rate", "avg_return", "total_return",
         "max_win", "max_loss", "sharpe",
-        "annual_return", "annual_volatility", "hold_days",
+        "annual_return", "annual_volatility", "max_drawdown", "hold_days",
     ]:
         assert key in s, f"missing key: {key}"
     assert s["trades"] == 0
     assert s["hold_days"] == 5
+    assert s["max_drawdown"] == 0.0
+
+
+# === max drawdown ===
+
+
+def test_max_drawdown_simple_curve():
+    """累積曲線從 +20% 跌到 -10% → drawdown = (1.20 - 0.90) / 1.20 = 25%。"""
+    curve = pd.Series(
+        [0, 10, 20, 5, -10, -5],
+        index=["d1", "d2", "d3", "d4", "d5", "d6"],
+        dtype=float,
+    )
+    dd = bt._compute_max_drawdown(curve)
+    assert dd == pytest.approx(25.0, rel=1e-3)
+
+
+def test_max_drawdown_monotonic_up_is_zero():
+    """單調上升曲線 → drawdown = 0。"""
+    curve = pd.Series([0, 5, 10, 15, 20], dtype=float)
+    assert bt._compute_max_drawdown(curve) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_max_drawdown_empty_returns_zero():
+    assert bt._compute_max_drawdown(pd.Series(dtype=float)) == 0.0
+
+
+def test_max_drawdown_in_backtest_summary(tmp_db, monkeypatch):
+    """整合:跑 backtest_short 後 summary['max_drawdown'] 該被填入。"""
+    _seed_prices("A", list(zip(_DATES, [100.0, 110.0, 100.0, 90.0, 100.0])))
+    _mock_screen(monkeypatch, {
+        "2024-01-02": [{"stock_id": "A", "name": "A", "close": 100.0}],
+    })
+    result = bt.backtest_short(
+        "2024-01-01", "2024-01-31", hold_days=1, universe=[("A", "A")],
+    )
+    assert "max_drawdown" in result["summary"]
+    assert result["summary"]["max_drawdown"] >= 0.0
+
+
+# === enabled_strategies 路徑(走 run_all_strategies) ===
+
+
+def test_backtest_with_enabled_strategies_routes_to_run_all(
+    tmp_db, monkeypatch,
+):
+    """enabled_strategies 有值 → 不該呼叫 screen_short,改走 run_all_strategies。"""
+    _seed_prices("A", list(zip(_DATES, [100.0, 110.0, 100.0, 90.0, 100.0])))
+
+    def boom_screen(*args, **kwargs):
+        raise AssertionError(
+            "screen_short shouldn't be called when enabled_strategies set"
+        )
+
+    monkeypatch.setattr(bt, "screen_short", boom_screen)
+
+    def fake_run_all(date, enabled, params, stock_ids):
+        if date == "2024-01-02":
+            return {
+                "A": {
+                    "name": "AAA",
+                    "signals": ["量價KD", "多頭排列"],
+                    "details": {"volume_kd": {"close": 100.0}},
+                }
+            }
+        return {}
+
+    import src.strategies
+    monkeypatch.setattr(src.strategies, "run_all_strategies", fake_run_all)
+
+    result = bt.backtest_short(
+        "2024-01-01", "2024-01-31", hold_days=1, universe=[("A", "AAA")],
+        enabled_strategies=["volume_kd", "ma_alignment"],
+    )
+    assert len(result["trades"]) == 1
+    trade = result["trades"].iloc[0]
+    assert trade["stock_id"] == "A"
+    assert "strategy" in result["trades"].columns
+    assert trade["strategy"] == "量價KD + 多頭排列"
+
+
+def test_backtest_default_enabled_strategies_uses_screen_short(
+    tmp_db, monkeypatch,
+):
+    """enabled_strategies=None → 走原本 screen_short 路徑(向下相容,不 break 既有測試)。"""
+    _seed_prices("A", list(zip(_DATES, [100.0, 110.0, 100.0, 90.0, 100.0])))
+    _mock_screen(monkeypatch, {
+        "2024-01-02": [{"stock_id": "A", "name": "A", "close": 100.0}],
+    })
+    result = bt.backtest_short(
+        "2024-01-01", "2024-01-31", hold_days=1, universe=[("A", "A")],
+    )
+    assert "strategy" not in result["trades"].columns
+    assert len(result["trades"]) == 1
 
 
 def test_backtest_callback_error_does_not_stop(tmp_db, monkeypatch):
