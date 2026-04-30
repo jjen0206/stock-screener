@@ -127,7 +127,15 @@ def load_from_csv(db_path: str | Path | None = None) -> int:
                 None if note_val is None or pd.isna(note_val)
                 else str(note_val)
             )
-            db.add_to_watchlist(sid, note=note, db_path=db_path)
+            ts_val = r.get("added_at")
+            added_at = (
+                None
+                if ts_val is None or pd.isna(ts_val) or not str(ts_val).strip()
+                else str(ts_val).strip()
+            )
+            db.add_to_watchlist(
+                sid, note=note, added_at=added_at, db_path=db_path,
+            )
             n += 1
     finally:
         _LOAD_IN_PROGRESS = False

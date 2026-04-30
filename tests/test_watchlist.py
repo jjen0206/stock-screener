@@ -69,6 +69,55 @@ def test_add_without_note_uses_none(tmp_db):
     assert items[0]["note"] is None
 
 
+# === added_at 保留:雲端容器 reboot → load_from_csv 應還原原時間戳 ===
+
+def test_add_to_watchlist_uses_provided_added_at(tmp_db):
+    """傳入 added_at 應寫入 DB,不被 _now_iso() 覆寫。"""
+    custom_ts = "2023-01-15T08:30:00+00:00"
+    db.add_to_watchlist("2330", added_at=custom_ts)
+    items = db.get_watchlist()
+    assert items[0]["added_at"] == custom_ts
+
+
+def test_add_to_watchlist_default_added_at_is_now(tmp_db):
+    """不傳 added_at 時仍走 _now_iso(),維持既有行為。"""
+    db.add_to_watchlist("2330")
+    items = db.get_watchlist()
+    # _now_iso() 帶秒級 ISO 8601,會帶 'T' 跟時區
+    assert "T" in items[0]["added_at"]
+    assert items[0]["added_at"].endswith("+00:00")
+
+
+def test_load_from_csv_preserves_added_at(tmp_db, tmp_path, monkeypatch):
+    """load_from_csv 應保留 CSV 內的 added_at,不被 _now_iso() 覆寫。
+
+    回歸測試:雲端容器重啟 → load_from_csv → SQLite 的 added_at 應等於 CSV
+    原值,不應該變成「啟動時間」(造成下次 dump 出假變更)。
+    """
+    from src import watchlist_snapshot
+    csv_file = tmp_path / "watchlist.csv"
+    csv_file.write_text(
+        "stock_id,added_at,note\n"
+        "2330,2023-01-15T08:30:00+00:00,初次關注\n"
+        "3680,2024-06-10T12:00:00+00:00,\n",
+        encoding="utf-8",
+    )
+    # 把 helper 的 WATCHLIST_CSV 指到 tmp 檔
+    monkeypatch.setattr(watchlist_snapshot, "WATCHLIST_CSV", csv_file)
+    # 繞過「DB 必須在 PROJECT_ROOT 底下」的 guard (tests 用 tmp_path)
+    monkeypatch.setattr(
+        watchlist_snapshot, "_db_inside_project", lambda _: True,
+    )
+
+    n = watchlist_snapshot.load_from_csv()
+    assert n == 2
+    items = {it["stock_id"]: it for it in db.get_watchlist()}
+    assert items["2330"]["added_at"] == "2023-01-15T08:30:00+00:00"
+    assert items["2330"]["note"] == "初次關注"
+    assert items["3680"]["added_at"] == "2024-06-10T12:00:00+00:00"
+    assert items["3680"]["note"] is None
+
+
 # === UI 整合測試:個股查詢 toggle 第二次新增不該失敗 ===
 # 主公回報 bug:同 session 改 stock_id 後 toggle 失效;root cause = button key 固定。
 # 修法:button key 包含當下 stock_id (key=f"star_toggle_{sid}");每次 render 重查 DB。

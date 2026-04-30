@@ -427,8 +427,13 @@ def add_to_watchlist(
     stock_id: str,
     note: str | None = None,
     db_path: str | Path | None = None,
+    added_at: str | None = None,
 ) -> None:
     """加入關注;若已存在則更新 note(added_at 不變)。
+
+    added_at 預設為當下時間;傳入值用於從 CSV snapshot 還原時保留原時間戳,
+    避免每次容器重啟 load 時 added_at 都被改寫成「啟動時間」。
+    ON CONFLICT 永遠保留既有 added_at,所以重複呼叫不會誤覆寫。
 
     成功寫 SQLite 後同步 dump CSV snapshot,讓使用者 ☆ 變動跨容器重啟保留。
     """
@@ -439,7 +444,7 @@ def add_to_watchlist(
             VALUES (?, ?, ?)
             ON CONFLICT(stock_id) DO UPDATE SET note=excluded.note
             """,
-            (stock_id, _now_iso(), note),
+            (stock_id, added_at or _now_iso(), note),
         )
     _dump_watchlist_snapshot(db_path)
 
