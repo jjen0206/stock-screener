@@ -1319,3 +1319,65 @@ def test_main_force_signal_fallback_history_insufficient(isolated_db):
 
     info_text = "\n".join(str(i.value) for i in at.info)
     assert "歷史不足" in info_text
+
+
+# ============================================================================
+# 推薦卡:詳細分析 expander(reuse 4 個 individual_sections helper)
+# ============================================================================
+
+def test_pick_card_expander_renders_4_sections(isolated_db):
+    """show_add_button=True 的推薦卡有「📊 詳細分析」expander,展開時 4 個
+    section 都渲染(主力燈號 / 技術分析總覽 / 關鍵價位 / 操作建議)。
+    """
+    # 灌足夠歷史(70 天 線性漲)+ institutional 讓 4 個 helper 都不走 fallback
+    _seed_distribution_scenario()  # 含 70 天 daily + institutional
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 169.0},
+            show_add_button=True,
+            button_key_prefix="testpick",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=15)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 卡片本身渲染
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "2330" in md_text and "台積電" in md_text
+
+    # 「📊 詳細分析」expander 存在
+    assert any(
+        "詳細分析" in (e.label or "") for e in at.expander
+    ), f"應有「詳細分析」expander, 實際: {[e.label for e in at.expander]}"
+
+    # 展開後 4 個 section 的標題 / 關鍵字都出現在 markdown
+    # (AppTest 預設會 render expander 內容,即使 expanded=False)
+    assert "主力燈號" in md_text
+    assert "技術分析總覽" in md_text
+    assert "關鍵價位" in md_text
+    assert "操作建議" in md_text
+
+
+def test_pick_card_no_expander_when_not_recommend(isolated_db):
+    """show_add_button=False(watchlist 等)→ 不渲染詳細分析 expander。"""
+    _seed_distribution_scenario()
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 169.0},
+            show_add_button=False,
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert not any(
+        "詳細分析" in (e.label or "") for e in at.expander
+    ), "watchlist 卡片不該有詳細分析 expander"
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "主力燈號" not in md_text
