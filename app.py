@@ -1328,6 +1328,16 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
         f"📈 主力進出累計(近 {len(display)} 日,單位:張)",
         expanded=True,
     ):
+        # === DEBUG: 確認 cloud 真實 DataFrame 結構(下一輪移除) ===
+        # 注意只用 st.text 不渲染 DataFrame element,避免污染下游讀 dataframe[0]
+        st.text(f"🔍 DEBUG columns: {list(display.columns)}")
+        st.text(f"🔍 DEBUG dtypes: {display.dtypes.astype(str).to_dict()}")
+        st.text(f"🔍 DEBUG shape: {display.shape}")
+        st.text(
+            "🔍 DEBUG head(2) repr:\n"
+            + display.head(2).to_string(index=False)
+        )
+        # === END DEBUG ===
         st.dataframe(
             styled,
             use_container_width=True,
