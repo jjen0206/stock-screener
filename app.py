@@ -1179,7 +1179,7 @@ def _render_institutional_table(sid: str, days: int = 10) -> None:
         try:
             rows = conn.execute(
                 "SELECT date, foreign_buy_sell, trust_buy_sell, "
-                "dealer_buy_sell, total_buy_sell "
+                "dealer_buy_sell "
                 "FROM institutional WHERE stock_id=? "
                 "ORDER BY date DESC LIMIT ?",
                 (sid, days),
@@ -1200,10 +1200,11 @@ def _render_institutional_table(sid: str, days: int = 10) -> None:
             "外資": round((r["foreign_buy_sell"] or 0) / 1000),
             "投信": round((r["trust_buy_sell"] or 0) / 1000),
             "自營商": round((r["dealer_buy_sell"] or 0) / 1000),
-            "合計": round((r["total_buy_sell"] or 0) / 1000),
         }
         for r in rows
     ])
+    # 合計 = 三者和(不直接讀 SQLite total_buy_sell,避免 NULL / 不一致)
+    inst_df["合計"] = inst_df["外資"] + inst_df["投信"] + inst_df["自營商"]
 
     num_cols = ["外資", "投信", "自營商", "合計"]
 

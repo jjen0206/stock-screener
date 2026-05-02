@@ -448,9 +448,17 @@ def test_get_default_screen_date_falls_back_to_today(monkeypatch):
 # 個股頁:三大法人籌碼明細表
 # ============================================================================
 
+def _read_inst_df(at):
+    """從 AppTest 拉出 institutional dataframe 的底層 pandas DataFrame。
+    streamlit 對 Styler 跟 raw DataFrame 都用 .value,Styler 物件需走 .data。
+    """
+    val = at.dataframe[0].value
+    return val.data if hasattr(val, "data") else val
+
+
 def test_institutional_table_renders_with_data(isolated_db):
     """灌 5 行 institutional → _render_institutional_table 渲染表格,不顯示
-    fallback 訊息。"""
+    fallback 訊息,且 5 欄(日期/外資/投信/自營商/合計)都齊。"""
     from src import database as db
 
     db.upsert_institutional([
@@ -482,6 +490,20 @@ def test_institutional_table_renders_with_data(isolated_db):
         "無三大法人籌碼資料" in str(i.value) for i in at.info
     ), "有資料時不該顯示 fallback info"
 
+    # 5 欄都在,順序也對
+    inst_df = _read_inst_df(at)
+    assert list(inst_df.columns) == ["日期", "外資", "投信", "自營商", "合計"], (
+        f"欄位順序 / 名稱不對: {list(inst_df.columns)}"
+    )
+
+    # 合計 = 三者和(每一列)
+    expected_total = inst_df["外資"] + inst_df["投信"] + inst_df["自營商"]
+    assert (inst_df["合計"] == expected_total).all(), (
+        f"合計欄應等於三者和\n外資={inst_df['外資'].tolist()}\n"
+        f"投信={inst_df['投信'].tolist()}\n自營商={inst_df['自營商'].tolist()}\n"
+        f"合計={inst_df['合計'].tolist()}\nexpected={expected_total.tolist()}"
+    )
+
 
 def test_institutional_table_fallback_when_no_data(isolated_db):
     """無資料時顯示 fallback info,不渲染 expander/table。"""
@@ -498,4 +520,62 @@ def test_institutional_table_fallback_when_no_data(isolated_db):
     ), f"預期顯示 fallback info, 實際 info={[str(i.value) for i in at.info]}"
     assert not at.expander, (
         f"無資料時不該有 expander, 但見到: {[e.label for e in at.expander]}"
+    )
+
+
+def test_institutional_table_total_when_sqlite_total_is_zero(isolated_db):
+    """SQLite total_buy_sell=0 但三欄非 0 時(資料不一致 / 舊資料),合計欄
+    應顯示三者和,不是 SQLite 的 0。"""
+    from src import database as db
+
+    # 三欄共 +1500 張(1,500,000 股),但故意把 total_buy_sell 塞 0
+    db.upsert_institutional([{
+        "stock_id": "2330", "date": "2026-04-30",
+        "foreign_buy_sell": 1_000_000,
+        "trust_buy_sell": 300_000,
+        "dealer_buy_sell": 200_000,
+        "total_buy_sell": 0,  # 故意不一致
+    }])
+
+    def _harness():
+        import app
+        app._render_institutional_table("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    inst_df = _read_inst_df(at)
+    assert inst_df["合計"].iloc[0] == 1500, (
+        f"合計應 = 1000+300+200 = 1500, 實際 = {inst_df['合計'].iloc[0]}"
+    )
+
+
+def test_institutional_table_total_when_sqlite_total_is_null(isolated_db):
+    """SQLite total_buy_sell=NULL 時不該炸,合計仍應顯示三者和。"""
+    from src import database as db
+
+    # upsert_institutional 會把 None 轉 0,要塞真 NULL 必須走 raw SQL
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO institutional "
+            "(stock_id, date, foreign_buy_sell, trust_buy_sell, "
+            "dealer_buy_sell, total_buy_sell) "
+            "VALUES (?, ?, ?, ?, ?, NULL)",
+            ("2330", "2026-04-30", 800_000, 100_000, 100_000),
+        )
+        conn.commit()
+
+    def _harness():
+        import app
+        app._render_institutional_table("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    inst_df = _read_inst_df(at)
+    assert inst_df["合計"].iloc[0] == 1000, (
+        f"合計應 = 800+100+100 = 1000(忽略 NULL 的 total_buy_sell), "
+        f"實際 = {inst_df['合計'].iloc[0]}"
     )
