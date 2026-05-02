@@ -579,3 +579,140 @@ def test_institutional_table_total_when_sqlite_total_is_null(isolated_db):
         f"合計應 = 800+100+100 = 1000(忽略 NULL 的 total_buy_sell), "
         f"實際 = {inst_df['合計'].iloc[0]}"
     )
+
+
+# ============================================================================
+# 個股頁:主力進出 5/10 日累計表
+# ============================================================================
+
+def _seed_inst_cumulative(n_days: int = 20, base_close: float = 100.0) -> None:
+    """灌 n_days 筆 daily_prices + institutional(stock=2330)。
+    每天 inst_total = (i+1) * 1000 股 = (i+1) 張(讓累計值好計算驗證)。
+    每天 close 漲 1 元。
+    """
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    prices = []
+    insts = []
+    # 從 day 1 (i=0) 到 day n_days(用 ISO 連續日,週末週日 SQLite 不在意)
+    base_day = 1
+    for i in range(n_days):
+        d = f"2026-04-{base_day + i:02d}"
+        prices.append({
+            "stock_id": "2330", "date": d,
+            "open": base_close + i, "high": base_close + i + 0.5,
+            "low": base_close + i - 0.5, "close": base_close + i,
+            "volume": 10000,
+        })
+        insts.append({
+            "stock_id": "2330", "date": d,
+            # i+1 張 = (i+1)*1000 股, 全進外資(其他 0),inst_total = i+1 張
+            "foreign_buy_sell": (i + 1) * 1000,
+            "trust_buy_sell": 0, "dealer_buy_sell": 0,
+            "total_buy_sell": (i + 1) * 1000,
+        })
+    db.upsert_daily_prices(prices)
+    db.upsert_institutional(insts)
+
+
+def _read_cum_df(at):
+    """個股頁第 2 個 dataframe = 累計表(第 1 個是三大法人表)。"""
+    val = at.dataframe[0].value
+    return val.data if hasattr(val, "data") else val
+
+
+def test_cumulative_table_renders_with_data(isolated_db):
+    """灌 20 天 → 累計表有 5 欄 + 10 列(倒序)+ rolling sum 數值正確。"""
+    _seed_inst_cumulative(n_days=20)
+
+    def _harness():
+        import app
+        app._render_institutional_cumulative_table("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert at.expander, "累計表應包在 expander"
+    assert any(
+        "主力進出累計" in (e.label or "") for e in at.expander
+    ), f"expander label 不對: {[e.label for e in at.expander]}"
+
+    cum_df = _read_cum_df(at)
+    assert list(cum_df.columns) == [
+        "日期", "5 日累計", "10 日累計", "收盤價", "漲跌幅",
+    ], f"欄序不對: {list(cum_df.columns)}"
+    assert len(cum_df) == 10, f"預期 10 列, 實際 {len(cum_df)}"
+
+    # 倒序:第 1 列 = day 20 (2026-04-20), 最後一列 = day 11 (2026-04-11)
+    assert cum_df["日期"].iloc[0] == "2026-04-20"
+    assert cum_df["日期"].iloc[-1] == "2026-04-11"
+
+    # day 20 的 5 日累計 = (16+17+18+19+20) = 90 張
+    # day 20 的 10 日累計 = sum(11..20) = 155 張
+    assert cum_df["5 日累計"].iloc[0] == 90, (
+        f"day 20 的 5 日累計應 = 16+17+18+19+20 = 90, "
+        f"實際 = {cum_df['5 日累計'].iloc[0]}"
+    )
+    assert cum_df["10 日累計"].iloc[0] == 155, (
+        f"day 20 的 10 日累計應 = sum(11..20) = 155, "
+        f"實際 = {cum_df['10 日累計'].iloc[0]}"
+    )
+
+    # 收盤價 day 20 = 100 + 19 = 119(base 100, day 1 i=0 → close=100)
+    assert abs(float(cum_df["收盤價"].iloc[0]) - 119.0) < 1e-6
+
+    # 漲跌幅 day 20 = (119 - 118) / 118 * 100 ≈ 0.847%
+    pct_day20 = float(cum_df["漲跌幅"].iloc[0])
+    assert abs(pct_day20 - (1.0 / 118.0 * 100)) < 1e-6, (
+        f"漲跌幅 day 20 應 ≈ 0.847%, 實際 = {pct_day20}"
+    )
+
+
+def test_cumulative_table_fallback_when_no_prices(isolated_db):
+    """無 daily_prices 時顯示 fallback,不渲染 expander。"""
+    def _harness():
+        import app
+        app._render_institutional_cumulative_table("9999")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert any(
+        "無主力進出累計資料" in str(i.value) for i in at.info
+    ), f"預期 fallback info, 實際: {[str(i.value) for i in at.info]}"
+    assert not at.expander
+
+
+def test_cumulative_table_handles_missing_institutional(isolated_db):
+    """daily_prices 有但 institutional 完全沒(LEFT JOIN 留下 NULL)
+    → 仍可渲染,inst_total 全 0、累計欄全 0。
+    """
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    db.upsert_daily_prices([
+        {
+            "stock_id": "2330", "date": f"2026-04-{1 + i:02d}",
+            "open": 100.0 + i, "high": 100.5 + i, "low": 99.5 + i,
+            "close": 100.0 + i, "volume": 10000,
+        }
+        for i in range(20)
+    ])
+    # 故意不灌 institutional
+
+    def _harness():
+        import app
+        app._render_institutional_cumulative_table("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    cum_df = _read_cum_df(at)
+    assert (cum_df["5 日累計"] == 0).all(), (
+        f"無 institutional 時 5 日累計應全 0, 實際: {cum_df['5 日累計'].tolist()}"
+    )
+    assert (cum_df["10 日累計"] == 0).all()

@@ -1103,6 +1103,7 @@ def _page_stock_query() -> None:
 
     _render_summary(df, kd_df, rsi14, macd_df)
     _render_institutional_table(sid)
+    _render_institutional_cumulative_table(sid)
 
 
 def _render_summary(
@@ -1224,6 +1225,89 @@ def _render_institutional_table(sid: str, days: int = 10) -> None:
 
     with st.expander(
         f"📊 三大法人買賣超(近 {len(rows)} 日,單位:張)",
+        expanded=True,
+    ):
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
+    """個股頁:近 N 日主力進出 5/10 日累計表(+ 收盤價 + 漲跌幅)。
+
+    每日累計 = 三大法人 (外資+投信+自營商) 該日及之前 4 / 9 個交易日的合計總和。
+    為了讓最近 N 日的 rolling(10) 都有滿值,SQL 多撈 20 日歷史再 tail(days)。
+    """
+    db.init_db()
+    fetch_days = days + 20
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT p.date AS date, p.close AS close,
+                       i.foreign_buy_sell AS f, i.trust_buy_sell AS t,
+                       i.dealer_buy_sell AS d
+                FROM daily_prices p
+                LEFT JOIN institutional i
+                  ON p.stock_id = i.stock_id AND p.date = i.date
+                WHERE p.stock_id = ?
+                ORDER BY p.date DESC
+                LIMIT ?
+                """,
+                (sid, fetch_days),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    if not rows:
+        st.info(
+            "🔍 此股近期無主力進出累計資料。"
+            "(需要 daily_prices 在 SQLite 內)"
+        )
+        return
+
+    df = pd.DataFrame([
+        {
+            "date": r["date"],
+            "close": r["close"],
+            # 股 → 張(整除丟小數,跟三大法人表一致)
+            "inst_total": (
+                (r["f"] or 0) + (r["t"] or 0) + (r["d"] or 0)
+            ) // 1000,
+        }
+        for r in rows
+    ])
+    df = df.sort_values("date").reset_index(drop=True)
+    # min_periods=1 容忍邊界(歷史不足時顯示 partial sum,不顯示 NaN)
+    df["cum5"] = df["inst_total"].rolling(5, min_periods=1).sum().astype(int)
+    df["cum10"] = df["inst_total"].rolling(10, min_periods=1).sum().astype(int)
+    df["pct"] = df["close"].pct_change() * 100  # 第 1 筆 NaN
+
+    out = df.tail(days).iloc[::-1].reset_index(drop=True)
+    display = pd.DataFrame({
+        "日期": out["date"],
+        "5 日累計": out["cum5"],
+        "10 日累計": out["cum10"],
+        "收盤價": out["close"],
+        "漲跌幅": out["pct"],
+    })
+
+    def _color_pos_neg(v: float) -> str:
+        if pd.isna(v) or v == 0:
+            return ""
+        return "color: #d62728" if v > 0 else "color: #2ca02c"
+
+    styled = (
+        display.style
+        .map(_color_pos_neg, subset=["5 日累計", "10 日累計", "漲跌幅"])
+        .format("{:+,}", subset=["5 日累計", "10 日累計"])
+        .format("{:.2f}", subset=["收盤價"])
+        .format(
+            lambda v: "—" if pd.isna(v) else f"{v:+.2f}%",
+            subset=["漲跌幅"],
+        )
+    )
+
+    with st.expander(
+        f"📈 主力進出累計(近 {len(display)} 日,單位:張)",
         expanded=True,
     ):
         st.dataframe(styled, use_container_width=True, hide_index=True)
