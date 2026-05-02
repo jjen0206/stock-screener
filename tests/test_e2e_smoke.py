@@ -880,3 +880,72 @@ def test_technical_summary_fallback_when_history_insufficient(isolated_db):
     assert "歷史不足" in info_text
     md_text = "\n".join(m.value for m in at.markdown)
     assert "趨勢分析" not in md_text, "歷史不足時不該渲染總覽 markdown"
+
+
+# ============================================================================
+# 個股頁:操作建議區(短/中/長線進場目標停損 + 操作核心)
+# ============================================================================
+
+def test_action_suggestion_renders_uptrend(isolated_db):
+    """灌 70 天線性漲 → 操作建議完整渲染:短/中/長線各區間 + 多頭操作核心。"""
+    _seed_trend_prices(direction="up", n_days=70)
+
+    def _harness():
+        import app
+        app._render_action_suggestion("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "操作建議" in md_text
+    assert "短線" in md_text
+    assert "中線" in md_text
+    assert "長線" in md_text
+    assert "進場區間" in md_text
+    assert "目標" in md_text
+    assert "停損" in md_text
+    assert "風險報酬" in md_text
+
+    # 操作核心走 st.warning,不在 markdown text
+    warn_text = "\n".join(str(w.value) for w in at.warning)
+    assert "操作核心" in warn_text
+    assert "多頭趨勢" in warn_text, f"線性漲應判多頭, 實際: {warn_text!r}"
+
+    # 不該顯示 fallback
+    assert not any("歷史不足" in str(i.value) for i in at.info)
+
+
+def test_action_suggestion_renders_downtrend(isolated_db):
+    """灌 70 天線性跌 → 操作核心應含空頭描述。"""
+    _seed_trend_prices(direction="down", n_days=70)
+
+    def _harness():
+        import app
+        app._render_action_suggestion("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    warn_text = "\n".join(str(w.value) for w in at.warning)
+    assert "空頭趨勢" in warn_text, f"線性跌應判空頭, 實際: {warn_text!r}"
+
+
+def test_action_suggestion_fallback_when_history_insufficient(isolated_db):
+    """歷史不足(30 天 < 60 天 MA60 門檻)→ fallback「歷史不足」+ 不渲染建議。"""
+    _seed_trend_prices(direction="up", n_days=30)
+
+    def _harness():
+        import app
+        app._render_action_suggestion("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "短線" not in md_text, "歷史不足時不該渲染短線建議"

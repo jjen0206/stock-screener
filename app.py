@@ -1106,6 +1106,7 @@ def _page_stock_query() -> None:
     _render_institutional_cumulative_table(sid)
     _render_technical_summary(sid)
     _render_key_levels(sid)
+    _render_action_suggestion(sid)
 
 
 def _render_summary(
@@ -1575,6 +1576,104 @@ def _render_key_levels(sid: str) -> None:
             )
     st.caption(
         "計算:布林通道 (20, 2) + ATR(14) × 0.5 半幅。**參考用,非預測**"
+    )
+
+
+# 操作核心模板:綜合評估 → 文字建議。覆蓋 7 個 _compute_technical_summary
+# 可能回的 summary 值,以及兜底「盤整待方向」。
+_ACTION_CORE_BY_SUMMARY = {
+    "高檔強勢": "順勢續抱,跌破 MA20 或量縮警戒,不追高",
+    "高檔區震盪出貨初期": "短中線觀望或減碼,等回檔區再進",
+    "回檔測試": "等支撐企穩(量縮止跌)再小量試多",
+    "多頭整理": "區間操作,支撐進、壓力出;突破需量增確認",
+    "弱勢探底": "停損紀律執行,不接刀,等量增企穩",
+    "低檔築底機會": "等量增反彈確認再小量試多,設嚴停損",
+    "空頭整理": "空方主導,反彈視為逢高出貨,不追多",
+    "盤整待方向": "區間內操作,等突破方向再加碼",
+}
+
+
+def _render_action_suggestion(sid: str) -> None:
+    """個股頁:短 / 中 / 長線進場 / 目標 / 停損建議 + 操作核心。
+
+    用 _compute_key_levels 拿 BB / ATR 區間,_compute_technical_summary
+    拿綜合評估字串。兩者都 OK 才渲染,任一 error → fallback。
+
+    線型定義:
+      - 短線:支撐區進,壓力下緣出,停損 = 支撐 - 1.5 ATR(2 ATR 風險)
+      - 中線:回檔區進,壓力上緣出,停損 = 支撐上緣
+      - 長線:支撐區進,目標「順勢看多」(不給數字),停損「跌破支撐」
+    """
+    levels = _compute_key_levels(sid)
+    summary = _compute_technical_summary(sid)
+
+    if "error" in levels or "error" in summary:
+        # 兩者任一壞就走 fallback(通常 levels 比較容易過 — 只需 20 天)
+        msg = levels.get("error") or summary.get("error")
+        st.info(f"💡 操作建議:{msg}")
+        return
+
+    atr = levels["atr14"]
+    bb_upper = levels["bb_upper"]
+    bb_mid = levels["bb_mid"]
+    bb_lower = levels["bb_lower"]
+    half_atr = 0.5 * atr
+
+    # 短線(支撐區買、壓力下緣賣)
+    short_entry_low = bb_lower - half_atr
+    short_entry_high = bb_lower + half_atr
+    short_target = bb_upper - half_atr  # 壓力區下緣
+    short_stop = bb_lower - 1.5 * atr  # 支撐 - 1.5 ATR(從支撐區下緣再 1 ATR)
+    short_entry_mid = bb_lower
+    short_r = short_entry_mid - short_stop  # 風險
+    short_t = short_target - short_entry_mid  # 報酬
+    short_rr = short_t / short_r if short_r > 0 else 0.0
+
+    # 中線(回檔區買、壓力上緣賣)
+    mid_entry_low = bb_mid - half_atr
+    mid_entry_high = bb_mid + half_atr
+    mid_target = bb_upper + half_atr  # 壓力區上緣
+    mid_stop = bb_lower + half_atr  # 支撐區上緣
+    mid_entry_mid = bb_mid
+    mid_r = mid_entry_mid - mid_stop
+    mid_t = mid_target - mid_entry_mid
+    mid_rr = mid_t / mid_r if mid_r > 0 else 0.0
+
+    # 長線(支撐區買、目標看順勢、停損跌破支撐)
+    long_entry_low = bb_lower - half_atr
+    long_entry_high = bb_lower + half_atr
+    long_stop_text = f"跌破 {bb_lower - half_atr:.2f}(支撐區下緣)"
+
+    # 操作核心:從綜合評估查表
+    summary_str = summary["summary"]
+    trend_str = summary["trend"]
+    action_core = _ACTION_CORE_BY_SUMMARY.get(
+        summary_str, "區間內操作,等趨勢明朗再加碼",
+    )
+
+    st.markdown("### 💡 操作建議")
+    st.markdown(
+        f"**短線**\n"
+        f"- 進場區間:`{short_entry_low:.2f}` ~ `{short_entry_high:.2f}`(支撐區)\n"
+        f"- 目標:`{short_target:.2f}`(壓力區下緣)\n"
+        f"- 停損:`{short_stop:.2f}`(支撐 − 1.5 ATR)\n"
+        f"- 風險報酬:**{short_rr:.1f} : 1**\n\n"
+        f"**中線**\n"
+        f"- 進場區間:`{mid_entry_low:.2f}` ~ `{mid_entry_high:.2f}`(回檔區)\n"
+        f"- 目標:`{mid_target:.2f}`(壓力區上緣)\n"
+        f"- 停損:`{mid_stop:.2f}`(支撐區上緣)\n"
+        f"- 風險報酬:**{mid_rr:.1f} : 1**\n\n"
+        f"**長線**\n"
+        f"- 進場區間:`{long_entry_low:.2f}` ~ `{long_entry_high:.2f}`(支撐區)\n"
+        f"- 目標:更高(順勢看多,突破壓力後加碼)\n"
+        f"- 停損:{long_stop_text}\n"
+    )
+    st.warning(
+        f"⚠️ **操作核心**:{trend_str} + {summary_str} → {action_core}"
+    )
+    st.caption(
+        "計算:支撐 / 壓力 / 回檔 = 布林通道 ± 0.5 ATR;"
+        "停損用 ATR 倍數。**參考用,非投資建議**,個人交易仍應自行評估。"
     )
 
 
