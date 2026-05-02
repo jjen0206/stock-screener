@@ -1105,6 +1105,7 @@ def _page_stock_query() -> None:
     _render_institutional_table(sid)
     _render_institutional_cumulative_table(sid)
     _render_multi_timeframe(sid)
+    _render_pattern_analysis(sid)
     _render_technical_summary(sid)
     _render_key_levels(sid)
     _render_action_suggestion(sid)
@@ -1804,6 +1805,252 @@ def _render_multi_timeframe(sid: str) -> None:
     st.caption(
         "日 K MA(5/20/60)看中期趨勢;週 K MA(5/10/20)看長期主升 / 主跌段。"
         "兩者一致 → 趨勢可信度高;分歧 → 留意轉折。"
+    )
+
+
+def _find_pivots(
+    values, atr: float, window: int = 3, min_prominence_atr: float = 1.0,
+) -> tuple[list[int], list[int]]:
+    """純 numpy / list 找 local max / min,prominence 用 ATR 倍數過濾雜訊。
+
+    對每個 idx i 看 [i-window, i+window],i 是 max → 候選 high pivot。
+    再算 prominence(local extreme 跟 window 內反方向極值的差)≥ ATR ×
+    min_prominence_atr 才收。
+
+    比 scipy.signal.find_peaks 簡化但夠用。
+    """
+    n = len(values)
+    high_idx: list[int] = []
+    low_idx: list[int] = []
+    threshold = atr * min_prominence_atr
+    for i in range(window, n - window):
+        win = values[i - window: i + window + 1]
+        v = values[i]
+        if v == max(win) and (v - min(win)) >= threshold:
+            high_idx.append(i)
+        if v == min(win) and (max(win) - v) >= threshold:
+            low_idx.append(i)
+    return high_idx, low_idx
+
+
+def _compute_w_bottom_pattern(
+    close: list[float], dates: list[str], atr: float,
+) -> dict:
+    """W 底偵測。回 dict 含 status / score / 各點位 / 解釋字串。
+
+    結構:左低 → 中高 → 右低,目前已開始反彈 / 突破頸線(中高)。
+    限縮在最近 60 天 lookback 內找 pivots。
+    """
+    n = len(close)
+    lookback = min(60, n)
+    close_recent = close[-lookback:]
+    dates_recent = dates[-lookback:]
+
+    high_idx, low_idx = _find_pivots(close_recent, atr=atr, window=3)
+    if len(low_idx) < 2:
+        return {
+            "status": "未發現明顯型態",
+            "score": 0,
+            "explanation": "近 60 日內未抓到 2 個低點 pivot",
+        }
+
+    # 取最近 2 個 low,且要中間有 high pivot
+    right_low_i = low_idx[-1]
+    left_low_i = low_idx[-2]
+    mid_highs = [i for i in high_idx if left_low_i < i < right_low_i]
+    if not mid_highs:
+        return {
+            "status": "未發現明顯型態",
+            "score": 0,
+            "explanation": "兩個低點之間缺反彈高點(無 W 結構)",
+        }
+    mid_high_i = max(mid_highs, key=lambda i: close_recent[i])
+
+    left_low = close_recent[left_low_i]
+    right_low = close_recent[right_low_i]
+    mid_high = close_recent[mid_high_i]
+    current_close = close_recent[-1]
+
+    base_low = max(left_low, right_low)
+    low_diff_pct = abs(left_low - right_low) / base_low * 100
+    bounce_pct = (mid_high - base_low) / base_low * 100
+    breakout = current_close > mid_high
+
+    # 評分(滿 100):兩低相似 40 + 中間反彈 30 + 突破頸線 30
+    score_diff = max(0.0, 40.0 * (1 - low_diff_pct / 3.0))
+    if bounce_pct >= 8:
+        score_bounce = 30
+    elif bounce_pct >= 5:
+        score_bounce = 15
+    else:
+        score_bounce = 0
+    score_breakout = 30 if breakout else 0
+    score = round(score_diff + score_bounce + score_breakout)
+
+    if score >= 70 and breakout:
+        status = "已形成"
+    elif score >= 50:
+        status = "形成中"
+    else:
+        status = "未形成"
+
+    explanation = (
+        f"兩低點相差 {low_diff_pct:.1f}%,中間反彈 {bounce_pct:.1f}%,"
+        + ("已突破頸線" if breakout else "未突破頸線")
+    )
+
+    return {
+        "status": status,
+        "score": score,
+        "left_date": str(dates_recent[left_low_i]),
+        "left_price": float(left_low),
+        "mid_date": str(dates_recent[mid_high_i]),
+        "mid_price": float(mid_high),
+        "right_date": str(dates_recent[right_low_i]),
+        "right_price": float(right_low),
+        "neckline": float(mid_high),
+        "explanation": explanation,
+    }
+
+
+def _compute_m_top_pattern(
+    close: list[float], dates: list[str], atr: float,
+) -> dict:
+    """M 頭偵測(W 底鏡像):左高 → 中低 → 右高,目前下跌 / 跌破頸線(中低)。"""
+    n = len(close)
+    lookback = min(60, n)
+    close_recent = close[-lookback:]
+    dates_recent = dates[-lookback:]
+
+    high_idx, low_idx = _find_pivots(close_recent, atr=atr, window=3)
+    if len(high_idx) < 2:
+        return {
+            "status": "未發現明顯型態",
+            "score": 0,
+            "explanation": "近 60 日內未抓到 2 個高點 pivot",
+        }
+
+    right_high_i = high_idx[-1]
+    left_high_i = high_idx[-2]
+    mid_lows = [i for i in low_idx if left_high_i < i < right_high_i]
+    if not mid_lows:
+        return {
+            "status": "未發現明顯型態",
+            "score": 0,
+            "explanation": "兩個高點之間缺回檔低點(無 M 結構)",
+        }
+    mid_low_i = min(mid_lows, key=lambda i: close_recent[i])
+
+    left_high = close_recent[left_high_i]
+    right_high = close_recent[right_high_i]
+    mid_low = close_recent[mid_low_i]
+    current_close = close_recent[-1]
+
+    base_high = min(left_high, right_high)
+    high_diff_pct = abs(left_high - right_high) / base_high * 100
+    pullback_pct = (base_high - mid_low) / base_high * 100
+    breakdown = current_close < mid_low
+
+    score_diff = max(0.0, 40.0 * (1 - high_diff_pct / 3.0))
+    if pullback_pct >= 8:
+        score_pullback = 30
+    elif pullback_pct >= 5:
+        score_pullback = 15
+    else:
+        score_pullback = 0
+    score_breakdown = 30 if breakdown else 0
+    score = round(score_diff + score_pullback + score_breakdown)
+
+    if score >= 70 and breakdown:
+        status = "已形成"
+    elif score >= 50:
+        status = "形成中"
+    else:
+        status = "未形成"
+
+    explanation = (
+        f"兩高點相差 {high_diff_pct:.1f}%,中間回檔 {pullback_pct:.1f}%,"
+        + ("已跌破頸線" if breakdown else "未跌破頸線")
+    )
+
+    return {
+        "status": status,
+        "score": score,
+        "left_date": str(dates_recent[left_high_i]),
+        "left_price": float(left_high),
+        "mid_date": str(dates_recent[mid_low_i]),
+        "mid_price": float(mid_low),
+        "right_date": str(dates_recent[right_high_i]),
+        "right_price": float(right_high),
+        "neckline": float(mid_low),
+        "explanation": explanation,
+    }
+
+
+def _compute_pattern_analysis(sid: str) -> dict:
+    """W 底 + M 頭雙型態偵測。需要 ≥60 天 daily_prices + ATR(14) 算得出來。"""
+    df = _load_recent_ohlc(sid, limit=120)
+    if len(df) < 60:
+        return {"error": f"歷史不足,需 ≥60 天偵測型態(目前 {len(df)} 天)"}
+
+    atr_series = ind.atr(df, period=14)
+    atr14 = atr_series.iloc[-1] if not atr_series.empty else None
+    if atr14 is None or pd.isna(atr14):
+        return {"error": "ATR 算不出(資料異常)"}
+
+    close = df["close"].tolist()
+    dates = df["date"].tolist()
+    return {
+        "w_bottom": _compute_w_bottom_pattern(close, dates, atr14),
+        "m_top": _compute_m_top_pattern(close, dates, atr14),
+    }
+
+
+def _render_pattern_analysis(sid: str) -> None:
+    """個股頁:W 底 / M 頭 雙型態偵測並排顯示。"""
+    result = _compute_pattern_analysis(sid)
+    if "error" in result:
+        st.info(f"🎭 型態分析:{result['error']}")
+        return
+
+    w = result["w_bottom"]
+    m = result["m_top"]
+
+    def _block(name: str, pat: dict, role_labels: tuple[str, str, str]) -> str:
+        """把單一型態 dict 轉成 markdown 區塊。"""
+        if pat.get("score", 0) == 0 and pat.get("status", "").startswith("未發現"):
+            # 沒抓到結構 → 簡短顯示
+            return (
+                f"**{name}**\n\n"
+                f"- 狀態:{pat['status']}\n"
+                f"- 評分:0/100\n"
+                f"- 原理:{pat.get('explanation', '—')}"
+            )
+        left_label, mid_label, right_label = role_labels
+        return (
+            f"**{name}**\n\n"
+            f"- 狀態:**{pat['status']}**\n"
+            f"- {left_label}:{pat['left_date']} 收盤 {pat['left_price']:.2f}\n"
+            f"- {mid_label}:{pat['mid_date']} 收盤 {pat['mid_price']:.2f}\n"
+            f"- {right_label}:{pat['right_date']} 收盤 {pat['right_price']:.2f}\n"
+            f"- 頸線:{pat['neckline']:.2f}\n"
+            f"- 評分:**{pat['score']}/100**\n"
+            f"- 原理:{pat['explanation']}"
+        )
+
+    st.markdown("### 🎭 型態分析")
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown(_block(
+            "🟢 W 底分析", w, ("左低", "中高", "右低"),
+        ))
+    with cols[1]:
+        st.markdown(_block(
+            "🔴 M 頭分析", m, ("左高", "中低", "右高"),
+        ))
+    st.caption(
+        "Pivot 用 ATR ≥1× 倍 prominence 過濾雜訊。"
+        "W 底:兩低點相似 + 中間反彈 + 突破頸線;M 頭鏡像。**參考用,非預測**"
     )
 
 

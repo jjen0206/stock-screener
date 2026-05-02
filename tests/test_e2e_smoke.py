@@ -1014,3 +1014,147 @@ def test_multi_timeframe_fallback_when_history_insufficient(isolated_db):
     assert "歷史不足" in info_text
     md_text = "\n".join(m.value for m in at.markdown)
     assert "日 K" not in md_text, "歷史不足時不該渲染雙週期區塊"
+
+
+# ============================================================================
+# 個股頁:型態分析(W 底 / M 頭)
+# ============================================================================
+
+def _seed_pattern_prices(closes: list[float]) -> None:
+    """灌 OHLC by close 序列,OHLC 自動由 close ± 0.5 推算。"""
+    from datetime import date as _date, timedelta as _td
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    rows = []
+    start = _date(2026, 1, 1)
+    for i, c in enumerate(closes):
+        d = start + _td(days=i)
+        rows.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "open": c - 0.3, "high": c + 0.5, "low": c - 0.5, "close": c,
+            "volume": 10000,
+        })
+    db.upsert_daily_prices(rows)
+
+
+def _make_w_bottom_closes() -> list[float]:
+    """造一個明顯 W 底序列(70 天):
+    平盤(100)→ 大跌到 79(left low)→ 反彈到 96.5(mid high)→ 再跌到 78.5
+    (right low,接近 left)→ 突破 96.5 上漲到 109.5。
+    """
+    closes = []
+    for i in range(20):
+        closes.append(100.0 + (i % 3) * 0.5 - 0.5)
+    for i in range(6):  # 100 → 79
+        closes.append(100.0 - (i + 1) * 3.5)
+    for i in range(7):  # 79 → 96.5(中高)
+        closes.append(79.0 + (i + 1) * 2.5)
+    for i in range(6):  # 96.5 → 78.5(右低)
+        closes.append(96.5 - (i + 1) * 3.0)
+    for i in range(31):  # 78.5 → 109.5(突破中高 96.5)
+        closes.append(78.5 + (i + 1) * 1.0)
+    return closes
+
+
+def _make_m_top_closes() -> list[float]:
+    """M 頭鏡像:平盤(100)→ 漲到 121(left high)→ 回檔 103.5(mid low)→
+    再漲到 121.5(right high)→ 跌破 103.5 到 90.5。
+    """
+    closes = []
+    for i in range(20):
+        closes.append(100.0 + (i % 3) * 0.5 - 0.5)
+    for i in range(6):
+        closes.append(100.0 + (i + 1) * 3.5)
+    for i in range(7):
+        closes.append(121.0 - (i + 1) * 2.5)
+    for i in range(6):
+        closes.append(103.5 + (i + 1) * 3.0)
+    for i in range(31):
+        closes.append(121.5 - (i + 1) * 1.0)
+    return closes
+
+
+def test_pattern_w_bottom_detected(isolated_db):
+    """灌明顯 W 底序列 → W 底狀態應為已形成 / 形成中,評分 ≥ 50。"""
+    _seed_pattern_prices(_make_w_bottom_closes())
+
+    def _harness():
+        import app
+        app._render_pattern_analysis("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "型態分析" in md_text
+    assert "W 底分析" in md_text
+    # 明顯 W 底:兩低相似 + 大反彈 + 突破 → 預期已形成
+    assert "已形成" in md_text or "形成中" in md_text, (
+        f"明顯 W 底應判已形成 / 形成中, 實際:\n{md_text}"
+    )
+    # 應包含 W 底特徵欄位
+    assert "左低" in md_text
+    assert "中高" in md_text
+    assert "右低" in md_text
+
+
+def test_pattern_m_top_detected(isolated_db):
+    """灌明顯 M 頭序列 → M 頭狀態應為已形成 / 形成中。"""
+    _seed_pattern_prices(_make_m_top_closes())
+
+    def _harness():
+        import app
+        app._render_pattern_analysis("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "M 頭分析" in md_text
+    # M 頭區塊裡應該見到「已形成」或「形成中」(W 底區塊應該未抓到)
+    # 簡單驗:整段 markdown 含「左高」「中低」「右高」欄位 → M 頭區塊有 detail
+    assert "左高" in md_text, f"M 頭未渲染欄位, markdown=\n{md_text}"
+    assert "中低" in md_text
+    assert "右高" in md_text
+
+
+def test_pattern_no_pattern_in_flat_data(isolated_db):
+    """灌 70 天平盤(close 在 100 ± 1 微震盪)→ 兩種型態都未發現 / 未形成。"""
+    closes = [100.0 + (i % 5) * 0.3 - 0.6 for i in range(70)]
+    _seed_pattern_prices(closes)
+
+    def _harness():
+        import app
+        app._render_pattern_analysis("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 平盤資料 → 不該判已形成(評分組件全低或 pivot 抓不到)
+    assert "已形成" not in md_text, (
+        f"平盤資料不該判已形成, markdown=\n{md_text}"
+    )
+
+
+def test_pattern_fallback_when_history_insufficient(isolated_db):
+    """< 60 天 → fallback「歷史不足」,不渲染型態區塊。"""
+    closes = [100.0 + i * 0.5 for i in range(40)]
+    _seed_pattern_prices(closes)
+
+    def _harness():
+        import app
+        app._render_pattern_analysis("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "W 底分析" not in md_text
