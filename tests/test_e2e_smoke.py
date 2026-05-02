@@ -949,3 +949,68 @@ def test_action_suggestion_fallback_when_history_insufficient(isolated_db):
     assert "歷史不足" in info_text
     md_text = "\n".join(m.value for m in at.markdown)
     assert "短線" not in md_text, "歷史不足時不該渲染短線建議"
+
+
+# ============================================================================
+# 個股頁:多週期趨勢分析(日 K + 週 K 並排)
+# ============================================================================
+
+def test_multi_timeframe_renders_uptrend(isolated_db):
+    """灌 200 天線性漲 → 日 K 跟週 K 都判多頭趨勢 + 多頭排列。"""
+    _seed_trend_prices(direction="up", n_days=200)
+
+    def _harness():
+        import app
+        app._render_multi_timeframe("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "多週期趨勢分析" in md_text
+    assert "日 K" in md_text
+    assert "週 K" in md_text
+    # 線性漲 → 兩個週期都應判多頭
+    assert md_text.count("多頭趨勢") >= 2, (
+        f"線性漲應日 K + 週 K 都判多頭, 實際 markdown=\n{md_text}"
+    )
+    assert md_text.count("多頭排列") >= 2
+
+    assert not any("歷史不足" in str(i.value) for i in at.info)
+
+
+def test_multi_timeframe_renders_downtrend(isolated_db):
+    """灌 200 天線性跌 → 日 K 跟週 K 都判空頭。"""
+    _seed_trend_prices(direction="down", n_days=200)
+
+    def _harness():
+        import app
+        app._render_multi_timeframe("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert md_text.count("空頭趨勢") >= 2, (
+        f"線性跌應兩週期都判空頭, 實際 markdown=\n{md_text}"
+    )
+
+
+def test_multi_timeframe_fallback_when_history_insufficient(isolated_db):
+    """灌 50 天(< 100 天門檻)→ fallback,不渲染雙週期區塊。"""
+    _seed_trend_prices(direction="up", n_days=50)
+
+    def _harness():
+        import app
+        app._render_multi_timeframe("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "日 K" not in md_text, "歷史不足時不該渲染雙週期區塊"

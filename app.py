@@ -1104,6 +1104,7 @@ def _page_stock_query() -> None:
     _render_summary(df, kd_df, rsi14, macd_df)
     _render_institutional_table(sid)
     _render_institutional_cumulative_table(sid)
+    _render_multi_timeframe(sid)
     _render_technical_summary(sid)
     _render_key_levels(sid)
     _render_action_suggestion(sid)
@@ -1674,6 +1675,135 @@ def _render_action_suggestion(sid: str) -> None:
     st.caption(
         "計算:支撐 / 壓力 / 回檔 = 布林通道 ± 0.5 ATR;"
         "停損用 ATR 倍數。**參考用,非投資建議**,個人交易仍應自行評估。"
+    )
+
+
+def _classify_timeframe(
+    df: pd.DataFrame,
+    ma_periods: tuple[int, int, int],
+    label: str,
+) -> dict:
+    """給定 OHLCV DataFrame(已升序)+ MA 期數三元組(短中長)
+    → 算 trend / structure / change 三項解讀。
+
+    回 dict {'trend','structure','change'} 或 {'error': str}。
+    """
+    short, mid, long = ma_periods
+    if len(df) < long:
+        return {"error": f"{label}歷史不足,需 ≥{long} 期(目前 {len(df)} 期)"}
+
+    ma_short = ind.sma(df, short).iloc[-1]
+    ma_mid = ind.sma(df, mid).iloc[-1]
+    ma_long = ind.sma(df, long).iloc[-1]
+    bb = ind.bollinger(df, period=mid, num_std=2.0)
+    close_last = df["close"].iloc[-1]
+    bb_upper = bb["upper"].iloc[-1]
+    bb_mid = bb["mid"].iloc[-1]
+    sigma = (bb_upper - bb_mid) / 2.0
+
+    if any(pd.isna(v) for v in [
+        ma_short, ma_mid, ma_long, bb_upper, bb_mid, sigma, close_last,
+    ]):
+        return {"error": f"{label}指標 NaN"}
+
+    # 1. trend(close vs MA_mid vs MA_long)
+    if close_last > ma_mid > ma_long:
+        trend = "多頭趨勢"
+    elif close_last < ma_mid < ma_long:
+        trend = "空頭趨勢"
+    else:
+        trend = "盤整"
+
+    # 2. structure(MA 排列)
+    if ma_short > ma_mid > ma_long:
+        structure = f"多頭排列({short}>{mid}>{long})"
+    elif ma_short < ma_mid < ma_long:
+        structure = f"空頭排列({short}<{mid}<{long})"
+    else:
+        structure = "MA 糾結整理"
+
+    # 3. change(收盤位置 vs BB 中軌 / σ)
+    diff = close_last - bb_mid
+    half_sigma = 0.5 * sigma
+    if abs(diff) < 0.3 * sigma:
+        change = "中軌附近(整理)"
+    elif diff > half_sigma:
+        change = "貼近上軌(偏強)"
+    elif diff < -half_sigma:
+        change = "貼近下軌(偏弱)"
+    else:
+        change = "通道內波動"
+
+    return {"trend": trend, "structure": structure, "change": change}
+
+
+def _compute_multi_timeframe(sid: str) -> dict:
+    """算日 K + 週 K 雙週期趨勢解讀。
+
+    需要 ≥100 天 daily(週 K MA20 = 20 週 ≈ 100 trading days 起算點)。
+    日 K 用 (5, 20, 60) MA;週 K 用 (5, 10, 20) MA(各自配對該時間框架的長期感)。
+    """
+    df = _load_recent_ohlc(sid, limit=300)
+    if len(df) < 100:
+        return {"error": f"歷史不足,需 ≥100 天計算週 K(目前 {len(df)} 天)"}
+
+    daily = _classify_timeframe(df, ma_periods=(5, 20, 60), label="日 K")
+
+    # 聚合週 K(以週五收盤為週收盤,符合台股交易慣例)
+    df_w = df.copy()
+    df_w["date"] = pd.to_datetime(df_w["date"])
+    weekly = (
+        df_w.set_index("date")
+        .resample("W-FRI")
+        .agg({
+            "open": "first", "high": "max",
+            "low": "min", "close": "last", "volume": "sum",
+        })
+        .dropna()
+        .reset_index()
+    )
+    weekly["date"] = weekly["date"].dt.strftime("%Y-%m-%d")
+
+    weekly_result = _classify_timeframe(
+        weekly, ma_periods=(5, 10, 20), label="週 K",
+    )
+    return {"daily": daily, "weekly": weekly_result}
+
+
+def _render_multi_timeframe(sid: str) -> None:
+    """個股頁:日 K + 週 K 雙週期趨勢並排顯示(2 欄)。"""
+    result = _compute_multi_timeframe(sid)
+    if "error" in result:
+        st.info(f"🔄 多週期趨勢:{result['error']}")
+        return
+
+    daily = result["daily"]
+    weekly = result["weekly"]
+    # 任一週期算不出來 → fallback,不渲染半截
+    if "error" in daily or "error" in weekly:
+        msg = daily.get("error") or weekly.get("error")
+        st.info(f"🔄 多週期趨勢:{msg}")
+        return
+
+    st.markdown("### 🔄 多週期趨勢分析")
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown(
+            f"**📅 日 K(中線視角)**\n\n"
+            f"- 趨勢:{daily['trend']}\n"
+            f"- 結構:{daily['structure']}\n"
+            f"- 變化:{daily['change']}"
+        )
+    with cols[1]:
+        st.markdown(
+            f"**📊 週 K(長線視角)**\n\n"
+            f"- 趨勢:{weekly['trend']}\n"
+            f"- 結構:{weekly['structure']}\n"
+            f"- 變化:{weekly['change']}"
+        )
+    st.caption(
+        "日 K MA(5/20/60)看中期趨勢;週 K MA(5/10/20)看長期主升 / 主跌段。"
+        "兩者一致 → 趨勢可信度高;分歧 → 留意轉折。"
     )
 
 
