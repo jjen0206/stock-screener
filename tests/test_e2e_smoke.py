@@ -449,10 +449,11 @@ def test_get_default_screen_date_falls_back_to_today(monkeypatch):
 # ============================================================================
 
 def _read_inst_df(at):
-    """從 AppTest 拉出 institutional dataframe 的底層 pandas DataFrame。
-    streamlit 對 Styler 跟 raw DataFrame 都用 .value,Styler 物件需走 .data。
+    """從 AppTest 拉出 institutional table 的底層 pandas DataFrame。
+    現在用 st.table 渲染(避開 dataframe canvas 寬度 bug),所以走 at.table。
+    Styler 物件透過 .data 拿原 DataFrame。
     """
-    val = at.dataframe[0].value
+    val = at.table[0].value
     return val.data if hasattr(val, "data") else val
 
 
@@ -617,8 +618,10 @@ def _seed_inst_cumulative(n_days: int = 20, base_close: float = 100.0) -> None:
 
 
 def _read_cum_df(at):
-    """個股頁第 2 個 dataframe = 累計表(第 1 個是三大法人表)。"""
-    val = at.dataframe[0].value
+    """個股頁第 2 個 table = 累計表(第 1 個是三大法人表)。
+    helper 是被獨立呼叫的(harness 只跑一個 helper),所以 at.table[0] 就是它。
+    """
+    val = at.table[0].value
     return val.data if hasattr(val, "data") else val
 
 
@@ -718,4 +721,4 @@ def test_cumulative_table_fallback_when_institutional_all_null(isolated_db):
         f"institutional 全 NULL 時不該渲染累計表 expander, "
         f"但見到: {[e.label for e in at.expander]}"
     )
-    assert not at.dataframe, "institutional 全 NULL 時不該渲染任何 dataframe"
+    assert not at.table, "institutional 全 NULL 時不該渲染任何 table"

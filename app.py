@@ -1217,26 +1217,21 @@ def _render_institutional_table(sid: str, days: int = 10) -> None:
             return "color: #2ca02c"
         return ""
 
-    # Styler 只用 .map 染色,format 走 column_config(避開雲端 Styler.format
-    # 序列化把欄 drop 的 bug — 累計表的「漲跌幅」就是這樣消失)
-    styled = inst_df.style.map(_color_pos_neg, subset=num_cols)
+    # 改用 st.table 避開 st.dataframe 在 mobile 320px container 把第 5 欄
+    # hard-truncate 的問題。st.table 渲染靜態 HTML table 不受 canvas 寬度
+    # 限制 — 內容自動 wrap,最差情況觸發頁面 horizontal scroll,5 欄不會消失。
+    # st.table 不接 column_config,format 寫進 Styler 一次性 dict-style。
+    styled = (
+        inst_df.style
+        .map(_color_pos_neg, subset=num_cols)
+        .format("{:+,}", subset=num_cols)
+    )
 
     with st.expander(
         f"📊 三大法人買賣超(近 {len(rows)} 日,單位:張)",
         expanded=True,
     ):
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            width=600,  # 強制比 mobile 320px container 寬 → 觸發 horizontal scroll
-            hide_index=True,
-            column_config={
-                col: st.column_config.NumberColumn(
-                    format="%+,d", width="small",
-                )
-                for col in num_cols
-            },
-        )
+        st.table(styled)
 
 
 def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
@@ -1318,40 +1313,27 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
             return ""
         return "color: #d62728" if v > 0 else "color: #2ca02c"
 
-    # ⚠️ 不用 Styler.format。Styler.format chained 多次(尤其含 na_rep / lambda)
-    # 在 streamlit cloud 序列化某處會把整欄 drop — 雲端 DOM 確認漲跌幅消失就是
-    # 這個 bug。改用 column_config.NumberColumn 走 streamlit-native 路徑,
-    # Styler 只保留 .map 染色職責。
-    styled = display.style.map(
-        _color_pos_neg,
-        subset=["5 日累計", "10 日累計", "漲跌幅"],
+    # 改用 st.table 避開 st.dataframe 在 mobile 320px container 把第 5 欄
+    # (漲跌幅)hard-truncate 的問題。st.table 渲染靜態 HTML table 不受
+    # canvas 寬度限制,內容自動 wrap,5 欄不會消失。
+    # 注意 .format 一次性帶 dict,不 chain 多次 — 之前推測 chain format 在
+    # streamlit serialize 路徑某處 drop 整欄,單一 .format(dict) 比較穩。
+    styled = (
+        display.style
+        .map(_color_pos_neg, subset=["5 日累計", "10 日累計", "漲跌幅"])
+        .format({
+            "5 日累計": "{:+,}",
+            "10 日累計": "{:+,}",
+            "收盤價": "{:.2f}",
+            "漲跌幅": "{:+.2f}%",
+        })
     )
 
     with st.expander(
         f"📈 主力進出累計(近 {len(display)} 日,單位:張)",
         expanded=True,
     ):
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            width=600,  # 強制比 mobile 320px container 寬 → 觸發 horizontal scroll
-            hide_index=True,
-            column_config={
-                "5 日累計": st.column_config.NumberColumn(
-                    format="%+,d", width="small",
-                ),
-                "10 日累計": st.column_config.NumberColumn(
-                    format="%+,d", width="small",
-                ),
-                "收盤價": st.column_config.NumberColumn(
-                    format="%.2f", width="small",
-                ),
-                # printf %% = 字面 %,不會 *100(streamlit 用 printf-style)
-                "漲跌幅": st.column_config.NumberColumn(
-                    format="%+.2f%%", width="small",
-                ),
-            },
-        )
+        st.table(styled)
 
 
 def _fmt(v: float) -> str:
