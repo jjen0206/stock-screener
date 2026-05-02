@@ -585,6 +585,73 @@ def test_api_call_retries_on_transient_failure(tmp_db, monkeypatch):
     assert calls["n"] == 3
 
 
+def test_api_call_default_uses_short_backoff(tmp_db, monkeypatch):
+    """預設(沒設 FINMIND_LONG_BACKOFF)走 3 次 / 1s/2s/4s。"""
+    monkeypatch.delenv("FINMIND_LONG_BACKOFF", raising=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src._retry.time.sleep", lambda d: sleeps.append(d))
+
+    def fake_get(*args, **kwargs):
+        raise fetcher.requests.ConnectionError("always fail")
+
+    monkeypatch.setattr(fetcher.requests, "get", fake_get)
+    with pytest.raises(fetcher.FinMindAPIError):
+        fetcher._api_call("TestDataset")
+    # 預設 3 attempts,2 次 sleep:1, 2
+    assert sleeps == [1.0, 2.0]
+
+
+def test_api_call_long_backoff_env_uses_aggressive_schedule(tmp_db, monkeypatch):
+    """FINMIND_LONG_BACKOFF=1 該切到 6 次 / 60s/120s/300s/600s/900s。"""
+    monkeypatch.setenv("FINMIND_LONG_BACKOFF", "1")
+    sleeps: list[float] = []
+    monkeypatch.setattr("src._retry.time.sleep", lambda d: sleeps.append(d))
+
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        raise fetcher.requests.ConnectionError("always fail")
+
+    monkeypatch.setattr(fetcher.requests, "get", fake_get)
+    with pytest.raises(fetcher.FinMindAPIError):
+        fetcher._api_call("TestDataset")
+    assert calls["n"] == 6
+    assert sleeps == [60, 120, 300, 600, 900]
+
+
+@pytest.mark.parametrize("env_val", ["1", "true", "TRUE", "yes", "Yes"])
+def test_api_call_long_backoff_env_truthy_values(tmp_db, monkeypatch, env_val):
+    """各種 truthy 字串都該觸發 long backoff。"""
+    monkeypatch.setenv("FINMIND_LONG_BACKOFF", env_val)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src._retry.time.sleep", lambda d: sleeps.append(d))
+
+    def fake_get(*args, **kwargs):
+        raise fetcher.requests.ConnectionError("always fail")
+
+    monkeypatch.setattr(fetcher.requests, "get", fake_get)
+    with pytest.raises(fetcher.FinMindAPIError):
+        fetcher._api_call("TestDataset")
+    assert sleeps == [60, 120, 300, 600, 900]
+
+
+@pytest.mark.parametrize("env_val", ["0", "false", "no", ""])
+def test_api_call_long_backoff_env_falsy_values(tmp_db, monkeypatch, env_val):
+    """falsy / 空字串走預設短 backoff。"""
+    monkeypatch.setenv("FINMIND_LONG_BACKOFF", env_val)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src._retry.time.sleep", lambda d: sleeps.append(d))
+
+    def fake_get(*args, **kwargs):
+        raise fetcher.requests.ConnectionError("always fail")
+
+    monkeypatch.setattr(fetcher.requests, "get", fake_get)
+    with pytest.raises(fetcher.FinMindAPIError):
+        fetcher._api_call("TestDataset")
+    assert sleeps == [1.0, 2.0]
+
+
 # === ensure_stock_info(自動補 stocks 表的 name / industry) ===
 
 _FAKE_STOCK_INFO = [

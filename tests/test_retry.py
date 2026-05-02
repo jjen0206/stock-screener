@@ -61,3 +61,59 @@ def test_with_retry_exponential_backoff(monkeypatch):
         with_retry(fn, max_attempts=4, base_delay=1.0, quiet=True)
     # attempts 1, 2, 3 之後各 sleep 1, 2, 4(第 4 次失敗不再 sleep)
     assert sleeps == [1.0, 2.0, 4.0]
+
+
+# === custom delays(IP / token ban 用 long backoff) ===
+
+
+def test_with_retry_custom_delays_used_in_order(monkeypatch):
+    """提供 delays 時,該按序 sleep,attempts = len(delays) + 1。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: sleeps.append(d))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("always fail")
+
+    with pytest.raises(RuntimeError):
+        with_retry(fn, delays=[60, 120, 300, 600, 900], quiet=True)
+    # 6 次 attempt(= len(delays) + 1),5 次 sleep
+    assert calls["n"] == 6
+    assert sleeps == [60, 120, 300, 600, 900]
+
+
+def test_with_retry_custom_delays_succeeds_mid_run(monkeypatch):
+    """delays 中途成功該停 sleep。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: sleeps.append(d))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError(f"fail {calls['n']}")
+        return "ok"
+
+    result = with_retry(fn, delays=[60, 120, 300, 600], quiet=True)
+    assert result == "ok"
+    assert calls["n"] == 3
+    # 兩次 sleep:60, 120
+    assert sleeps == [60, 120]
+
+
+def test_with_retry_custom_delays_overrides_max_attempts(monkeypatch):
+    """同時給 max_attempts 跟 delays 時,以 delays 為準(避免歧義)。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: sleeps.append(d))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("fail")
+
+    # max_attempts=99 應被 ignore,實際走 delays 的 3+1 = 4 次
+    with pytest.raises(RuntimeError):
+        with_retry(fn, max_attempts=99, delays=[1, 2, 3], quiet=True)
+    assert calls["n"] == 4
+    assert sleeps == [1, 2, 3]

@@ -66,10 +66,17 @@ class FinMindAPIError(RuntimeError):
 # === 共用工具 ===
 
 def _api_call(dataset: str, **params: Any) -> list[dict]:
-    """呼叫 FinMind v4 API,含 3 次 retry(指數退避 1s/2s/4s)。
+    """呼叫 FinMind v4 API,含 retry。
 
     自動帶 token(若 .env 有設定);無 token 模式下不帶。
     回傳 data 陣列(list of dict)。response 驗證:status=200 且 data 是 list。
+
+    Retry 策略由環境變數 FINMIND_LONG_BACKOFF 切換:
+      - 預設(關):3 次嘗試,指數退避 1s → 2s → 4s
+        (本機 / daily_fetch / 互動使用,失敗快回不要 hang)
+      - 開(=1/true):6 次嘗試,長退避 60s → 120s → 300s → 600s → 900s
+        (backfill workflow 用,FinMind 限額觸發後等夠久才有意義 —
+        免費 token 600/hr,被擋通常 5-15 分鐘解。長等比短等成功率高。)
     """
     p: dict[str, Any] = {"dataset": dataset}
     if config.FINMIND_TOKEN:
@@ -77,9 +84,9 @@ def _api_call(dataset: str, **params: Any) -> list[dict]:
     p.update(params)
 
     def _attempt() -> list[dict]:
-        logger.info("[FETCH] FinMind API call: dataset=%s params=%s", dataset, params)
+        logger.info("[FETCH-FINMIND] dataset=%s params=%s", dataset, params)
         print(
-            f"[FETCH] FinMind API call: dataset={dataset} params={params}",
+            f"[FETCH-FINMIND] dataset={dataset} params={params}",
             flush=True,
         )
         try:
@@ -105,6 +112,16 @@ def _api_call(dataset: str, **params: Any) -> list[dict]:
         return data
 
     from src._retry import with_retry
+    import os
+    long_backoff = os.environ.get("FINMIND_LONG_BACKOFF", "").lower() in (
+        "1", "true", "yes",
+    )
+    if long_backoff:
+        return with_retry(
+            _attempt,
+            delays=[60, 120, 300, 600, 900],
+            label=f"FinMind {dataset} (long-backoff)",
+        )
     return with_retry(_attempt, max_attempts=3, label=f"FinMind {dataset}")
 
 
