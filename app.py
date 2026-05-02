@@ -1338,19 +1338,9 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
         st.table(styled)
 
 
-def _render_technical_summary(sid: str) -> None:
-    """個股頁:7 項 rule-based 技術分析總覽。
-
-    把 MA / BB / Vol 等指標翻譯成中文文字解讀:
-      1. 趨勢分析(close vs MA20 vs MA60)
-      2. 價格位置(close 相對 BB 中軌 / σ)
-      3. 均線排列(MA5 / MA20 / MA60 順序)
-      4. 量能分析(今日量 vs 20 日均量 + 漲跌)
-      5. 布林位置(close 在 BB 通道哪)
-      6. 布林通道狀態(寬度 vs 20 日平均寬度)
-      7. 綜合評估(趨勢 × 布林位置 / 價格位置 組合)
-
-    需要 ≥60 天 daily_prices(MA60 起算點)。
+def _load_recent_ohlc(sid: str, limit: int) -> pd.DataFrame:
+    """SQL 撈該股最近 N 天 daily_prices 並升序回 DataFrame(空 → 空 DataFrame)。
+    給 _compute_key_levels / _compute_technical_summary 共用,避免重複 query。
     """
     db.init_db()
     with db.get_conn() as conn:
@@ -1358,26 +1348,74 @@ def _render_technical_summary(sid: str) -> None:
             rows = conn.execute(
                 "SELECT date, open, high, low, close, volume "
                 "FROM daily_prices "
-                "WHERE stock_id=? ORDER BY date DESC LIMIT 120",
-                (sid,),
+                "WHERE stock_id=? ORDER BY date DESC LIMIT ?",
+                (sid, limit),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
-
-    if len(rows) < 60:
-        st.info(
-            f"📊 技術分析總覽:歷史不足,需 ≥60 天計算 MA60"
-            f"(目前 {len(rows)} 天)"
-        )
-        return
-
+    if not rows:
+        return pd.DataFrame()
     df = pd.DataFrame([
         {
             "date": r["date"], "open": r["open"], "high": r["high"],
             "low": r["low"], "close": r["close"], "volume": r["volume"],
         }
         for r in rows
-    ]).sort_values("date").reset_index(drop=True)
+    ])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def _compute_key_levels(sid: str) -> dict:
+    """算壓力 / 回檔 / 支撐三區間。給 _render_key_levels + _render_action_suggestion 共用。
+
+    回 dict:
+      - {'error': str}  歷史不足 / NaN
+      - {'close', 'atr14', 'bb_upper', 'bb_mid', 'bb_lower', 'levels': [(label, hint, low, high), ...]}
+    """
+    df = _load_recent_ohlc(sid, limit=90)
+    if len(df) < 20:
+        return {"error": f"歷史不足,需 ≥20 天計算(目前 {len(df)} 天)"}
+
+    bb = ind.bollinger(df, period=20, num_std=2.0)
+    atr_series = ind.atr(df, period=14)
+
+    bb_upper = bb["upper"].iloc[-1] if not bb.empty else None
+    bb_mid = bb["mid"].iloc[-1] if not bb.empty else None
+    bb_lower = bb["lower"].iloc[-1] if not bb.empty else None
+    atr14 = atr_series.iloc[-1] if not atr_series.empty else None
+    close_last = df["close"].iloc[-1]
+
+    if any(
+        v is None or pd.isna(v)
+        for v in [bb_upper, bb_mid, bb_lower, atr14]
+    ):
+        return {"error": "技術指標 NaN(歷史可能不足或資料異常)"}
+
+    half_atr = 0.5 * atr14
+    return {
+        "close": float(close_last),
+        "atr14": float(atr14),
+        "bb_upper": float(bb_upper),
+        "bb_mid": float(bb_mid),
+        "bb_lower": float(bb_lower),
+        "levels": [
+            ("🔴 壓力區", "上漲遇阻", bb_upper - half_atr, bb_upper + half_atr),
+            ("🟡 回檔區", "中性整理", bb_mid - half_atr, bb_mid + half_atr),
+            ("🟢 支撐區", "下跌支撐", bb_lower - half_atr, bb_lower + half_atr),
+        ],
+    }
+
+
+def _compute_technical_summary(sid: str) -> dict:
+    """算 7 項 rule-based 技術解讀。給 _render_technical_summary + _render_action_suggestion 共用。
+
+    回 dict:
+      - {'error': str}  歷史不足 / NaN
+      - {'trend', 'price_pos', 'ma_align', 'vol_text', 'bb_pos', 'bb_width_state', 'summary'}
+    """
+    df = _load_recent_ohlc(sid, limit=120)
+    if len(df) < 60:
+        return {"error": f"歷史不足,需 ≥60 天計算 MA60(目前 {len(df)} 天)"}
 
     ma5 = ind.sma(df, 5)
     ma20 = ind.sma(df, 20)
@@ -1402,8 +1440,7 @@ def _render_technical_summary(sid: str) -> None:
         close_last, ma5_last, ma20_last, ma60_last,
         bb_upper, bb_mid, bb_lower, sigma, vol_last, vol_ma20,
     ]):
-        st.info("📊 技術分析總覽:技術指標 NaN(歷史可能不足或資料異常)")
-        return
+        return {"error": "技術指標 NaN(歷史可能不足或資料異常)"}
 
     # 1. 趨勢
     if close_last > ma20_last > ma60_last:
@@ -1447,7 +1484,7 @@ def _render_technical_summary(sid: str) -> None:
     else:
         vol_text = "量平"
 
-    # 5. 布林位置(優先判超買 / 超賣 → 偏強 / 偏弱 → 通道內)
+    # 5. 布林位置
     if close_last > bb_upper:
         bb_pos = "突破上軌(強勢但超買)"
     elif close_last < bb_lower:
@@ -1489,78 +1526,46 @@ def _render_technical_summary(sid: str) -> None:
     else:
         summary = "盤整待方向"
 
+    return {
+        "trend": trend,
+        "price_pos": price_pos,
+        "ma_align": ma_align,
+        "vol_text": vol_text,
+        "bb_pos": bb_pos,
+        "bb_width_state": bb_width_state,
+        "summary": summary,
+    }
+
+
+def _render_technical_summary(sid: str) -> None:
+    """個股頁:7 項 rule-based 技術分析總覽 — 渲染層。"""
+    result = _compute_technical_summary(sid)
+    if "error" in result:
+        st.info(f"📊 技術分析總覽:{result['error']}")
+        return
+
     st.markdown("### 📊 技術分析總覽")
     st.markdown(
-        f"- **趨勢分析**:{trend}\n"
-        f"- **價格位置**:{price_pos}\n"
-        f"- **均線排列**:{ma_align}\n"
-        f"- **量能分析**:{vol_text}\n"
-        f"- **布林位置**:{bb_pos}\n"
-        f"- **布林通道**:{bb_width_state}\n"
-        f"- **綜合評估**:{summary}"
+        f"- **趨勢分析**:{result['trend']}\n"
+        f"- **價格位置**:{result['price_pos']}\n"
+        f"- **均線排列**:{result['ma_align']}\n"
+        f"- **量能分析**:{result['vol_text']}\n"
+        f"- **布林位置**:{result['bb_pos']}\n"
+        f"- **布林通道**:{result['bb_width_state']}\n"
+        f"- **綜合評估**:{result['summary']}"
     )
 
 
 def _render_key_levels(sid: str) -> None:
-    """個股頁:壓力 / 回檔 / 支撐 三個關鍵價位區間。
-
-    用布林通道(BB 20, 2)為主軸 + ATR(14) × 0.5 半幅抓 buffer:
-      - 壓力區 = BB 上軌 ± 0.5 ATR(上漲遇阻)
-      - 回檔區 = BB 中軌(= MA20)± 0.5 ATR(中性整理)
-      - 支撐區 = BB 下軌 ± 0.5 ATR(下跌支撐)
-
-    需要 ≥20 天 daily_prices(BB 起算點)。獨立 SQL 撈 90 天歷史,跟個股頁
-    K 線時段解耦(K 線可能 user 選 30 天,關鍵價位仍可算)。
-    """
-    db.init_db()
-    with db.get_conn() as conn:
-        try:
-            rows = conn.execute(
-                "SELECT date, open, high, low, close, volume "
-                "FROM daily_prices "
-                "WHERE stock_id=? ORDER BY date DESC LIMIT 90",
-                (sid,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-
-    if len(rows) < 20:
-        st.info(
-            f"🎯 關鍵價位:歷史不足,需 ≥20 天計算"
-            f"(目前 {len(rows)} 天)"
-        )
+    """個股頁:壓力 / 回檔 / 支撐 三個關鍵價位區間 — 渲染層。"""
+    result = _compute_key_levels(sid)
+    if "error" in result:
+        st.info(f"🎯 關鍵價位:{result['error']}")
         return
-
-    df = pd.DataFrame([
-        {
-            "date": r["date"], "open": r["open"], "high": r["high"],
-            "low": r["low"], "close": r["close"], "volume": r["volume"],
-        }
-        for r in rows
-    ]).sort_values("date").reset_index(drop=True)
-
-    bb = ind.bollinger(df, period=20, num_std=2.0)
-    atr_series = ind.atr(df, period=14)
-
-    bb_upper = bb["upper"].iloc[-1] if not bb.empty else None
-    bb_mid = bb["mid"].iloc[-1] if not bb.empty else None
-    bb_lower = bb["lower"].iloc[-1] if not bb.empty else None
-    atr14 = atr_series.iloc[-1] if not atr_series.empty else None
-
-    if any(v is None or pd.isna(v) for v in [bb_upper, bb_mid, bb_lower, atr14]):
-        st.info("🎯 關鍵價位:技術指標 NaN(歷史可能不足或資料異常)")
-        return
-
-    half_atr = 0.5 * atr14
-    levels = [
-        ("🔴 壓力區", "上漲遇阻", bb_upper - half_atr, bb_upper + half_atr),
-        ("🟡 回檔區", "中性整理", bb_mid - half_atr, bb_mid + half_atr),
-        ("🟢 支撐區", "下跌支撐", bb_lower - half_atr, bb_lower + half_atr),
-    ]
 
     st.markdown("### 🎯 關鍵價位")
     cols = st.columns(3)
-    for i, (label, hint, low, high) in enumerate(levels):
+    for i, (label, hint, low, high) in enumerate(result["levels"]):
         with cols[i]:
             st.markdown(
                 f"**{label}**  \n"
