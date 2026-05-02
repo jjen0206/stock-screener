@@ -108,7 +108,7 @@ jobs:
           git commit -m "chore(snapshot): backfill shard ${{ matrix.shard }}/8 [skip ci]"
           # 8 shard 並發推 main → 必然會 race。rebase + retry,最多 10 次。
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            git pull --rebase origin main || {
+            git pull --rebase --autostash origin main || {
               echo "rebase failed (likely conflict in snapshot CSV) — abort and bail"
               git rebase --abort || true
               exit 1
@@ -167,7 +167,7 @@ jobs:
           fi
           git commit -m "chore(snapshot): backfill aggregated 8-shard [skip ci]"
           for i in 1 2 3 4 5; do
-            git pull --rebase origin main || {
+            git pull --rebase --autostash origin main || {
               echo "rebase failed — abort and bail"
               git rebase --abort || true
               exit 1
