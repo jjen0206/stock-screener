@@ -623,7 +623,7 @@ def _page_short() -> None:
 
     # 上方控制列
     cols = st.columns([2, 3, 1])
-    target_date = cols[0].date_input("選股日期", value=date.today())
+    target_date = cols[0].date_input("選股日期", value=_get_default_screen_date())
     universe_options = [
         f"🎯 充足歷史的純股票 ({eligible_stocks} 檔, 20+ 天 / 不含 ETF & 債券)",
         f"📊 充足歷史的股 ({eligible_stocks} 檔, 20+ 天 / 含 ETF & 債券)",
@@ -1362,7 +1362,8 @@ def _page_backtest() -> None:
         st.warning("請至少選一套策略")
 
     # === 期間 preset 快選 ===
-    today = date.today()
+    # 用「最新交易日」當錨點(週末/假日不會選到沒資料的 today)
+    latest = _get_default_screen_date()
     preset_label_to_days = {
         "近 30 日": 30, "近 60 日": 60, "近 90 日": 90,
         "近 180 日": 180, "自訂": None,
@@ -1376,13 +1377,13 @@ def _page_backtest() -> None:
     cols = st.columns([2, 2, 1])
     if preset == "自訂":
         start = cols[0].date_input(
-            "回測起始", value=today - timedelta(days=180), key="bt_start"
+            "回測起始", value=latest - timedelta(days=180), key="bt_start"
         )
-        end = cols[1].date_input("回測結束", value=today, key="bt_end")
+        end = cols[1].date_input("回測結束", value=latest, key="bt_end")
     else:
         days = preset_label_to_days[preset]
-        start = today - timedelta(days=days)
-        end = today
+        start = latest - timedelta(days=days)
+        end = latest
         cols[0].metric("起始", start.isoformat())
         cols[1].metric("結束", end.isoformat())
     cols[2].markdown("&nbsp;", unsafe_allow_html=True)
@@ -2184,6 +2185,21 @@ def _get_latest_data_date() -> str | None:
         except sqlite3.OperationalError:
             return None
     return row["latest"] if row and row["latest"] else None
+
+
+def _get_default_screen_date() -> date:
+    """date_input 預設值:取 daily_prices 最新交易日,沒資料才退 today()。
+
+    避免週末/假日打開短線頁時 default = date.today()(非交易日)→ SELECT
+    WHERE date=今天 永遠 0 picks。
+    """
+    latest = _get_latest_data_date()
+    if not latest:
+        return date.today()
+    try:
+        return date.fromisoformat(latest)
+    except ValueError:
+        return date.today()
 
 
 def _get_snapshot_last_update() -> str | None:

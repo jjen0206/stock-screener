@@ -16,6 +16,7 @@ kwarg、單測對 callee 直接呼叫所以 OK,但 caller 實際傳的 kwarg 已
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -367,3 +368,77 @@ def test_backtest_passes_enabled_strategies_kwarg(isolated_db, monkeypatch):
         f"backtest_short 沒收到 enabled_strategies kwarg: kwargs={kwargs!r}"
     )
     assert set(kwargs["enabled_strategies"]) == {"volume_kd", "ma_alignment"}
+
+
+# ============================================================================
+# 日期 default:週末 / 假日打開時不能踩到非交易日(會 0 picks)
+# ============================================================================
+
+def _seed_latest_trading_day(latest_iso: str) -> None:
+    """灌一筆 daily_prices 讓 MAX(date) = latest_iso(供 default date 取用)。"""
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    db.upsert_daily_prices([{
+        "stock_id": "2330", "date": latest_iso,
+        "open": 600.0, "high": 605.0, "low": 595.0, "close": 600.0,
+        "volume": 10000,
+    }])
+
+
+def test_short_default_date_uses_latest_trading_day(isolated_db):
+    """短線頁「選股日期」default 不該是 date.today()(週末/假日 → 0 picks),
+    而該是 daily_prices 內最新一筆日期。
+    """
+    _seed_latest_trading_day("2026-04-30")
+
+    at = _new_at("🔥 短線")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    di = at.date_input[0]
+    assert di.label == "選股日期", (
+        f"預期短線頁第一個 date_input label = 『選股日期』, got {di.label!r}"
+    )
+    assert di.value == date(2026, 4, 30), (
+        f"短線『選股日期』default 應 = max(daily_prices.date) = 2026-04-30, "
+        f"實際 = {di.value}"
+    )
+
+
+def test_backtest_default_dates_use_latest_trading_day(isolated_db):
+    """回測頁自訂模式的「回測結束」default 應 = 最新交易日,「回測起始」應 = 最新 - 180 天。"""
+    _seed_latest_trading_day("2026-04-30")
+
+    at = _new_at("📈 回測")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 切到「自訂」才會出 date_input(其他 preset 走 metric)
+    at.radio(key="bt_period_preset").set_value("自訂").run()
+    assert not at.exception, _exc_msgs(at)
+
+    bt_start = at.date_input(key="bt_start")
+    bt_end = at.date_input(key="bt_end")
+    assert bt_end.value == date(2026, 4, 30), (
+        f"『回測結束』default 應 = 2026-04-30, 實際 = {bt_end.value}"
+    )
+    # 起始 = 最新 - 180 天 = 2025-11-01
+    assert bt_start.value == date(2025, 11, 1), (
+        f"『回測起始』default 應 = latest - 180d = 2025-11-01, "
+        f"實際 = {bt_start.value}"
+    )
+
+
+def test_get_default_screen_date_falls_back_to_today(monkeypatch):
+    """daily_prices 查不到資料時 fallback date.today()(新部署 / SQL 失敗都不該炸)。
+    helper-level 直接 patch — 走 e2e 會被 boot 時 snapshot CSV 灌進來干擾。
+    """
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_latest_data_date", lambda: None)
+    assert app_mod._get_default_screen_date() == date.today()
+
+    # 壞日期 string(理論上 SQL 不會回,但保險)也要 fallback
+    monkeypatch.setattr(app_mod, "_get_latest_data_date", lambda: "not-a-date")
+    assert app_mod._get_default_screen_date() == date.today()
