@@ -442,3 +442,60 @@ def test_get_default_screen_date_falls_back_to_today(monkeypatch):
     # 壞日期 string(理論上 SQL 不會回,但保險)也要 fallback
     monkeypatch.setattr(app_mod, "_get_latest_data_date", lambda: "not-a-date")
     assert app_mod._get_default_screen_date() == date.today()
+
+
+# ============================================================================
+# 個股頁:三大法人籌碼明細表
+# ============================================================================
+
+def test_institutional_table_renders_with_data(isolated_db):
+    """灌 5 行 institutional → _render_institutional_table 渲染表格,不顯示
+    fallback 訊息。"""
+    from src import database as db
+
+    db.upsert_institutional([
+        {
+            "stock_id": "2330", "date": f"2026-04-{30 - i:02d}",
+            # 注意 schema 單位「股」,UI 顯示時除 1000 → 張
+            "foreign_buy_sell": (-21_000_000 if i % 2 == 0 else 5_000_000),
+            "trust_buy_sell": 600_000 * (1 if i % 2 == 0 else -1),
+            "dealer_buy_sell": 100_000,
+            "total_buy_sell": -20_000_000 + i * 500_000,
+        }
+        for i in range(5)
+    ])
+
+    def _harness():
+        import app
+        app._render_institutional_table("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 有資料 → expander 出現,info fallback 不應出現
+    assert at.expander, "預期 institutional table 包在 expander 裡, 但沒看到 expander"
+    assert any(
+        "三大法人買賣超" in (e.label or "") for e in at.expander
+    ), f"預期 expander label 含『三大法人買賣超』, 實際: {[e.label for e in at.expander]}"
+    assert not any(
+        "無三大法人籌碼資料" in str(i.value) for i in at.info
+    ), "有資料時不該顯示 fallback info"
+
+
+def test_institutional_table_fallback_when_no_data(isolated_db):
+    """無資料時顯示 fallback info,不渲染 expander/table。"""
+    def _harness():
+        import app
+        app._render_institutional_table("9999")  # 不存在的股號
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert any(
+        "無三大法人籌碼資料" in str(i.value) for i in at.info
+    ), f"預期顯示 fallback info, 實際 info={[str(i.value) for i in at.info]}"
+    assert not at.expander, (
+        f"無資料時不該有 expander, 但見到: {[e.label for e in at.expander]}"
+    )

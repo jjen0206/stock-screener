@@ -1102,6 +1102,7 @@ def _page_stock_query() -> None:
         st.plotly_chart(_make_rsi_chart(df, rsi14), use_container_width=True)
 
     _render_summary(df, kd_df, rsi14, macd_df)
+    _render_institutional_table(sid)
 
 
 def _render_summary(
@@ -1165,6 +1166,66 @@ def _render_summary(
             "⚠️ 目標價為 ATR(14) 波動度估計,**非實際預測**;"
             "個人交易仍應自行評估。"
         )
+
+
+def _render_institutional_table(sid: str, days: int = 10) -> None:
+    """個股頁:近 N 日三大法人買賣超明細。
+
+    SQLite institutional 欄位是「股」,顯示時除以 1000 轉「張」(四捨五入)。
+    法人覆蓋率不到全市場 — 沒資料時顯示 fallback 訊息。
+    """
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT date, foreign_buy_sell, trust_buy_sell, "
+                "dealer_buy_sell, total_buy_sell "
+                "FROM institutional WHERE stock_id=? "
+                "ORDER BY date DESC LIMIT ?",
+                (sid, days),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    if not rows:
+        st.info(
+            "🔍 此股近期無三大法人籌碼資料。"
+            "(覆蓋率有限,主要是高市值 / 關注清單個股)"
+        )
+        return
+
+    inst_df = pd.DataFrame([
+        {
+            "日期": r["date"],
+            "外資": round((r["foreign_buy_sell"] or 0) / 1000),
+            "投信": round((r["trust_buy_sell"] or 0) / 1000),
+            "自營商": round((r["dealer_buy_sell"] or 0) / 1000),
+            "合計": round((r["total_buy_sell"] or 0) / 1000),
+        }
+        for r in rows
+    ])
+
+    num_cols = ["外資", "投信", "自營商", "合計"]
+
+    def _color_pos_neg(v: int) -> str:
+        # 台股慣例:紅 = 正 / 綠 = 負(對應漲跌)
+        if v > 0:
+            return "color: #d62728"
+        if v < 0:
+            return "color: #2ca02c"
+        return ""
+
+    styled = (
+        inst_df.style
+        .map(_color_pos_neg, subset=num_cols)
+        .format("{:+,}", subset=num_cols)
+    )
+
+    with st.expander(
+        f"📊 三大法人買賣超(近 {len(rows)} 日,單位:張)",
+        expanded=True,
+    ):
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
 def _fmt(v: float) -> str:
