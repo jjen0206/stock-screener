@@ -799,3 +799,84 @@ def test_key_levels_fallback_when_no_data(isolated_db):
     info_text = "\n".join(str(i.value) for i in at.info)
     assert "歷史不足" in info_text
     assert "0 天" in info_text, f"預期 fallback 標明 0 天, 實際: {info_text!r}"
+
+
+# ============================================================================
+# 個股頁:技術分析總覽(7 項 rule-based 文字解讀)
+# ============================================================================
+
+def _seed_trend_prices(direction: str, n_days: int = 70) -> None:
+    """灌 n_days 天 OHLC,direction='up' 線性漲、'down' 線性跌。
+    確保 MA5 < MA20 < MA60(漲時反過來)+ close 偏離中軌 → 趨勢明顯。
+    """
+    from datetime import date as _date, timedelta as _td
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    rows = []
+    start = _date(2026, 1, 1)
+    base = 100.0
+    for i in range(n_days):
+        d = start + _td(days=i)
+        c = base + i if direction == "up" else base + (n_days - 1 - i)
+        rows.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "open": c - 0.5, "high": c + 0.5, "low": c - 1.0, "close": c,
+            "volume": 10000,
+        })
+    db.upsert_daily_prices(rows)
+
+
+def test_technical_summary_renders_uptrend(isolated_db):
+    """灌 70 天線性上漲 → 期望出現「多頭趨勢」「多頭排列」。"""
+    _seed_trend_prices(direction="up", n_days=70)
+
+    def _harness():
+        import app
+        app._render_technical_summary("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "技術分析總覽" in md_text
+    assert "多頭趨勢" in md_text, f"線性漲應判多頭, 實際: {md_text!r}"
+    assert "多頭排列" in md_text, f"線性漲應判多頭排列, 實際: {md_text!r}"
+    # 不該顯示 fallback
+    assert not any("歷史不足" in str(i.value) for i in at.info)
+
+
+def test_technical_summary_renders_downtrend(isolated_db):
+    """灌 70 天線性下跌 → 期望出現「空頭趨勢」「空頭排列」。"""
+    _seed_trend_prices(direction="down", n_days=70)
+
+    def _harness():
+        import app
+        app._render_technical_summary("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "空頭趨勢" in md_text, f"線性跌應判空頭, 實際: {md_text!r}"
+    assert "空頭排列" in md_text
+
+
+def test_technical_summary_fallback_when_history_insufficient(isolated_db):
+    """灌 30 天(< 60)→ fallback「歷史不足」+ 不渲染總覽 markdown。"""
+    _seed_trend_prices(direction="up", n_days=30)
+
+    def _harness():
+        import app
+        app._render_technical_summary("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "趨勢分析" not in md_text, "歷史不足時不該渲染總覽 markdown"

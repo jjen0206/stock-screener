@@ -1104,6 +1104,7 @@ def _page_stock_query() -> None:
     _render_summary(df, kd_df, rsi14, macd_df)
     _render_institutional_table(sid)
     _render_institutional_cumulative_table(sid)
+    _render_technical_summary(sid)
     _render_key_levels(sid)
 
 
@@ -1335,6 +1336,169 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
         expanded=True,
     ):
         st.table(styled)
+
+
+def _render_technical_summary(sid: str) -> None:
+    """個股頁:7 項 rule-based 技術分析總覽。
+
+    把 MA / BB / Vol 等指標翻譯成中文文字解讀:
+      1. 趨勢分析(close vs MA20 vs MA60)
+      2. 價格位置(close 相對 BB 中軌 / σ)
+      3. 均線排列(MA5 / MA20 / MA60 順序)
+      4. 量能分析(今日量 vs 20 日均量 + 漲跌)
+      5. 布林位置(close 在 BB 通道哪)
+      6. 布林通道狀態(寬度 vs 20 日平均寬度)
+      7. 綜合評估(趨勢 × 布林位置 / 價格位置 組合)
+
+    需要 ≥60 天 daily_prices(MA60 起算點)。
+    """
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT date, open, high, low, close, volume "
+                "FROM daily_prices "
+                "WHERE stock_id=? ORDER BY date DESC LIMIT 120",
+                (sid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    if len(rows) < 60:
+        st.info(
+            f"📊 技術分析總覽:歷史不足,需 ≥60 天計算 MA60"
+            f"(目前 {len(rows)} 天)"
+        )
+        return
+
+    df = pd.DataFrame([
+        {
+            "date": r["date"], "open": r["open"], "high": r["high"],
+            "low": r["low"], "close": r["close"], "volume": r["volume"],
+        }
+        for r in rows
+    ]).sort_values("date").reset_index(drop=True)
+
+    ma5 = ind.sma(df, 5)
+    ma20 = ind.sma(df, 20)
+    ma60 = ind.sma(df, 60)
+    bb = ind.bollinger(df, period=20, num_std=2.0)
+
+    close_last = df["close"].iloc[-1]
+    close_prev = df["close"].iloc[-2]
+    vol_last = df["volume"].iloc[-1]
+    vol_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+
+    ma5_last = ma5.iloc[-1]
+    ma20_last = ma20.iloc[-1]
+    ma60_last = ma60.iloc[-1]
+    bb_upper = bb["upper"].iloc[-1]
+    bb_mid = bb["mid"].iloc[-1]
+    bb_lower = bb["lower"].iloc[-1]
+    # σ 從 BB 反推:upper = mid + 2σ → σ = (upper - mid) / 2
+    sigma = (bb_upper - bb_mid) / 2.0
+
+    if any(pd.isna(v) for v in [
+        close_last, ma5_last, ma20_last, ma60_last,
+        bb_upper, bb_mid, bb_lower, sigma, vol_last, vol_ma20,
+    ]):
+        st.info("📊 技術分析總覽:技術指標 NaN(歷史可能不足或資料異常)")
+        return
+
+    # 1. 趨勢
+    if close_last > ma20_last > ma60_last:
+        trend = "多頭趨勢"
+    elif close_last < ma20_last < ma60_last:
+        trend = "空頭趨勢"
+    else:
+        trend = "盤整"
+
+    # 2. 價格位置(離 BB 中軌幾個 σ)
+    diff_to_mid = close_last - bb_mid
+    half_sigma = 0.5 * sigma
+    if abs(diff_to_mid) < 0.3 * sigma:
+        price_pos = "中軌附近"
+    elif diff_to_mid > half_sigma:
+        price_pos = "貼近上軌"
+    elif diff_to_mid < -half_sigma:
+        price_pos = "貼近下軌"
+    else:
+        price_pos = "整理"
+
+    # 3. 均線排列
+    if ma5_last > ma20_last > ma60_last:
+        ma_align = "多頭排列(5>20>60)"
+    elif ma5_last < ma20_last < ma60_last:
+        ma_align = "空頭排列(5<20<60)"
+    else:
+        ma_align = "糾結整理"
+
+    # 4. 量能
+    is_up = close_last > close_prev
+    vol_ratio = vol_last / vol_ma20 if vol_ma20 > 0 else 1.0
+    if vol_ratio < 0.8 and is_up:
+        vol_text = "量縮上漲(動能降溫)"
+    elif vol_ratio > 1.2 and is_up:
+        vol_text = "量增上漲(動能強勢)"
+    elif vol_ratio < 0.8 and not is_up:
+        vol_text = "量縮下跌(賣壓減弱)"
+    elif vol_ratio > 1.2 and not is_up:
+        vol_text = "量增下跌(賣壓沉重)"
+    else:
+        vol_text = "量平"
+
+    # 5. 布林位置(優先判超買 / 超賣 → 偏強 / 偏弱 → 通道內)
+    if close_last > bb_upper:
+        bb_pos = "突破上軌(強勢但超買)"
+    elif close_last < bb_lower:
+        bb_pos = "跌破下軌(超賣)"
+    elif diff_to_mid > half_sigma:
+        bb_pos = "貼近上軌(偏強)"
+    elif diff_to_mid < -half_sigma:
+        bb_pos = "貼近下軌(偏弱)"
+    else:
+        bb_pos = "通道內整理"
+
+    # 6. 布林通道寬度
+    bb_width_now = bb_upper - bb_lower
+    bb_width_avg20 = (bb["upper"] - bb["lower"]).rolling(20).mean().iloc[-1]
+    if pd.isna(bb_width_avg20) or bb_width_avg20 == 0:
+        bb_width_state = "通道穩定"
+    elif bb_width_now > bb_width_avg20 * 1.2:
+        bb_width_state = "開口擴大(趨勢加大)"
+    elif bb_width_now < bb_width_avg20 * 0.8:
+        bb_width_state = "開口收斂(整理)"
+    else:
+        bb_width_state = "通道穩定"
+
+    # 7. 綜合評估
+    if trend == "多頭趨勢" and "突破上軌" in bb_pos:
+        summary = "高檔強勢"
+    elif trend == "多頭趨勢" and "貼近上軌" in bb_pos:
+        summary = "高檔區震盪出貨初期"
+    elif trend == "多頭趨勢" and price_pos == "中軌附近":
+        summary = "回檔測試"
+    elif trend == "多頭趨勢":
+        summary = "多頭整理"
+    elif trend == "空頭趨勢" and "跌破下軌" in bb_pos:
+        summary = "弱勢探底"
+    elif trend == "空頭趨勢" and "貼近下軌" in bb_pos:
+        summary = "低檔築底機會"
+    elif trend == "空頭趨勢":
+        summary = "空頭整理"
+    else:
+        summary = "盤整待方向"
+
+    st.markdown("### 📊 技術分析總覽")
+    st.markdown(
+        f"- **趨勢分析**:{trend}\n"
+        f"- **價格位置**:{price_pos}\n"
+        f"- **均線排列**:{ma_align}\n"
+        f"- **量能分析**:{vol_text}\n"
+        f"- **布林位置**:{bb_pos}\n"
+        f"- **布林通道**:{bb_width_state}\n"
+        f"- **綜合評估**:{summary}"
+    )
 
 
 def _render_key_levels(sid: str) -> None:
