@@ -24,6 +24,20 @@ def _fmt_num(v: Any, fmt: str = "{:.2f}", default: str = "—") -> str:
         return default
 
 
+def _on_add_to_watchlist(stock_id: str) -> None:
+    """⭐ 按鈕的 on_click callback。
+
+    用 on_click+args 而不是 `if st.button(...): add(sid)`:args 在 widget
+    註冊當下把 sid「以值」鎖進 widget state,Streamlit 收到 click 後會在
+    下個 rerun **跑 script body 之前**就觸發 callback。即使外層 page 因
+    其他 gating(例如 _page_short 的 `if not submit: return`)沒重渲染卡片,
+    callback 仍以原本綁定的 sid 執行 — 杜絕「點 A 卻加進 B」的 index 漂移。
+    """
+    from src import database as db
+    db.add_to_watchlist(stock_id)
+    st.toast(f"已加入 {stock_id}", icon="⭐")
+
+
 def _fire_emoji(n_signals: int) -> str:
     """信號數 → 🔥 視覺。"""
     if n_signals <= 0:
@@ -108,15 +122,14 @@ def render_pick_card(
             from src import database as db
             already = db.is_in_watchlist(sid)
             label = "✅ 已關注" if already else "⭐ 加入關注"
-            if st.button(
+            st.button(
                 label,
                 key=f"{button_key_prefix}_add_{sid}",
                 disabled=already,
                 use_container_width=True,
-            ):
-                db.add_to_watchlist(sid)
-                st.toast(f"已加入 {sid}", icon="⭐")
-                st.rerun()
+                on_click=_on_add_to_watchlist,
+                args=(sid,),
+            )
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:

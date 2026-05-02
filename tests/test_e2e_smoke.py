@@ -199,6 +199,125 @@ def test_short_screen_renders_picks_without_exception(
     )
 
 
+def test_short_star_button_adds_clicked_stock_id_not_another(
+    isolated_db, monkeypatch
+):
+    """**Index-mismatch regression** — 點 picks 第一張卡的 ⭐,實際加進
+    watchlist 的必須是第一張的 stock_id,不是任何其他張。
+
+    生產上回報過:138 picks,點第一張(01002T)的 ☆,卻加進 3680。推測是
+    rerun 之間 row state 漂移 + button key/closure 綁錯股號。
+
+    此測試灌 3 檔特意 sort 後第一張為 01002T(數字 < 字母,且 01 < 36 < 23
+    開頭),點該檔 ⭐ → assert watchlist 只含 01002T。
+    """
+    from src import database as db, strategies
+
+    # universe 路徑用「快速:50 檔大型股」(免歷史),但要 upsert 假股號
+    # 進 stocks 表免得後續查 name 失敗
+    db.upsert_stocks([
+        {"stock_id": "01002T", "name": "土銀國泰R1", "market": "TW"},
+        {"stock_id": "3680", "name": "家登", "market": "TW"},
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+    ])
+
+    # 全部相同 信號數 → 排序由 stock_id asc 決定:01002T < 2330 < 3680
+    fake_agg = {
+        sid: {
+            "name": name,
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {
+                "stock_id": sid, "name": name,
+                "close": 100.0, "atr14": 5.0,
+            }},
+        }
+        for sid, name in [
+            ("01002T", "土銀國泰R1"),
+            ("3680", "家登"),
+            ("2330", "台積電"),
+        ]
+    }
+    monkeypatch.setattr(
+        strategies, "run_all_strategies",
+        lambda *a, **kw: fake_agg,
+    )
+
+    at = _new_at("🔥 短線")
+    at.run()
+    sb = at.selectbox[0]
+    sb.set_value("快速:50 檔大型股").run()
+    submit = next(b for b in at.button if b.label == "執行選股")
+    submit.click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 確認 picks 真的渲染出來(短線頁卡片帶 button_key_prefix="short")
+    star_keys = [b.key for b in at.button if b.key and b.key.startswith("short_add_")]
+    assert "short_add_01002T" in star_keys, (
+        f"01002T 的 ⭐ 沒被渲染出來,可見的 star keys = {star_keys}"
+    )
+
+    # 點第一張卡(01002T)的 ⭐
+    at.button(key="short_add_01002T").click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    items = db.get_watchlist()
+    sids = [it["stock_id"] for it in items]
+    assert sids == ["01002T"], (
+        f"點 01002T 的 ⭐ 應只加 01002T,但 watchlist={sids} "
+        f"(若含 3680 / 2330 = index 漂移 bug)"
+    )
+
+
+def test_short_star_button_middle_card_binds_correctly(
+    isolated_db, monkeypatch
+):
+    """點 picks **中間**那張卡的 ⭐ → 加進 watchlist 的必須是中間那張。
+
+    補位 first-card 測試的盲點:若實作剛好對第一張正確、其他張漂移,
+    上面的 test 抓不到。中間張(2330)被點 → 只能加 2330。
+    """
+    from src import database as db, strategies
+
+    db.upsert_stocks([
+        {"stock_id": "01002T", "name": "土銀國泰R1", "market": "TW"},
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "3680", "name": "家登", "market": "TW"},
+    ])
+    fake_agg = {
+        sid: {
+            "name": name,
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {
+                "stock_id": sid, "name": name,
+                "close": 100.0, "atr14": 5.0,
+            }},
+        }
+        for sid, name in [
+            ("01002T", "土銀國泰R1"),
+            ("2330", "台積電"),
+            ("3680", "家登"),
+        ]
+    }
+    monkeypatch.setattr(
+        strategies, "run_all_strategies",
+        lambda *a, **kw: fake_agg,
+    )
+
+    at = _new_at("🔥 短線")
+    at.run()
+    at.selectbox[0].set_value("快速:50 檔大型股").run()
+    next(b for b in at.button if b.label == "執行選股").click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    at.button(key="short_add_2330").click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    sids = [it["stock_id"] for it in db.get_watchlist()]
+    assert sids == ["2330"], (
+        f"點 2330(中間)的 ⭐ 應只加 2330,但 watchlist={sids}"
+    )
+
+
 # ============================================================================
 # 回測頁:backtest_short 必須收到 enabled_strategies kwarg
 # ============================================================================
