@@ -1158,3 +1158,164 @@ def test_pattern_fallback_when_history_insufficient(isolated_db):
     assert "歷史不足" in info_text
     md_text = "\n".join(m.value for m in at.markdown)
     assert "W 底分析" not in md_text
+
+
+# ============================================================================
+# 個股頁:主力燈號(出貨 / 吸貨判斷)
+# ============================================================================
+
+def _seed_distribution_scenario() -> None:
+    """灌出貨情境:close 線性漲到高檔 + institutional 持續賣超。
+    n20=−100,000 張 → 強度 +3。Close 在頂端 → is_high True。
+    Vol 平 → vol_text=量平 → status='默默出貨'。
+    """
+    from datetime import date as _date, timedelta as _td
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    rows_p, rows_i = [], []
+    start = _date(2026, 1, 1)
+    for i in range(70):
+        d = start + _td(days=i)
+        c = 100.0 + i  # 線性漲 100 → 169
+        rows_p.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "open": c - 0.3, "high": c + 0.5, "low": c - 0.5, "close": c,
+            "volume": 10000,
+        })
+        rows_i.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "foreign_buy_sell": -5_000_000,  # 賣 5,000 張
+            "trust_buy_sell": 0, "dealer_buy_sell": 0,
+            "total_buy_sell": -5_000_000,
+        })
+    db.upsert_daily_prices(rows_p)
+    db.upsert_institutional(rows_i)
+
+
+def _seed_accumulation_scenario() -> None:
+    """灌吸貨情境:close 線性跌到低檔 + institutional 持續買超。
+    n20=+100,000 張 → 強度 +3。Close 在底部 → is_low True。
+    Vol 平 → vol_text=量平 → status='默默吸貨'。
+    """
+    from datetime import date as _date, timedelta as _td
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    rows_p, rows_i = [], []
+    start = _date(2026, 1, 1)
+    for i in range(70):
+        d = start + _td(days=i)
+        c = 200.0 - i  # 線性跌 200 → 131
+        rows_p.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "open": c - 0.3, "high": c + 0.5, "low": c - 0.5, "close": c,
+            "volume": 10000,
+        })
+        rows_i.append({
+            "stock_id": "2330", "date": d.isoformat(),
+            "foreign_buy_sell": 5_000_000,  # 買 5,000 張
+            "trust_buy_sell": 0, "dealer_buy_sell": 0,
+            "total_buy_sell": 5_000_000,
+        })
+    db.upsert_daily_prices(rows_p)
+    db.upsert_institutional(rows_i)
+
+
+def test_main_force_signal_distribution(isolated_db):
+    """灌出貨情境(法人賣超 + close 高檔)→ status 含「出貨」+ 強度 ≥ 1。"""
+    _seed_distribution_scenario()
+
+    def _harness():
+        import app
+        app._render_main_force_signal("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "主力燈號" in md_text
+    assert "出貨" in md_text, (
+        f"法人賣超情境應判出貨, 實際:\n{md_text}"
+    )
+    # 強度 +3(n20=−100k 張)+ 量價一致 → ≥3 顆 emoji
+    assert md_text.count("🟢") >= 3, (
+        f"強度應 ≥ 3, 實際 markdown=\n{md_text}"
+    )
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "解讀" in info_text
+
+
+def test_main_force_signal_accumulation(isolated_db):
+    """灌吸貨情境(法人買超 + close 低檔)→ status 含「吸貨」。"""
+    _seed_accumulation_scenario()
+
+    def _harness():
+        import app
+        app._render_main_force_signal("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "吸貨" in md_text, (
+        f"法人買超情境應判吸貨, 實際:\n{md_text}"
+    )
+
+
+def test_main_force_signal_fallback_no_institutional(isolated_db):
+    """daily_prices 有但 institutional 完全沒(同 01002T 情境)→ fallback。"""
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    db.upsert_daily_prices([
+        {
+            "stock_id": "2330", "date": f"2026-04-{1 + i:02d}",
+            "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+            "volume": 10000,
+        }
+        for i in range(25)
+    ])
+    # 故意不灌 institutional
+
+    def _harness():
+        import app
+        app._render_main_force_signal("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "無法人籌碼資料" in info_text or "歷史不足" in info_text
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "強度" not in md_text, "fallback 時不該渲染主力燈號區塊"
+
+
+def test_main_force_signal_fallback_history_insufficient(isolated_db):
+    """< 20 天 → fallback。"""
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    db.upsert_daily_prices([
+        {
+            "stock_id": "2330", "date": f"2026-04-{1 + i:02d}",
+            "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+            "volume": 10000,
+        }
+        for i in range(15)
+    ])
+
+    def _harness():
+        import app
+        app._render_main_force_signal("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text

@@ -1106,6 +1106,7 @@ def _page_stock_query() -> None:
     _render_institutional_cumulative_table(sid)
     _render_multi_timeframe(sid)
     _render_pattern_analysis(sid)
+    _render_main_force_signal(sid)
     _render_technical_summary(sid)
     _render_key_levels(sid)
     _render_action_suggestion(sid)
@@ -2052,6 +2053,184 @@ def _render_pattern_analysis(sid: str) -> None:
         "Pivot 用 ATR ≥1× 倍 prominence 過濾雜訊。"
         "W 底:兩低點相似 + 中間反彈 + 突破頸線;M 頭鏡像。**參考用,非預測**"
     )
+
+
+def _compute_main_force_signal(sid: str) -> dict:
+    """主力燈號:法人 5/10/20 日累計 + BB 位置 + 量價配對 → 出貨 / 吸貨判斷。
+
+    回 dict 含 status / emoji / strength(0-5)/ n5,n10,n20 / vol_text /
+    bb_pos_ratio / reading,或 {'error': str}。
+
+    五種狀態:
+    - 出貨初期:5/10/20 全負 + 高檔 + 量增下跌
+    - 默默出貨:全負 + 量平 / 量縮
+    - 吸貨初期:全正 + 低檔 + 量增上漲
+    - 默默吸貨:全正 + 低檔 + 量平 / 量縮上漲
+    - 中性:其他混合
+    """
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT p.date, p.close,
+                       i.foreign_buy_sell AS f, i.trust_buy_sell AS t,
+                       i.dealer_buy_sell AS d
+                FROM daily_prices p
+                LEFT JOIN institutional i
+                  ON p.stock_id = i.stock_id AND p.date = i.date
+                WHERE p.stock_id = ?
+                ORDER BY p.date DESC
+                LIMIT 30
+                """,
+                (sid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    if len(rows) < 20:
+        return {"error": f"歷史不足,需 ≥20 天計算 20 日累計(目前 {len(rows)} 天)"}
+
+    if all(r["f"] is None and r["t"] is None and r["d"] is None for r in rows):
+        return {"error": "無法人籌碼資料,主力燈號不可用"}
+
+    df = pd.DataFrame([
+        {
+            "date": r["date"], "close": r["close"],
+            # 股 → 張(整除丟小數,跟其他法人區塊一致)
+            "inst_total": (
+                (r["f"] or 0) + (r["t"] or 0) + (r["d"] or 0)
+            ) // 1000,
+        }
+        for r in rows
+    ]).sort_values("date").reset_index(drop=True)
+
+    n5 = int(df["inst_total"].tail(5).sum())
+    n10 = int(df["inst_total"].tail(10).sum())
+    n20 = int(df["inst_total"].tail(20).sum())
+
+    # reuse _compute_key_levels 拿 BB / ATR / close
+    levels = _compute_key_levels(sid)
+    if "error" in levels:
+        return {"error": f"關鍵價位算不出:{levels['error']}"}
+    bb_upper = levels["bb_upper"]
+    bb_lower = levels["bb_lower"]
+    close_last = levels["close"]
+
+    # close 在 BB 上下軌之間的位置(0=下軌, 1=上軌)
+    bb_range = bb_upper - bb_lower
+    if bb_range > 0:
+        bb_pos_ratio = (close_last - bb_lower) / bb_range
+    else:
+        bb_pos_ratio = 0.5
+    bb_pos_ratio = max(0.0, min(1.0, bb_pos_ratio))
+    is_high = bb_pos_ratio > 0.6
+    is_low = bb_pos_ratio < 0.4
+
+    # reuse _compute_technical_summary 拿 vol_text(MA60 不夠時走 fallback)
+    summary = _compute_technical_summary(sid)
+    vol_text = summary.get("vol_text", "量平") if "error" not in summary else "量平"
+
+    # 燈號規則
+    all_neg = n5 < 0 and n10 < 0 and n20 < 0
+    all_pos = n5 > 0 and n10 > 0 and n20 > 0
+
+    if all_neg and is_high and "量增下跌" in vol_text:
+        status, emoji = "出貨初期", "🔴"
+    elif all_neg and (vol_text == "量平" or "量縮" in vol_text):
+        status, emoji = "默默出貨", "🟠"
+    elif all_pos and is_low and "量增上漲" in vol_text:
+        status, emoji = "吸貨初期", "🟢"
+    elif all_pos and is_low and (
+        vol_text == "量平" or "量縮上漲" in vol_text
+    ):
+        status, emoji = "默默吸貨", "🟡"
+    else:
+        status, emoji = "中性", "⚪"
+
+    # 強度(0-5):累計絕對值 + 量價一致 + BB 極端位置
+    strength = 0
+    abs_n20 = abs(n20)
+    if abs_n20 > 100_000:
+        strength += 3
+    elif abs_n20 > 30_000:
+        strength += 2
+    elif abs_n20 > 10_000:
+        strength += 1
+
+    # 量價配對與訊號方向一致 → +1
+    if status == "出貨初期" and "量增下跌" in vol_text:
+        strength += 1
+    elif status == "吸貨初期" and "量增上漲" in vol_text:
+        strength += 1
+    elif status in ("默默出貨", "默默吸貨") and (
+        "量縮" in vol_text or vol_text == "量平"
+    ):
+        strength += 1
+
+    # BB 位置極端
+    if bb_pos_ratio > 0.7 or bb_pos_ratio < 0.3:
+        strength += 1
+
+    strength = min(5, max(0, strength))
+
+    # 解讀文字模板
+    if status == "出貨初期":
+        reading = (
+            f"20 日法人累計 {n20:+,} 張 + {vol_text} → 主力減碼,"
+            "短線留意風險"
+        )
+    elif status == "默默出貨":
+        reading = (
+            f"法人持續流出({n20:+,} 張)+ {vol_text} → 主力低調出貨"
+        )
+    elif status == "吸貨初期":
+        reading = (
+            f"20 日法人累計 {n20:+,} 張 + {vol_text} → 主力進場,"
+            "可留意進場機會"
+        )
+    elif status == "默默吸貨":
+        reading = (
+            f"法人持續流入({n20:+,} 張)+ {vol_text} + 低檔位置 → 主力默默吸貨"
+        )
+    else:
+        reading = (
+            f"5/10/20 日累計({n5:+,} / {n10:+,} / {n20:+,})混合,訊號中性"
+        )
+
+    return {
+        "status": status,
+        "emoji": emoji,
+        "strength": strength,
+        "n5": n5, "n10": n10, "n20": n20,
+        "vol_text": vol_text,
+        "bb_pos_ratio": bb_pos_ratio,
+        "reading": reading,
+    }
+
+
+def _render_main_force_signal(sid: str) -> None:
+    """個股頁:主力燈號(出貨 / 吸貨判斷 + 強度條 + 解讀)。"""
+    result = _compute_main_force_signal(sid)
+    if "error" in result:
+        st.info(f"🚦 主力燈號:{result['error']}")
+        return
+
+    filled = "🟢" * result["strength"]
+    empty = "⚪" * (5 - result["strength"])
+    bar = filled + empty
+
+    st.markdown("### 🚦 主力燈號")
+    st.markdown(
+        f"**主要狀態**:{result['emoji']} **{result['status']}**\n\n"
+        f"**強度**:{bar}({result['strength']}/5)\n\n"
+        f"- 近 5 日法人合計:`{result['n5']:+,}` 張\n"
+        f"- 近 10 日法人合計:`{result['n10']:+,}` 張\n"
+        f"- 近 20 日法人合計:`{result['n20']:+,}` 張\n"
+        f"- 量價配對:{result['vol_text']}\n"
+        f"- BB 位置:`{result['bb_pos_ratio']:.0%}`(0% = 下軌, 100% = 上軌)"
+    )
+    st.info(f"💬 解讀:{result['reading']}")
 
 
 def _fmt(v: float) -> str:
