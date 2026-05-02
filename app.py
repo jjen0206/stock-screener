@@ -1104,6 +1104,7 @@ def _page_stock_query() -> None:
     _render_summary(df, kd_df, rsi14, macd_df)
     _render_institutional_table(sid)
     _render_institutional_cumulative_table(sid)
+    _render_key_levels(sid)
 
 
 def _render_summary(
@@ -1334,6 +1335,78 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
         expanded=True,
     ):
         st.table(styled)
+
+
+def _render_key_levels(sid: str) -> None:
+    """個股頁:壓力 / 回檔 / 支撐 三個關鍵價位區間。
+
+    用布林通道(BB 20, 2)為主軸 + ATR(14) × 0.5 半幅抓 buffer:
+      - 壓力區 = BB 上軌 ± 0.5 ATR(上漲遇阻)
+      - 回檔區 = BB 中軌(= MA20)± 0.5 ATR(中性整理)
+      - 支撐區 = BB 下軌 ± 0.5 ATR(下跌支撐)
+
+    需要 ≥20 天 daily_prices(BB 起算點)。獨立 SQL 撈 90 天歷史,跟個股頁
+    K 線時段解耦(K 線可能 user 選 30 天,關鍵價位仍可算)。
+    """
+    db.init_db()
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT date, open, high, low, close, volume "
+                "FROM daily_prices "
+                "WHERE stock_id=? ORDER BY date DESC LIMIT 90",
+                (sid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    if len(rows) < 20:
+        st.info(
+            f"🎯 關鍵價位:歷史不足,需 ≥20 天計算"
+            f"(目前 {len(rows)} 天)"
+        )
+        return
+
+    df = pd.DataFrame([
+        {
+            "date": r["date"], "open": r["open"], "high": r["high"],
+            "low": r["low"], "close": r["close"], "volume": r["volume"],
+        }
+        for r in rows
+    ]).sort_values("date").reset_index(drop=True)
+
+    bb = ind.bollinger(df, period=20, num_std=2.0)
+    atr_series = ind.atr(df, period=14)
+
+    bb_upper = bb["upper"].iloc[-1] if not bb.empty else None
+    bb_mid = bb["mid"].iloc[-1] if not bb.empty else None
+    bb_lower = bb["lower"].iloc[-1] if not bb.empty else None
+    atr14 = atr_series.iloc[-1] if not atr_series.empty else None
+
+    if any(v is None or pd.isna(v) for v in [bb_upper, bb_mid, bb_lower, atr14]):
+        st.info("🎯 關鍵價位:技術指標 NaN(歷史可能不足或資料異常)")
+        return
+
+    half_atr = 0.5 * atr14
+    levels = [
+        ("🔴 壓力區", "上漲遇阻", bb_upper - half_atr, bb_upper + half_atr),
+        ("🟡 回檔區", "中性整理", bb_mid - half_atr, bb_mid + half_atr),
+        ("🟢 支撐區", "下跌支撐", bb_lower - half_atr, bb_lower + half_atr),
+    ]
+
+    st.markdown("### 🎯 關鍵價位")
+    cols = st.columns(3)
+    for i, (label, hint, low, high) in enumerate(levels):
+        with cols[i]:
+            st.markdown(
+                f"**{label}**  \n"
+                f"<span style='color:#888;font-size:0.85rem'>{hint}</span>  \n"
+                f"`{low:.2f}` ~ `{high:.2f}`",
+                unsafe_allow_html=True,
+            )
+    st.caption(
+        "計算:布林通道 (20, 2) + ATR(14) × 0.5 半幅。**參考用,非預測**"
+    )
 
 
 def _fmt(v: float) -> str:

@@ -722,3 +722,80 @@ def test_cumulative_table_fallback_when_institutional_all_null(isolated_db):
         f"但見到: {[e.label for e in at.expander]}"
     )
     assert not at.table, "institutional 全 NULL 時不該渲染任何 table"
+
+
+# ============================================================================
+# 個股頁:關鍵價位(壓力 / 回檔 / 支撐)
+# ============================================================================
+
+def _seed_daily_prices_only(n_days: int, base: float = 100.0) -> None:
+    """灌 n_days 筆 daily_prices,close 在 base 附近震盪(讓 BB std > 0)。"""
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    rows = []
+    for i in range(n_days):
+        offset = (i % 5) - 2  # -2 -1 0 1 2 循環,close 震盪
+        c = base + offset
+        rows.append({
+            "stock_id": "2330", "date": f"2026-04-{1 + i:02d}",
+            "open": c - 0.5, "high": c + 0.5, "low": c - 1.0, "close": c,
+            "volume": 10000,
+        })
+    db.upsert_daily_prices(rows)
+
+
+def test_key_levels_renders_with_sufficient_history(isolated_db):
+    """灌 25 天 → 三個區間都算出來並渲染(壓力 / 回檔 / 支撐)。"""
+    _seed_daily_prices_only(n_days=25)
+
+    def _harness():
+        import app
+        app._render_key_levels("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "壓力區" in md_text, f"期望渲染壓力區, 實際 markdown={md_text!r}"
+    assert "回檔區" in md_text
+    assert "支撐區" in md_text
+    # 不該顯示 fallback info
+    assert not any(
+        "歷史不足" in str(i.value) for i in at.info
+    ), f"資料夠時不該顯示 fallback, 實際 info={[str(i.value) for i in at.info]}"
+
+
+def test_key_levels_fallback_when_history_insufficient(isolated_db):
+    """灌 15 天(< 20)→ 顯示『歷史不足』fallback,不渲染區間。"""
+    _seed_daily_prices_only(n_days=15)
+
+    def _harness():
+        import app
+        app._render_key_levels("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert any(
+        "歷史不足" in str(i.value) for i in at.info
+    ), f"預期 fallback info, 實際: {[str(i.value) for i in at.info]}"
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "壓力區" not in md_text, "歷史不足時不該渲染壓力區"
+
+
+def test_key_levels_fallback_when_no_data(isolated_db):
+    """完全沒 daily_prices(不存在的股號)→ fallback 訊息含『目前 0 天』。"""
+    def _harness():
+        import app
+        app._render_key_levels("9999")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "歷史不足" in info_text
+    assert "0 天" in info_text, f"預期 fallback 標明 0 天, 實際: {info_text!r}"
