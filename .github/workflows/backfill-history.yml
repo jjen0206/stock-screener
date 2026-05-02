@@ -135,7 +135,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
+          # 8 shard 跑期間會 push 到 main,aggregate 啟動時要拉最新 main
+          # 而不是 workflow trigger 時的舊 SHA(否則看不到 shard csv)
+          ref: main
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
