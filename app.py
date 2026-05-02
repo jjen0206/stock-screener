@@ -1217,17 +1217,23 @@ def _render_institutional_table(sid: str, days: int = 10) -> None:
             return "color: #2ca02c"
         return ""
 
-    styled = (
-        inst_df.style
-        .map(_color_pos_neg, subset=num_cols)
-        .format("{:+,}", subset=num_cols)
-    )
+    # Styler 只用 .map 染色,format 走 column_config(避開雲端 Styler.format
+    # 序列化把欄 drop 的 bug — 累計表的「漲跌幅」就是這樣消失)
+    styled = inst_df.style.map(_color_pos_neg, subset=num_cols)
 
     with st.expander(
         f"📊 三大法人買賣超(近 {len(rows)} 日,單位:張)",
         expanded=True,
     ):
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                col: st.column_config.NumberColumn(format="%+,d")
+                for col in num_cols
+            },
+        )
 
 
 def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
@@ -1294,12 +1300,14 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
     df["pct"] = df["close"].pct_change() * 100  # 第 1 筆 NaN
 
     out = df.tail(days).iloc[::-1].reset_index(drop=True)
+    # 漲跌幅第 1 列(最早一日)無前日比 → fillna(0)。tail(days) 範圍內
+    # 每天都有前日 close,fillna 對輸出實際無影響(防呆)。
     display = pd.DataFrame({
-        "日期": out["date"],
-        "5 日累計": out["cum5"],
-        "10 日累計": out["cum10"],
-        "收盤價": out["close"],
-        "漲跌幅": out["pct"],
+        "日期": out["date"].astype(str),
+        "5 日累計": out["cum5"].astype(int),
+        "10 日累計": out["cum10"].astype(int),
+        "收盤價": out["close"].astype(float),
+        "漲跌幅": out["pct"].fillna(0).astype(float),
     })
 
     def _color_pos_neg(v: float) -> str:
@@ -1307,21 +1315,31 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
             return ""
         return "color: #d62728" if v > 0 else "color: #2ca02c"
 
-    # format 用標準 string + na_rep,避免 lambda formatter 在某些 streamlit
-    # 環境 serialize 不過去把整欄 drop(雲端 DOM 看不到漲跌幅的回報)
-    styled = (
-        display.style
-        .map(_color_pos_neg, subset=["5 日累計", "10 日累計", "漲跌幅"])
-        .format("{:+,}", subset=["5 日累計", "10 日累計"])
-        .format("{:.2f}", subset=["收盤價"])
-        .format("{:+.2f}%", subset=["漲跌幅"], na_rep="—")
+    # ⚠️ 不用 Styler.format。Styler.format chained 多次(尤其含 na_rep / lambda)
+    # 在 streamlit cloud 序列化某處會把整欄 drop — 雲端 DOM 確認漲跌幅消失就是
+    # 這個 bug。改用 column_config.NumberColumn 走 streamlit-native 路徑,
+    # Styler 只保留 .map 染色職責。
+    styled = display.style.map(
+        _color_pos_neg,
+        subset=["5 日累計", "10 日累計", "漲跌幅"],
     )
 
     with st.expander(
         f"📈 主力進出累計(近 {len(display)} 日,單位:張)",
         expanded=True,
     ):
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "5 日累計": st.column_config.NumberColumn(format="%+,d"),
+                "10 日累計": st.column_config.NumberColumn(format="%+,d"),
+                "收盤價": st.column_config.NumberColumn(format="%.2f"),
+                # printf %% = 字面 %,不會 *100(streamlit 用 printf-style)
+                "漲跌幅": st.column_config.NumberColumn(format="%+.2f%%"),
+            },
+        )
 
 
 def _fmt(v: float) -> str:
