@@ -7,15 +7,26 @@
 
 流程:
   1. 列舉全市場 universe(TWSE + TPEx,~2700 檔)
-  2. 對 daily_prices 不足 N 天的個股呼叫 fetch_daily_price(via FinMind)
-  3. 對 watchlist + TW_TOP_50 補 institutional
-  4. dump daily_prices + institutional + stocks 到 data/twse_snapshot/*.csv
-  5. workflow 自動 git commit + push CSV → Streamlit Cloud git pull → 啟動時讀回
+  2. (shard 模式)依 sorted index 切成 N 份,只跑自己的 shard
+  3. 對 daily_prices 不足 N 天的個股呼叫 fetch_daily_price(via FinMind)
+  4. 對 watchlist + TW_TOP_50 補 institutional
+  5. dump 到 data/twse_snapshot/(shard 模式 → daily_prices_shard_K.csv;
+     非 shard 模式 → daily_prices.csv 整份)
+  6. workflow 自動 git commit + push CSV → Streamlit Cloud git pull → 啟動時讀回
 
 時間預估:
   - FinMind 免費 token 限 600/小時(老 token 1500),per call ~0.5 秒
   - 2700 檔 × 0.6 秒 ≈ 27 分鐘(理想)
   - 受限額時 GH Actions 會 sleep,實測 30-45 分鐘
+  - 8 shard 並發共用同一 token → 限額仍 per-token 觸發,效益主要在「跨日累積」+
+    long-backoff 等限額窗口 reset,不是線性 8 倍速
+
+Shard 模式(--shard K --total-shards N):
+  - universe 排序後均勻切 N 份(`sorted_uni[K::N]`)
+  - 只跑自己 shard 的 stock_id
+  - 只 dump 自己 shard 的成果(daily_prices_shard_K.csv 等);stocks.csv /
+    watchlist.csv 由後續 aggregate_shards.py 統一處理
+  - last_backfill_shard_K.txt 含 shard 統計
 
 Exit code:
   0 = 至少 50% 成功
@@ -44,6 +55,18 @@ from src.data_fetcher import (  # noqa: E402
 from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
+
+
+def _shard_filter(
+    universe: list[str], shard: int, total_shards: int,
+) -> list[str]:
+    """穩定均勻切片:sorted(universe)[shard::total_shards]。
+
+    - 排序穩定,跨 run 切片一致
+    - stride 切法保留 stock_id 在 universe 內的相對分布(避免某 shard 全是熱門股)
+    - 不依賴 hash(stock_id),不受 PYTHONHASHSEED 影響
+    """
+    return sorted(universe)[shard::total_shards]
 
 
 def _preload_watchlist_csv() -> None:
@@ -84,6 +107,10 @@ def _preload_daily_prices_csv() -> None:
     解決 cross-run checkpoint 失效:GH Actions runner 每次都是新的空 SQLite,
     若不先把上一輪 commit 進 repo 的 CSV 讀回,existing_counts 會永遠 0、
     --min-existing 過濾失效,導致每次都全市場 todo 全跑。
+
+    Shard 模式下也讀整份 daily_prices.csv(包含其他 shard 上次 commit 的成果),
+    讓 min_existing 跨 shard 共享 — 自己 shard 的 todo 才不會被別 shard 的成果
+    重複跑。
     """
     path = SNAPSHOT_DIR / "daily_prices.csv"
     if not path.exists():
@@ -161,13 +188,42 @@ def main() -> int:
         "--no-institutional", action="store_true",
         help="跳過 institutional(只補 daily_prices,加速)",
     )
+    p.add_argument(
+        "--shard", type=int, default=None,
+        help="此 process 負責的 shard 編號(0-based,搭配 --total-shards 用)",
+    )
+    p.add_argument(
+        "--total-shards", type=int, default=None,
+        help="universe 切成幾片並發跑(搭配 --shard 用)",
+    )
     args = p.parse_args()
+
+    # 驗證 shard 參數
+    shard_mode = args.shard is not None or args.total_shards is not None
+    if shard_mode:
+        if args.shard is None or args.total_shards is None:
+            print(
+                "❌ --shard 跟 --total-shards 必須同時指定",
+                flush=True,
+            )
+            return 2
+        if not (0 <= args.shard < args.total_shards):
+            print(
+                f"❌ --shard {args.shard} 必須在 [0, {args.total_shards}) 範圍內",
+                flush=True,
+            )
+            return 2
+        if args.total_shards < 1:
+            print("❌ --total-shards 必須 >= 1", flush=True)
+            return 2
 
     db.init_db()
     # Preload 既有 CSV → SQLite(GH runner cache.db 是空的,不 preload 的話:
     #   1. watchlist:最後 dump 會 clobber repo 既有 watchlist.csv
     #   2. daily_prices / institutional:existing_counts 永遠 0,--min-existing
     #      checkpoint 失效,每次跑都全市場 todo 全跑、累積 1167 → 永遠跑不滿
+    # Shard 模式:照樣 preload 整份 — 跨 shard 共享 checkpoint,自己 shard 的 todo
+    # 才會把別 shard 上次跑出的成果視為「已有」,避免重複工。
     _preload_watchlist_csv()
     _preload_daily_prices_csv()
     _preload_institutional_csv()
@@ -175,6 +231,15 @@ def main() -> int:
     if not universe:
         print("[BACKFILL] universe 為空 — 先跑 daily_fetch.py 初始化")
         return 1
+
+    if shard_mode:
+        full_n = len(universe)
+        universe = _shard_filter(universe, args.shard, args.total_shards)
+        print(
+            f"[BACKFILL] shard {args.shard}/{args.total_shards}: "
+            f"{len(universe)} / {full_n} 檔",
+            flush=True,
+        )
 
     # 抓既有歷史天數,過濾出待補清單
     with db.get_conn() as conn:
@@ -199,9 +264,13 @@ def main() -> int:
     )
 
     # 法人只補 watchlist + TW_TOP_50(不是全市場 — 受 token 限額,白費)
+    # Shard 模式:只補「自己 shard 內 ∩ (TW_TOP_50 ∪ watchlist)」,避免 8 個 shard
+    # 都對同 50+ 檔抓 institutional 重複工
     inst_target_set = set(s for s, _ in TW_TOP_50)
     for s, _ in load_watchlist():
         inst_target_set.add(s)
+    if shard_mode:
+        inst_target_set &= set(universe)
 
     n = len(todo)
     ok_price = ok_inst = fail_price = fail_inst = 0
@@ -242,53 +311,37 @@ def main() -> int:
             )
 
     elapsed = time.time() - t0
+    shard_label = (
+        f"shard {args.shard}/{args.total_shards} " if shard_mode else ""
+    )
     print(
-        f"[BACKFILL DONE] 共 {n} 檔,price ok={ok_price} fail={fail_price},"
+        f"[BACKFILL DONE] {shard_label}共 {n} 檔,"
+        f"price ok={ok_price} fail={fail_price},"
         f"inst ok={ok_inst} fail={fail_inst},耗時 {elapsed/60:.1f} 分鐘",
         flush=True,
     )
 
-    # === Dump CSV → snapshot 給 Streamlit Cloud 讀 ===
+    # === Dump CSV → snapshot 給 Streamlit Cloud / aggregator 讀 ===
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    with db.get_conn() as conn:
-        # daily_prices
-        df = pd.read_sql(
-            "SELECT * FROM daily_prices ORDER BY stock_id, date", conn,
-        )
-        path = SNAPSHOT_DIR / "daily_prices.csv"
-        df.to_csv(path, index=False)
-        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
 
-        # institutional
-        df = pd.read_sql(
-            "SELECT * FROM institutional ORDER BY stock_id, date", conn,
-        )
-        path = SNAPSHOT_DIR / "institutional.csv"
-        df.to_csv(path, index=False)
-        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+    if shard_mode:
+        _dump_shard_csvs(args.shard, todo)
+    else:
+        _dump_full_csvs()
 
-        # stocks(name + industry)— 順手更新讓雲端有完整名稱
-        df = pd.read_sql(
-            "SELECT stock_id, name, industry FROM stocks "
-            "WHERE market='TW' ORDER BY stock_id",
-            conn,
-        )
-        path = SNAPSHOT_DIR / "stocks.csv"
-        df.to_csv(path, index=False)
-        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
-
-    # watchlist(用 db.get_watchlist 拉,而非 raw SQL,保 schema 對齊)
-    wl_n = _dump_watchlist_csv()
-    if wl_n:
-        print(f"[BACKFILL] 寫 watchlist.csv: {wl_n} 行", flush=True)
-
-    # 寫 backfill 專用 timestamp(跟 weekly_market_update 的 last_update.txt 分開)
+    # 寫 backfill 專用 timestamp(shard 模式有自己 suffix)
     import os
     from datetime import datetime, timezone
-    (SNAPSHOT_DIR / "last_backfill.txt").write_text(
+    last_name = (
+        f"last_backfill_shard_{args.shard}.txt"
+        if shard_mode else "last_backfill.txt"
+    )
+    (SNAPSHOT_DIR / last_name).write_text(
         f"backfilled_at={datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
         f"git_sha={os.environ.get('GITHUB_SHA', 'local')}\n"
         f"run_id={os.environ.get('GITHUB_RUN_ID', 'local')}\n"
+        f"shard={args.shard if shard_mode else 'none'}\n"
+        f"total_shards={args.total_shards if shard_mode else 'none'}\n"
         f"days_requested={args.days}\n"
         f"todo={n}\n"
         f"price_ok={ok_price}\n"
@@ -298,7 +351,7 @@ def main() -> int:
         f"elapsed_min={elapsed/60:.1f}\n",
         encoding="utf-8",
     )
-    print("[BACKFILL] 寫 last_backfill.txt", flush=True)
+    print(f"[BACKFILL] 寫 {last_name}", flush=True)
 
     # 退出邏輯三段:
     # - >= 50%:正常完成
@@ -321,6 +374,96 @@ def main() -> int:
             flush=True,
         )
     return 0
+
+
+def _dump_full_csvs() -> None:
+    """非 shard 模式:dump 整份 daily_prices.csv / institutional.csv /
+    stocks.csv / watchlist.csv(原行為,保留 backward compatible)。
+    """
+    with db.get_conn() as conn:
+        df = pd.read_sql(
+            "SELECT * FROM daily_prices ORDER BY stock_id, date", conn,
+        )
+        path = SNAPSHOT_DIR / "daily_prices.csv"
+        df.to_csv(path, index=False)
+        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+
+        df = pd.read_sql(
+            "SELECT * FROM institutional ORDER BY stock_id, date", conn,
+        )
+        path = SNAPSHOT_DIR / "institutional.csv"
+        df.to_csv(path, index=False)
+        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+
+        df = pd.read_sql(
+            "SELECT stock_id, name, industry FROM stocks "
+            "WHERE market='TW' ORDER BY stock_id",
+            conn,
+        )
+        path = SNAPSHOT_DIR / "stocks.csv"
+        df.to_csv(path, index=False)
+        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+
+    wl_n = _dump_watchlist_csv()
+    if wl_n:
+        print(f"[BACKFILL] 寫 watchlist.csv: {wl_n} 行", flush=True)
+
+
+def _dump_shard_csvs(shard: int, todo_ids: list[str]) -> None:
+    """Shard 模式:只 dump 此 shard 自己的 daily_prices_shard_K.csv /
+    institutional_shard_K.csv。
+
+    篩選邏輯:只 dump 「在 todo_ids 內」的個股 — 即此 shard 嘗試抓的個股。
+    別的 shard preload 進來的資料不要 dump 出來(否則 aggregate 階段會看到
+    8 份重複的同份 daily_prices.csv 內容)。
+
+    aggregator 之後讀 8 個 shard csv + 既有 daily_prices.csv → merge → 產整份。
+    stocks.csv / watchlist.csv 由 aggregator 統一處理(避免 8 個 shard 並發寫衝突)。
+    """
+    if not todo_ids:
+        # 此 shard 沒有 todo(全部 checkpoint 命中)→ 寫空 csv 仍 OK,
+        # 讓 aggregate 邏輯一致(永遠有 8 個 shard csv 可讀)
+        empty = pd.DataFrame(
+            columns=[
+                "stock_id", "date", "open", "high", "low", "close",
+                "volume", "trading_money", "trading_turnover", "spread",
+            ],
+        )
+        empty.to_csv(SNAPSHOT_DIR / f"daily_prices_shard_{shard}.csv", index=False)
+        empty_inst = pd.DataFrame(
+            columns=[
+                "stock_id", "date", "foreign_buy_sell", "trust_buy_sell",
+                "dealer_buy_sell", "total_buy_sell",
+            ],
+        )
+        empty_inst.to_csv(
+            SNAPSHOT_DIR / f"institutional_shard_{shard}.csv", index=False,
+        )
+        print(
+            f"[BACKFILL] shard {shard}: 無待補,寫空 shard csv",
+            flush=True,
+        )
+        return
+
+    placeholders = ",".join(["?"] * len(todo_ids))
+    with db.get_conn() as conn:
+        df = pd.read_sql(
+            f"SELECT * FROM daily_prices WHERE stock_id IN ({placeholders}) "
+            f"ORDER BY stock_id, date",
+            conn, params=todo_ids,
+        )
+        path = SNAPSHOT_DIR / f"daily_prices_shard_{shard}.csv"
+        df.to_csv(path, index=False)
+        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
+
+        df = pd.read_sql(
+            f"SELECT * FROM institutional WHERE stock_id IN ({placeholders}) "
+            f"ORDER BY stock_id, date",
+            conn, params=todo_ids,
+        )
+        path = SNAPSHOT_DIR / f"institutional_shard_{shard}.csv"
+        df.to_csv(path, index=False)
+        print(f"[BACKFILL] 寫 {path.name}: {len(df)} 行", flush=True)
 
 
 if __name__ == "__main__":

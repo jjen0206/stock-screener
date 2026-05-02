@@ -269,6 +269,199 @@ def test_main_skips_preloaded_stocks_via_csv(tmp_setup, monkeypatch):
     assert fetch_calls == ["2454"]
 
 
+# === Shard 模式 ===
+
+
+def test_shard_filter_distributes_evenly():
+    """sorted(universe)[shard::total_shards] 該均勻分桶。"""
+    universe = [f"S{i:04d}" for i in range(80)]
+    buckets = [
+        backfill._shard_filter(universe, k, 8) for k in range(8)
+    ]
+    # 每個 shard 各 10 檔
+    for b in buckets:
+        assert len(b) == 10
+    # 8 shard 加總 = 完整 universe
+    all_seen = sorted(s for b in buckets for s in b)
+    assert all_seen == sorted(universe)
+    # 不重複
+    seen_set = set()
+    for b in buckets:
+        for s in b:
+            assert s not in seen_set, f"{s} 重複"
+            seen_set.add(s)
+
+
+def test_shard_filter_uneven_division():
+    """universe 不能整除時,前幾個 shard 多 1 檔。"""
+    universe = [f"S{i:03d}" for i in range(10)]  # 10 檔切 3 shard
+    b0 = backfill._shard_filter(universe, 0, 3)
+    b1 = backfill._shard_filter(universe, 1, 3)
+    b2 = backfill._shard_filter(universe, 2, 3)
+    assert len(b0) + len(b1) + len(b2) == 10
+    # stride=3:S000,S003,S006,S009 / S001,S004,S007 / S002,S005,S008
+    assert b0 == ["S000", "S003", "S006", "S009"]
+    assert b1 == ["S001", "S004", "S007"]
+    assert b2 == ["S002", "S005", "S008"]
+
+
+def test_shard_mode_only_processes_own_shard(tmp_setup, monkeypatch):
+    """--shard 1 --total-shards 4 → 只跑自己 shard 內的個股。"""
+    sids = [f"S{i:03d}" for i in range(8)]  # 8 檔
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"} for s in sids
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: sids)
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        backfill, "fetch_daily_price",
+        lambda sid, s, e: fetched.append(sid),
+    )
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "backfill_history.py",
+            "--days", "10",
+            "--min-existing", "1",  # 全當待補(空 DB → existing=0 < 1)
+            "--shard", "1",
+            "--total-shards", "4",
+            "--no-institutional",
+        ],
+    )
+
+    code = backfill.main()
+    assert code == 0
+    # sorted(sids)[1::4] = S001, S005
+    assert fetched == ["S001", "S005"]
+
+
+def test_shard_mode_dumps_shard_csv_only(tmp_setup, monkeypatch):
+    """shard 模式只寫 daily_prices_shard_K.csv,不寫 daily_prices.csv 整份。"""
+    sids = ["S000", "S001", "S002", "S003"]
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"} for s in sids
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: sids)
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+
+    def fake_fetch_price(sid, s, e):
+        db.upsert_daily_prices([{
+            "stock_id": sid, "date": "2026-04-28",
+            "open": 100, "high": 101, "low": 99, "close": 100,
+            "volume": 1000, "trading_money": None,
+            "trading_turnover": None, "spread": 0.0,
+        }])
+
+    monkeypatch.setattr(backfill, "fetch_daily_price", fake_fetch_price)
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "backfill_history.py",
+            "--days", "10",
+            "--min-existing", "1",
+            "--shard", "0",
+            "--total-shards", "2",
+            "--no-institutional",
+        ],
+    )
+
+    code = backfill.main()
+    assert code == 0
+    snapshot = tmp_setup / "twse_snapshot"
+    # shard 模式 → 該寫 daily_prices_shard_0.csv 跟 last_backfill_shard_0.txt
+    assert (snapshot / "daily_prices_shard_0.csv").exists()
+    assert (snapshot / "institutional_shard_0.csv").exists()
+    assert (snapshot / "last_backfill_shard_0.txt").exists()
+    # 不該寫整份 daily_prices.csv / stocks.csv / watchlist.csv(由 aggregator 處理)
+    assert not (snapshot / "daily_prices.csv").exists()
+    assert not (snapshot / "stocks.csv").exists()
+    assert not (snapshot / "last_backfill.txt").exists()
+    # shard csv 只該含此 shard 的個股(S000, S002)— 不含 S001, S003
+    df = pd.read_csv(
+        snapshot / "daily_prices_shard_0.csv", dtype={"stock_id": str},
+    )
+    assert sorted(df["stock_id"].unique().tolist()) == ["S000", "S002"]
+
+
+def test_shard_mode_validates_shard_args(tmp_setup, monkeypatch):
+    """只給 --shard 沒給 --total-shards 該 exit 2。"""
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: ["S000"])
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_history.py", "--days", "10", "--shard", "0"],
+    )
+    code = backfill.main()
+    assert code == 2
+
+
+def test_shard_mode_rejects_out_of_range_shard(tmp_setup, monkeypatch):
+    """--shard 5 --total-shards 4 該 exit 2。"""
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: ["S000"])
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "backfill_history.py", "--days", "10",
+            "--shard", "5", "--total-shards", "4",
+        ],
+    )
+    code = backfill.main()
+    assert code == 2
+
+
+def test_shard_mode_writes_empty_csvs_when_nothing_to_do(tmp_setup, monkeypatch):
+    """shard 內沒待補(全 checkpoint 命中)時,仍寫空 shard csv 讓 aggregator 一致。"""
+    sids = ["S000", "S001"]
+    db.upsert_stocks([
+        {"stock_id": s, "name": "X", "market": "TW"} for s in sids
+    ])
+    # 預灌 S000 滿足 min-existing
+    db.upsert_daily_prices([
+        {"stock_id": "S000", "date": f"2026-01-{i:02d}",
+         "open": 100, "high": 105, "low": 95, "close": 100, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": 0.0}
+        for i in range(1, 35)
+    ])
+    monkeypatch.setattr(backfill, "get_full_universe", lambda: sids)
+    monkeypatch.setattr(backfill, "TW_TOP_50", [])
+    monkeypatch.setattr(backfill, "load_watchlist", lambda: [])
+    monkeypatch.setattr(backfill, "fetch_daily_price", lambda *a: None)
+    monkeypatch.setattr(backfill, "fetch_institutional", lambda *a: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "backfill_history.py",
+            "--days", "10",
+            "--min-existing", "30",
+            "--shard", "0",  # 只跑 S000(已滿)
+            "--total-shards", "2",
+            "--no-institutional",
+        ],
+    )
+
+    code = backfill.main()
+    assert code == 0
+    snapshot = tmp_setup / "twse_snapshot"
+    # 仍該有 shard csv(空)
+    assert (snapshot / "daily_prices_shard_0.csv").exists()
+    df = pd.read_csv(
+        snapshot / "daily_prices_shard_0.csv", dtype={"stock_id": str},
+    )
+    assert df.empty
+
+
+# === 原有測試延續 ===
+
+
 def test_backfill_returns_zero_when_partial_success(tmp_setup, monkeypatch):
     """成功率 10-50% 偏低但仍 commit(避免「1305 檔成果被丟」的 bug)。"""
     sids = [f"S{i:02d}" for i in range(10)]

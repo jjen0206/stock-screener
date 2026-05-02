@@ -4,7 +4,13 @@ name: Backfill 90-day history
 # 因 TWSE bulk endpoint 每天只回 1 筆,新部署 cache 必然歷史不足;
 # 在 GH Actions 跑 FinMind per-stock(避開 Streamlit Cloud IP 被擋),
 # dump 成 CSV commit 進 repo,Cloud 啟動時讀進 SQLite。
-# 預估 30-45 分鐘(視 FinMind token 限額)。
+#
+# 架構(2026-05 改):8-way matrix shard + 1 個 aggregator job
+#   - backfill (matrix shard 0-7):各 shard 並發跑自己 ~340 檔,dump shard CSV
+#   - aggregate (needs: backfill):合 8 個 shard CSV 成 daily_prices.csv,清 shard 檔
+#   - 並發加速僅針對「IP 限額」維度(token 限額仍 per-token 共用),長期效益主要靠
+#     「跨日累積 + min_existing checkpoint + long-backoff 等限額窗口 reset」
+#   - FINMIND_LONG_BACKOFF=1 把 retry 從 3 次 1s/2s/4s 改 6 次 60s/120s/300s/600s/900s
 on:
   workflow_dispatch:
     inputs:
@@ -17,7 +23,7 @@ on:
         required: false
         default: "30"
       limit:
-        description: "只跑前 N 檔 (debug 用,留空 = 全跑)"
+        description: "每個 shard 只跑前 N 檔 (debug 用,留空 = 全跑)"
         required: false
         default: ""
       no_institutional:
@@ -33,15 +39,24 @@ concurrency:
 
 jobs:
   backfill:
+    name: "shard ${{ matrix.shard }}/8"
     runs-on: ubuntu-latest
-    # FinMind 免費 token 限額 600/hr,2700 檔 daily_price 至少需 4.5 小時。
-    # 設 350 分鐘(GH Actions 免費上限 360),留 10 分緩衝給 commit + push。
+    # 8 shard 各跑 ~340 檔,理想 < 30 分鐘;受限額時可能 1-2 小時。
+    # 設 350 分鐘留足夠緩衝。fail-fast 關掉:任一 shard 失敗其他繼續。
     timeout-minutes: 350
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          # 拉滿避免 rebase 時找不到 base
+          fetch-depth: 0
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -58,11 +73,14 @@ jobs:
         run: python scripts/daily_fetch.py
         continue-on-error: true
 
-      - name: Run backfill
+      - name: Run backfill (shard ${{ matrix.shard }}/8)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          # 長 backoff:被 token 限額擋時等限額窗口 reset(60s → 900s)
+          FINMIND_LONG_BACKOFF: "1"
         run: |
-          ARGS="--days ${{ inputs.days }} --min-existing ${{ inputs.min_existing }}"
+          ARGS="--shard ${{ matrix.shard }} --total-shards 8"
+          ARGS="$ARGS --days ${{ inputs.days }} --min-existing ${{ inputs.min_existing }}"
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
           fi
@@ -72,35 +90,94 @@ jobs:
           echo "Running: python scripts/backfill_history.py $ARGS"
           python scripts/backfill_history.py $ARGS
 
-      - name: Commit & push snapshot CSVs
-        # 即使 backfill exit 非 0(成功率 < 10% 邊界 case)也仍 commit 已產生的 CSV
-        # 避免「跑了 2 小時、1305 檔成果被 runner 清掉」的悲劇
+      - name: Commit & push shard CSV
+        # 即使 backfill exit 非 0(成功率 < 10% 邊界 case)也 commit 已產生的 shard CSV。
+        # 8 shard 並發推同一 branch,要用 rebase + retry(同 1b22147 既有邏輯)。
         if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/twse_snapshot/
+          # 只 add 自己 shard 的檔(避免誤推其他 shard 在跑時暫存的東西)
+          git add data/twse_snapshot/daily_prices_shard_${{ matrix.shard }}.csv \
+                  data/twse_snapshot/institutional_shard_${{ matrix.shard }}.csv \
+                  data/twse_snapshot/last_backfill_shard_${{ matrix.shard }}.txt 2>/dev/null || true
           if git diff --staged --quiet; then
-            echo "No changes to snapshot CSVs"
+            echo "No changes to shard ${{ matrix.shard }} CSV"
             exit 0
           fi
-          git commit -m "chore(snapshot): backfill 90-day history [skip ci]"
-          # 4-5 小時 backfill 期間 main 可能已被別的 workflow / 人推過(weekly /
-          # daily_notify / 手動 push)。直接 push 會被 reject、整批成果丟掉。
-          # 改成 pull --rebase 再 push:重試最多 5 次涵蓋連續推進場景。失敗就 fail
-          # 整個 step(永遠不要 force,會把別人的 commit 蓋掉)。
-          for i in 1 2 3 4 5; do
+          git commit -m "chore(snapshot): backfill shard ${{ matrix.shard }}/8 [skip ci]"
+          # 8 shard 並發推 main → 必然會 race。rebase + retry,最多 10 次。
+          for i in 1 2 3 4 5 6 7 8 9 10; do
             git pull --rebase origin main || {
               echo "rebase failed (likely conflict in snapshot CSV) — abort and bail"
               git rebase --abort || true
               exit 1
             }
             if git push origin HEAD:main; then
-              echo "push succeeded on attempt $i"
+              echo "shard ${{ matrix.shard }} push OK on attempt $i"
               exit 0
             fi
-            echo "push rejected (attempt $i),  pulling again and retrying"
+            echo "push rejected (attempt $i), pulling again and retrying"
             sleep $((i * 5))
           done
-          echo "push failed after 5 retries"
+          echo "shard ${{ matrix.shard }} push failed after 10 retries"
+          exit 1
+
+  aggregate:
+    name: aggregate shards
+    needs: backfill
+    if: always()  # 任一 shard 失敗也仍跑 aggregate(其他 7 shard 的成果不要丟)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Init universe (給 aggregator 的 stocks 表填 name/industry)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+        continue-on-error: true
+
+      - name: Aggregate shard CSVs
+        run: python scripts/aggregate_shards.py --total-shards 8
+
+      - name: Commit & push aggregated snapshot
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/
+          if git diff --staged --quiet; then
+            echo "No changes to aggregated snapshot"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): backfill aggregated 8-shard [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "aggregate push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "aggregate push failed after 5 retries"
           exit 1
