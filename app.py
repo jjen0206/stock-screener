@@ -1264,6 +1264,18 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
         )
         return
 
+    # daily_prices 有但 institutional 全 NULL(LEFT JOIN 留空)→ 走 fallback,
+    # 不要渲染累計全 0 的誤導表格(例:01002T 等覆蓋率不足的個股)
+    if all(
+        r["f"] is None and r["t"] is None and r["d"] is None
+        for r in rows
+    ):
+        st.info(
+            "🔍 此股近期無主力進出累計資料。"
+            "(覆蓋率有限,主要是高市值 / 關注清單個股)"
+        )
+        return
+
     df = pd.DataFrame([
         {
             "date": r["date"],
@@ -1295,15 +1307,14 @@ def _render_institutional_cumulative_table(sid: str, days: int = 10) -> None:
             return ""
         return "color: #d62728" if v > 0 else "color: #2ca02c"
 
+    # format 用標準 string + na_rep,避免 lambda formatter 在某些 streamlit
+    # 環境 serialize 不過去把整欄 drop(雲端 DOM 看不到漲跌幅的回報)
     styled = (
         display.style
         .map(_color_pos_neg, subset=["5 日累計", "10 日累計", "漲跌幅"])
         .format("{:+,}", subset=["5 日累計", "10 日累計"])
         .format("{:.2f}", subset=["收盤價"])
-        .format(
-            lambda v: "—" if pd.isna(v) else f"{v:+.2f}%",
-            subset=["漲跌幅"],
-        )
+        .format("{:+.2f}%", subset=["漲跌幅"], na_rep="—")
     )
 
     with st.expander(

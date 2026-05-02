@@ -686,9 +686,9 @@ def test_cumulative_table_fallback_when_no_prices(isolated_db):
     assert not at.expander
 
 
-def test_cumulative_table_handles_missing_institutional(isolated_db):
-    """daily_prices 有但 institutional 完全沒(LEFT JOIN 留下 NULL)
-    → 仍可渲染,inst_total 全 0、累計欄全 0。
+def test_cumulative_table_fallback_when_institutional_all_null(isolated_db):
+    """daily_prices 有但 institutional 完全沒(LEFT JOIN 三欄全 NULL)
+    → 走 fallback,**不渲染**累計全 0 的誤導表格(例:01002T 等覆蓋不足個股)。
     """
     from src import database as db
 
@@ -711,8 +711,11 @@ def test_cumulative_table_handles_missing_institutional(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    cum_df = _read_cum_df(at)
-    assert (cum_df["5 日累計"] == 0).all(), (
-        f"無 institutional 時 5 日累計應全 0, 實際: {cum_df['5 日累計'].tolist()}"
+    assert any(
+        "無主力進出累計資料" in str(i.value) for i in at.info
+    ), f"預期 fallback info, 實際: {[str(i.value) for i in at.info]}"
+    assert not at.expander, (
+        f"institutional 全 NULL 時不該渲染累計表 expander, "
+        f"但見到: {[e.label for e in at.expander]}"
     )
-    assert (cum_df["10 日累計"] == 0).all()
+    assert not at.dataframe, "institutional 全 NULL 時不該渲染任何 dataframe"
