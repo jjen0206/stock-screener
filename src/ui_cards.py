@@ -131,21 +131,20 @@ def render_pick_card(
                 args=(sid,),
             )
 
-            # 詳細分析 expander(只給推薦卡 = show_add_button=True 的場景;
-            # watchlist 頁 show_add_button=False 不出現)。
-            # 預設收合,點開才執行 4 個 helper → 不影響清單初次渲染速度。
-            # 4 個 section 跟個股頁同一份 helper,展開後數值跟個股頁一致。
-            with st.expander("📊 詳細分析", expanded=False):
-                from src.individual_sections import (
-                    _render_action_suggestion,
-                    _render_key_levels,
-                    _render_main_force_signal,
-                    _render_technical_summary,
-                )
-                _render_main_force_signal(sid)
-                _render_technical_summary(sid)
-                _render_key_levels(sid)
-                _render_action_suggestion(sid)
+        # 詳細分析 expander(無條件顯示 — 推薦卡 / watchlist 卡都有)
+        # 預設收合,點開才執行 4 個 helper → 不影響清單初次渲染速度。
+        # 4 個 section 跟個股頁同一份 helper,展開後數值跟個股頁一致。
+        with st.expander("📊 詳細分析", expanded=False):
+            from src.individual_sections import (
+                _render_action_suggestion,
+                _render_key_levels,
+                _render_main_force_signal,
+                _render_technical_summary,
+            )
+            _render_main_force_signal(sid)
+            _render_technical_summary(sid)
+            _render_key_levels(sid)
+            _render_action_suggestion(sid)
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:

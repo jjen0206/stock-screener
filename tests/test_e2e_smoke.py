@@ -1361,8 +1361,10 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
     assert "操作建議" in md_text
 
 
-def test_pick_card_no_expander_when_not_recommend(isolated_db):
-    """show_add_button=False(watchlist 等)→ 不渲染詳細分析 expander。"""
+def test_pick_card_expander_renders_for_watchlist(isolated_db):
+    """show_add_button=False(watchlist 卡)也應該渲染詳細分析 expander。
+    watchlist 不渲染 ☆ 按鈕(已關注不需再加),但 4 個 section 一樣有用。
+    """
     _seed_distribution_scenario()
 
     def _harness():
@@ -1372,12 +1374,20 @@ def test_pick_card_no_expander_when_not_recommend(isolated_db):
             show_add_button=False,
         )
 
-    at = AppTest.from_function(_harness, default_timeout=10)
+    at = AppTest.from_function(_harness, default_timeout=15)
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    assert not any(
+    # watchlist 卡也有 expander
+    assert any(
         "詳細分析" in (e.label or "") for e in at.expander
-    ), "watchlist 卡片不該有詳細分析 expander"
+    ), f"watchlist 卡也應有 expander, 實際: {[e.label for e in at.expander]}"
     md_text = "\n".join(m.value for m in at.markdown)
-    assert "主力燈號" not in md_text
+    assert "主力燈號" in md_text
+    assert "操作建議" in md_text
+
+    # 但不該有 ☆ 加入按鈕(show_add_button=False)
+    btn_labels = [b.label for b in at.button]
+    assert not any(
+        "加入關注" in (lbl or "") for lbl in btn_labels
+    ), f"watchlist 卡不該有「加入關注」按鈕, 實際 buttons: {btn_labels}"
