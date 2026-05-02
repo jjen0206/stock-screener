@@ -164,7 +164,8 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/twse_snapshot/
+          # -A 才會 stage cleanup_shard_files() 的 unlink(預設 git add 不 stage deletion)
+          git add -A data/twse_snapshot/
           if git diff --staged --quiet; then
             echo "No changes to aggregated snapshot"
             exit 0
