@@ -579,14 +579,21 @@ def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
     """
     model = _get_ml_model()
     if model is None:
-        return "🎯 —"  # _get_ml_model 已印過原因
+        # _get_ml_model 自己已印過 root cause(只印一次),這裡每 sid 印一次
+        # 提示 fallback 原因,確保 logs 看得到「為何此 sid 沒 AI」
+        _ai_log_once(
+            sid, "no_model",
+            f"[ML] {sid} fallback「🎯 —」: model is None"
+            "(見上方 _get_ml_model 印的 root cause)",
+        )
+        return "🎯 —"
     try:
         if target_date is None:
             target_date = db.get_latest_trading_date()
         if target_date is None:
             _ai_log_once(
                 sid, "no_latest_date",
-                f"[ML] {sid} predict skip: 無 latest_trading_date"
+                f"[ML] {sid} fallback「🎯 —」: 無 latest_trading_date"
                 "(daily_prices 空)",
             )
             return "🎯 —"
@@ -606,13 +613,23 @@ def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
                         f":{type(e).__name__}: {e}",
                         flush=True,
                     )
+            _ai_log_once(
+                sid, f"prob_none@{target_date}",
+                f"[ML] {sid}@{target_date} fallback「🎯 —」: prob is None",
+            )
             return "🎯 —"
+        # SUCCESS log:確認真的有預測成功 + 印出機率值
+        _ai_log_once(
+            sid, f"ok@{target_date}",
+            f"[ML] {sid}@{target_date} predict OK prob={prob:.3f}"
+            f" → 「🎯 AI 勝率 {prob * 100:.0f}%」",
+        )
         return f"🎯 AI 勝率 {prob * 100:.0f}%"
     except Exception as e:  # noqa: BLE001
         _ai_log_once(
             sid, f"exc@{target_date}",
-            f"[ML] {sid}@{target_date} predict exception:"
-            f"{type(e).__name__}: {e}",
+            f"[ML] {sid}@{target_date} fallback「🎯 —」: predict exception"
+            f" {type(e).__name__}: {e}",
         )
         return "🎯 —"
 
