@@ -49,6 +49,8 @@ from src.screener_short import DEFAULT_SHORT_PARAMS
 from src.ui_cards import render_picks_cards, view_mode_toggle
 from src.strategies import (
     DEFAULT_BIAS_PARAMS,
+    DEFAULT_INST_CONSENSUS_PARAMS,
+    DEFAULT_SQUEEZE_PARAMS,
     STRATEGY_LABELS,
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
@@ -538,7 +540,85 @@ _SHORT_PARAM_DEFAULTS: dict[str, float | int] = {
     "short_bias_low": float(DEFAULT_BIAS_PARAMS["bias_low"]),
     "short_bias_high": float(DEFAULT_BIAS_PARAMS["bias_high"]),
     "short_vol_ratio": float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]),
+    # commit 2 新增 2 個 sliders(避開 vol_ratio_min namespace 衝突,只暴露各
+    # 策略獨有 threshold;MACD 黃金沒可調 threshold 不暴露)
+    "short_squeeze_pct_max": float(DEFAULT_SQUEEZE_PARAMS["squeeze_pct_max"]),
+    "short_consensus_days": int(DEFAULT_INST_CONSENSUS_PARAMS["consecutive_days"]),
 }
+
+
+# 策略 → 分類(5 tabs 用)。同一策略只屬一類。
+# - 趨勢:多頭排列、MACD 黃金交叉、均線糾結突破(都是趨勢延續/啟動類訊號)
+# - 反轉:乖離收斂(超賣後修正)
+# - 籌碼:三大法人連買
+# - 動能:量價KD(量能 + KD 動能)
+_STRATEGY_CATEGORY: dict[str, str] = {
+    "volume_kd": "動能",
+    "ma_alignment": "趨勢",
+    "bias_convergence": "反轉",
+    "macd_golden": "趨勢",
+    "ma_squeeze_breakout": "趨勢",
+    "inst_consensus": "籌碼",
+}
+
+
+# 5 tabs 顏色(CSS injection 用)
+_TAB_COLORS: dict[str, str] = {
+    "全部": "#888888",
+    "趨勢": "#185FA5",
+    "反轉": "#1D9E75",
+    "籌碼": "#7F77DD",
+    "動能": "#BA7517",
+}
+
+
+def _filter_agg_by_category(
+    agg: dict[str, dict], category: str,
+) -> dict[str, dict]:
+    """從 agg(run_all_strategies 結果)挑出至少有一個策略屬於 category 的 picks。
+    回傳同 schema 的新 dict — 直接餵給 aggregated_to_dataframe。
+    """
+    out: dict[str, dict] = {}
+    for sid, info in agg.items():
+        keys = info.get("details", {}).keys()
+        if any(_STRATEGY_CATEGORY.get(k) == category for k in keys):
+            out[sid] = info
+    return out
+
+
+def _inject_short_tab_css() -> None:
+    """注入短線頁 5 tabs 的顏色 CSS — 「選中」tab 的下方底線吃顏色,
+    讓使用者用顏色快速辨認當前在哪一類策略 tab 上。
+    Streamlit 的 tab nth-child:第 1=全部 / 2=趨勢 / 3=反轉 / 4=籌碼 / 5=動能。
+    用 :has(aria-selected="true") 鎖選中狀態,沒選中保持 streamlit 預設灰。
+    """
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stTabs"] button[role="tab"]:nth-child(1)[aria-selected="true"] {
+            color: #888888 !important;
+            border-bottom: 3px solid #888888 !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:nth-child(2)[aria-selected="true"] {
+            color: #185FA5 !important;
+            border-bottom: 3px solid #185FA5 !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:nth-child(3)[aria-selected="true"] {
+            color: #1D9E75 !important;
+            border-bottom: 3px solid #1D9E75 !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:nth-child(4)[aria-selected="true"] {
+            color: #7F77DD !important;
+            border-bottom: 3px solid #7F77DD !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:nth-child(5)[aria-selected="true"] {
+            color: #BA7517 !important;
+            border-bottom: 3px solid #BA7517 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _reset_short_params() -> None:
@@ -610,6 +690,25 @@ def _page_short() -> None:
             "量比門檻", min_value=0.5, max_value=3.0, step=0.1,
             key="short_vol_ratio",
             help="今日量 / 5 日均量 ≥ 此值",
+        )
+
+        st.markdown("**策略 4:MACD 黃金交叉**")
+        st.caption(
+            "初升段定義:DIF<0 + 黃金交叉 + 量比 ≥ 1.0,**無可調 threshold**"
+        )
+
+        st.markdown("**策略 5:均線糾結突破**")
+        squeeze_pct_max = st.slider(
+            "MA spread % 上限", min_value=0.5, max_value=5.0, step=0.5,
+            key="short_squeeze_pct_max",
+            help="過去 5 日 MA5/MA20/MA60 的 spread % 都要 ≤ 此值才算「糾結」",
+        )
+
+        st.markdown("**策略 6:三大法人連買**")
+        consensus_days = st.slider(
+            "連續同買天數", min_value=2, max_value=10, step=1,
+            key="short_consensus_days",
+            help="外資 + 投信 + 自營商三家 net 都 > 0 連續 N 天",
         )
 
         # widget 全 key-only(沒 value=),session_state 是 SoT;callback 直接
@@ -717,17 +816,22 @@ def _page_short() -> None:
             f"{'...' if len(failures) > 5 else ''}"
         )
 
-    # 跑多策略並行(三策略共用一份 params,各自 merge DEFAULT_*_PARAMS,
-    # 多餘 key 對該策略無害)
+    # 跑多策略並行(六策略共用一份 params,各自 merge DEFAULT_*_PARAMS,
+    # 多餘 key 對該策略無害。注意 vol_ratio_min 三策略共用同名 key,
+    # 此處用乖離收斂的設定,MACD 黃金 / 均線糾結 也吃這個值,可接受)
     params = {
         # 策略 1: volume_kd
         "volume_multiplier": float(vol_mult),
         "kd_threshold_low": float(kd_low),
         "inst_buy_days": int(inst_days),
-        # 策略 3: bias_convergence
+        # 策略 3: bias_convergence(也共用 vol_ratio_min 給策略 4/5)
         "bias_low": float(bias_low),
         "bias_high": float(bias_high),
         "vol_ratio_min": float(vol_ratio_min),
+        # 策略 5: ma_squeeze_breakout
+        "squeeze_pct_max": float(squeeze_pct_max),
+        # 策略 6: inst_consensus
+        "consecutive_days": int(consensus_days),
     }
     if not enabled_keys:
         st.warning("⚠️ 至少要選一套策略")
@@ -773,56 +877,93 @@ def _page_short() -> None:
     df = aggregated_to_dataframe(agg)
     t3 = _time.perf_counter()
 
-    # 顯示模式切換(手機預設卡片,桌機可切表格)
-    view_mode = view_mode_toggle("short_view_mode")
+    # 5 tabs by category — 同一檔可在多個 tab 重複出現(被多策略同時選中)。
+    # 「全部」tab 保留完整功能(view_mode / row select / 推播 / 批量加入);
+    # 其他 4 tab 走簡單卡片視圖,專注該類策略命中名單。
+    _inject_short_tab_css()
 
-    if view_mode == "🃏 卡片":
-        render_picks_cards(
-            df.to_dict("records"),
-            show_add_button=True, button_key_prefix="short",
-        )
-        selection = None  # 卡片模式不支援 row selection
-    else:
-        # 表格模式:row select + 上方按鈕加入選中股
-        selection = st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="multi-row",
-            column_order=[
-                "stock_id", "name", "close",
-                "target_low", "target_high", "stop_loss",
-                "信號數", "信號", "risk_reward", "atr14",
-            ],
-            column_config={
-                "stock_id": st.column_config.TextColumn("代號", width="small"),
-                "name": st.column_config.TextColumn("名稱", width="small"),
-                "close": st.column_config.NumberColumn(
-                    "收盤", format="%.2f", width="small",
-                ),
-                "target_low": st.column_config.NumberColumn(
-                    "🎯 保守目標", format="%.2f", help="收盤 + 1.5 × ATR",
-                ),
-                "target_high": st.column_config.NumberColumn(
-                    "🚀 積極目標", format="%.2f", help="收盤 + 3 × ATR",
-                ),
-                "stop_loss": st.column_config.NumberColumn(
-                    "🛑 停損", format="%.2f", help="收盤 − 1.5 × ATR",
-                ),
-                "信號數": st.column_config.NumberColumn(
-                    "🔥", width="small", help="同時被幾套策略選中",
-                ),
-                "信號": st.column_config.TextColumn("策略", width="medium"),
-                "risk_reward": st.column_config.NumberColumn(
-                    "R:R", format="%.1f", width="small",
-                    help="(積極目標 - 收盤) / (收盤 - 停損)",
-                ),
-                "atr14": st.column_config.NumberColumn(
-                    "ATR(14)", format="%.2f", width="small",
-                ),
-            },
-        )
+    cat_counts = {
+        cat: len(_filter_agg_by_category(agg, cat))
+        for cat in ("趨勢", "反轉", "籌碼", "動能")
+    }
+    tab_labels = [
+        f"全部 ({len(agg)})",
+        f"趨勢 ({cat_counts['趨勢']})",
+        f"反轉 ({cat_counts['反轉']})",
+        f"籌碼 ({cat_counts['籌碼']})",
+        f"動能 ({cat_counts['動能']})",
+    ]
+    tab_all, tab_trend, tab_reverse, tab_chip, tab_momentum = st.tabs(tab_labels)
+
+    selection = None  # 只「全部」tab 表格模式才有 selection
+    with tab_all:
+        # 顯示模式切換(手機預設卡片,桌機可切表格)
+        view_mode = view_mode_toggle("short_view_mode")
+
+        if view_mode == "🃏 卡片":
+            render_picks_cards(
+                df.to_dict("records"),
+                show_add_button=True, button_key_prefix="short",
+            )
+        else:
+            # 表格模式:row select + 上方按鈕加入選中股
+            selection = st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                column_order=[
+                    "stock_id", "name", "close",
+                    "target_low", "target_high", "stop_loss",
+                    "信號數", "信號", "risk_reward", "atr14",
+                ],
+                column_config={
+                    "stock_id": st.column_config.TextColumn("代號", width="small"),
+                    "name": st.column_config.TextColumn("名稱", width="small"),
+                    "close": st.column_config.NumberColumn(
+                        "收盤", format="%.2f", width="small",
+                    ),
+                    "target_low": st.column_config.NumberColumn(
+                        "🎯 保守目標", format="%.2f", help="收盤 + 1.5 × ATR",
+                    ),
+                    "target_high": st.column_config.NumberColumn(
+                        "🚀 積極目標", format="%.2f", help="收盤 + 3 × ATR",
+                    ),
+                    "stop_loss": st.column_config.NumberColumn(
+                        "🛑 停損", format="%.2f", help="收盤 − 1.5 × ATR",
+                    ),
+                    "信號數": st.column_config.NumberColumn(
+                        "🔥", width="small", help="同時被幾套策略選中",
+                    ),
+                    "信號": st.column_config.TextColumn("策略", width="medium"),
+                    "risk_reward": st.column_config.NumberColumn(
+                        "R:R", format="%.1f", width="small",
+                        help="(積極目標 - 收盤) / (收盤 - 停損)",
+                    ),
+                    "atr14": st.column_config.NumberColumn(
+                        "ATR(14)", format="%.2f", width="small",
+                    ),
+                },
+            )
+
+    for tab_obj, cat in (
+        (tab_trend, "趨勢"),
+        (tab_reverse, "反轉"),
+        (tab_chip, "籌碼"),
+        (tab_momentum, "動能"),
+    ):
+        with tab_obj:
+            sub_agg = _filter_agg_by_category(agg, cat)
+            if not sub_agg:
+                st.info(f"📭 此分類本日無入選。")
+                continue
+            sub_df = aggregated_to_dataframe(sub_agg)
+            render_picks_cards(
+                sub_df.to_dict("records"),
+                show_add_button=True,
+                button_key_prefix=f"short_{cat}",
+            )
 
     t4 = _time.perf_counter()
     st.caption(

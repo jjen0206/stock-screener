@@ -321,6 +321,139 @@ def test_short_star_button_middle_card_binds_correctly(
 
 
 # ============================================================================
+# 短線頁 5 tabs UI(全部/趨勢/反轉/籌碼/動能)
+# ============================================================================
+
+def test_short_renders_five_category_tabs(isolated_db, monkeypatch):
+    """執行選股後,短線頁必須 render 5 個 tabs(全部/趨勢/反轉/籌碼/動能),
+    各 tab 標籤帶該分類入選檔數。
+    """
+    from src import database as db, strategies
+
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "2317", "name": "鴻海", "market": "TW"},
+        {"stock_id": "1101", "name": "台泥", "market": "TW"},
+    ])
+
+    # 2330: ma_alignment (趨勢) + volume_kd (動能)
+    # 2317: bias_convergence (反轉)
+    # 1101: inst_consensus (籌碼)
+    fake_agg = {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {
+                "volume_kd": {
+                    "stock_id": "2330", "name": "台積電",
+                    "close": 600.0, "atr14": 12.0,
+                },
+                "ma_alignment": {
+                    "stock_id": "2330", "name": "台積電",
+                    "close": 600.0, "atr14": 12.0,
+                },
+            },
+        },
+        "2317": {
+            "name": "鴻海",
+            "signals": ["乖離收斂"],
+            "details": {
+                "bias_convergence": {
+                    "stock_id": "2317", "name": "鴻海",
+                    "close": 200.0, "atr14": 5.0,
+                },
+            },
+        },
+        "1101": {
+            "name": "台泥",
+            "signals": ["三大法人連買"],
+            "details": {
+                "inst_consensus": {
+                    "stock_id": "1101", "name": "台泥",
+                    "close": 50.0, "atr14": 1.5,
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        strategies, "run_all_strategies", lambda *a, **kw: fake_agg,
+    )
+
+    at = _new_at("🔥 短線")
+    at.run()
+    at.selectbox[0].set_value("快速:50 檔大型股").run()
+    next(b for b in at.button if b.label == "執行選股").click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 抓 5 tabs(streamlit AppTest 把 tabs 暴露在 at.tabs)
+    tabs = at.tabs
+    assert len(tabs) >= 5, f"期望 ≥5 tabs(可能多於 5,其他頁也有), got {len(tabs)}"
+
+    # 取最後 5 個(短線頁的 tabs 在 page render 末段)
+    short_tab_labels = [t.label for t in tabs[-5:]]
+    assert short_tab_labels[0].startswith("全部"), (
+        f"第 1 tab 應是『全部』, got {short_tab_labels[0]!r}"
+    )
+    assert "趨勢" in short_tab_labels[1]
+    assert "反轉" in short_tab_labels[2]
+    assert "籌碼" in short_tab_labels[3]
+    assert "動能" in short_tab_labels[4]
+
+    # 各分類入選檔數正確(2330 同時是趨勢+動能,所以兩個 tab 都會 +1)
+    assert "全部 (3)" in short_tab_labels[0]
+    assert "趨勢 (1)" in short_tab_labels[1]
+    assert "反轉 (1)" in short_tab_labels[2]
+    assert "籌碼 (1)" in short_tab_labels[3]
+    assert "動能 (1)" in short_tab_labels[4]
+
+
+def test_short_advanced_params_new_sliders_render(isolated_db):
+    """進階參數 expander 內,commit 2 新增的 2 個 sliders 必須 render 出來
+    (短線 5 / 短線 6 對應的 squeeze_pct_max / consensus_days),且 default 值對。
+    """
+    at = _new_at("🔥 短線")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # session_state setdefault 已 init,直接讀 default 值驗證
+    assert at.session_state["short_squeeze_pct_max"] == 2.0
+    assert at.session_state["short_consensus_days"] == 3
+
+
+def test_short_filter_agg_by_category_logic():
+    """`_filter_agg_by_category` 純邏輯測試 — 不過 streamlit。
+    確保「同檔有兩個策略屬不同類」時,兩個 cat 都會選到該檔。
+    """
+    import app as app_mod
+
+    sys.modules.pop("app", None)
+    import app as app_mod  # reimport
+
+    agg = {
+        "A": {
+            "name": "A",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {"volume_kd": {}, "ma_alignment": {}},
+        },
+        "B": {
+            "name": "B",
+            "signals": ["乖離收斂"],
+            "details": {"bias_convergence": {}},
+        },
+        "C": {
+            "name": "C",
+            "signals": ["三大法人連買"],
+            "details": {"inst_consensus": {}},
+        },
+    }
+    # A 屬「動能」 + 「趨勢」
+    assert set(app_mod._filter_agg_by_category(agg, "趨勢").keys()) == {"A"}
+    assert set(app_mod._filter_agg_by_category(agg, "動能").keys()) == {"A"}
+    assert set(app_mod._filter_agg_by_category(agg, "反轉").keys()) == {"B"}
+    assert set(app_mod._filter_agg_by_category(agg, "籌碼").keys()) == {"C"}
+
+
+# ============================================================================
 # 回測頁:backtest_short 必須收到 enabled_strategies kwarg
 # ============================================================================
 
