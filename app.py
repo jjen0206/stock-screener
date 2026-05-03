@@ -321,6 +321,20 @@ def _load_snapshot_if_needed() -> None:
         if records:
             db.upsert_institutional(records)
 
+    # 灌 TAIEX 加權指數(weekly_market_update 抓 200 天,大盤頁 K 線 / 多週期 /
+    # 技術總覽用。獨立 csv 因為 backfill_history 的 daily_prices.csv 只含個股,
+    # 不含指數)
+    taiex_csv = snapshot_dir / "taiex.csv"
+    if taiex_csv.exists():
+        df = pd.read_csv(taiex_csv, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            db.upsert_daily_prices(records)
+
     # 灌 watchlist(避免雲端 reboot 後 user 關注清單丟光)
     # 走 safe_boot_load:會優先嘗試 watchlist-sync 遠端,任何錯誤(ImportError、
     # 認證失敗、parse error 等)一律 silent fallback 到本機 seed CSV,絕不 raise

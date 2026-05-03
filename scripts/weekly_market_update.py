@@ -31,10 +31,14 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
+from src.data_fetcher import fetch_daily_price  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
 from src.universe import TW_TOP_50  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
+
+# TAIEX 抓多少天(週 K MA20 = 20 週 = 100 trading days,200 天 calendar 留緩衝)
+_TAIEX_BACKFILL_DAYS = 200
 
 
 def main() -> int:
@@ -97,6 +101,31 @@ def main() -> int:
         df.to_csv(path, index=False)
         print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
 
+    # 4. TAIEX 加權指數 200 天歷史(大盤頁的 K 線 + 多週期 + 技術總覽都需要)
+    # 走 fetch_daily_price 走 SQLite cache,差的範圍才打 FinMind。
+    from datetime import date as _date, timedelta as _td
+    print(f"[WEEKLY] TAIEX {_TAIEX_BACKFILL_DAYS} 天 backfill...", flush=True)
+    taiex_rows = 0
+    try:
+        today_iso = _date.today().isoformat()
+        start_iso = (_date.today() - _td(days=_TAIEX_BACKFILL_DAYS)).isoformat()
+        fetch_daily_price("TAIEX", start_iso, today_iso)
+        with db.get_conn() as conn:
+            df = pd.read_sql(
+                "SELECT * FROM daily_prices WHERE stock_id='TAIEX' "
+                "ORDER BY date",
+                conn,
+            )
+        if not df.empty:
+            path = SNAPSHOT_DIR / "taiex.csv"
+            df.to_csv(path, index=False)
+            taiex_rows = len(df)
+            print(f"[WEEKLY] 寫 {path.name}: {taiex_rows} 行", flush=True)
+        else:
+            print("[WEEKLY] TAIEX 抓不到資料,跳過 dump", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WEEKLY] TAIEX 抓取 fail (繼續):{type(e).__name__}: {e}", flush=True)
+
     # watchlist.csv 不再由 weekly 維護;改由雲端 app 推到 watchlist-sync 分支
     # (見 src/github_sync.py)。main 上的 watchlist.csv 保留為 seed。
 
@@ -108,7 +137,8 @@ def main() -> int:
         f"git_sha={os.environ.get('GITHUB_SHA', 'local')}\n"
         f"run_id={os.environ.get('GITHUB_RUN_ID', 'local')}\n"
         f"daily_metrics_rows={result['success_metrics'].__len__()}\n"
-        f"eps_rows={result['success_eps'].__len__()}\n",
+        f"eps_rows={result['success_eps'].__len__()}\n"
+        f"taiex_rows={taiex_rows}\n",
         encoding="utf-8",
     )
     print("[WEEKLY] 寫 last_update.txt", flush=True)
