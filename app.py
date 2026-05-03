@@ -1113,14 +1113,24 @@ def _page_stock_query() -> None:
         st.plotly_chart(_make_rsi_chart(df, rsi14), use_container_width=True)
 
     _render_summary(df, kd_df, rsi14, macd_df)
-    _render_institutional_table(sid)
-    _render_institutional_cumulative_table(sid)
-    _render_multi_timeframe(sid)
-    _render_pattern_analysis(sid)
-    _render_main_force_signal(sid)
-    _render_technical_summary(sid)
-    _render_key_levels(sid)
-    _render_action_suggestion(sid)
+
+    # 8 sections 改 tabs 防頁面過長(原本縱向堆疊太長,手機要捲很久)
+    # 分組原則:功能相近合一個 tab(籌碼類 / 趨勢類 / 形勢類 / 操作)
+    tab_chip, tab_trend, tab_shape, tab_action = st.tabs([
+        "🚦 籌碼", "📊 趨勢", "🎯 形勢", "💡 操作",
+    ])
+    with tab_chip:
+        _render_institutional_table(sid)
+        _render_institutional_cumulative_table(sid)
+    with tab_trend:
+        _render_multi_timeframe(sid)
+        _render_technical_summary(sid)
+    with tab_shape:
+        _render_pattern_analysis(sid)
+        _render_main_force_signal(sid)
+        _render_key_levels(sid)
+    with tab_action:
+        _render_action_suggestion(sid)
 
 
 def _render_summary(
