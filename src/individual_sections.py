@@ -520,7 +520,10 @@ _ml_model_loaded = False
 
 
 def _get_ml_model():
-    """lazy load 模型 + cache。檔不存在 / load 失敗 → 永遠回 None,後續呼叫直接 short-circuit。"""
+    """lazy load 模型 + cache。檔不存在 / load 失敗 → 永遠回 None,後續呼叫直接 short-circuit。
+
+    印診斷 log(模組初始化只跑一次,印一行 OK / 一行 fail 都不嫌多)。
+    """
     global _ml_model_cache, _ml_model_loaded
     if _ml_model_loaded:
         return _ml_model_cache
@@ -530,31 +533,79 @@ def _get_ml_model():
         from src import config as _config
         from pathlib import Path as _Path
         path = _Path(_config.PROJECT_ROOT) / _ML_MODEL_PATH
-        _ml_model_cache = load_model(path)
-    except Exception:  # noqa: BLE001
+        if not path.exists():
+            print(
+                f"[ML] model 檔不存在:{path}(雲端 git checkout 沒帶到?)",
+                flush=True,
+            )
+            _ml_model_cache = None
+        else:
+            _ml_model_cache = load_model(path)
+            if _ml_model_cache is None:
+                print(
+                    f"[ML] joblib.load 回 None(可能 sklearn 版本不相容):{path}",
+                    flush=True,
+                )
+            else:
+                print(f"[ML] model loaded OK 從 {path}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML] _get_ml_model exception:{type(e).__name__}: {e}",
+            flush=True,
+        )
         _ml_model_cache = None
     return _ml_model_cache
+
+
+# 用 set 記錄已印過 log 的 (sid, reason) tuple,避免同 reason 對同 sid 重複印
+# (e.g. 一頁 7 picks 各自 fail 印 7 行還算可接受;但避免下次 rerun 同檔再印)
+_ml_log_dedup: set[tuple[str, str]] = set()
+
+
+def _ai_log_once(sid: str, reason: str, msg: str) -> None:
+    """同檔同原因只印一次,避免 streamlit rerun 噪音。"""
+    key = (sid, reason)
+    if key in _ml_log_dedup:
+        return
+    _ml_log_dedup.add(key)
+    print(msg, flush=True)
 
 
 def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
     """產 「🎯 AI 勝率 N%」 part。沒模型 / 預測失敗 → 「🎯 —」(維持格式)。
 
     target_date None → 用 SQLite daily_prices 最新日期(週末/假日也能跑)。
+    各 fallback 點印診斷 log 排查雲端 / workflow runner 預測失敗的根因。
     """
     model = _get_ml_model()
     if model is None:
-        return "🎯 —"
+        return "🎯 —"  # _get_ml_model 已印過原因
     try:
         if target_date is None:
             target_date = db.get_latest_trading_date()
         if target_date is None:
+            _ai_log_once(
+                sid, "no_latest_date",
+                f"[ML] {sid} predict skip: 無 latest_trading_date"
+                "(daily_prices 空)",
+            )
             return "🎯 —"
         from src.ml_predictor import predict_short_pick_winrate
         prob = predict_short_pick_winrate(model, sid, target_date)
         if prob is None:
+            _ai_log_once(
+                sid, f"none@{target_date}",
+                f"[ML] {sid}@{target_date} predict 回 None"
+                "(features 抽不到 / 歷史 < 60 天 / 該日無 row)",
+            )
             return "🎯 —"
         return f"🎯 AI 勝率 {prob * 100:.0f}%"
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _ai_log_once(
+            sid, f"exc@{target_date}",
+            f"[ML] {sid}@{target_date} predict exception:"
+            f"{type(e).__name__}: {e}",
+        )
         return "🎯 —"
 
 

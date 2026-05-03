@@ -354,13 +354,25 @@ def save_model(model, path: str | Path) -> None:
 
 
 def load_model(path: str | Path):
-    """joblib load。檔不存在或 load 失敗 → 回 None。"""
+    """joblib load。檔不存在或 load 失敗 → 回 None。
+
+    print 診斷 log 排查雲端找不到 / sklearn 版本不相容的根因(streamlit cloud
+    的 logger.warning 不一定看得到,改用 print(flush=True))。
+    """
     p = Path(path)
     if not p.exists():
+        print(f"[ML] load_model: 檔不存在 {p}", flush=True)
         return None
     try:
-        return joblib.load(p)
+        m = joblib.load(p)
+        print(f"[ML] load_model: OK 從 {p} 載入 {type(m).__name__}", flush=True)
+        return m
     except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML] load_model 失敗(可能 sklearn 版本不相容)"
+            f":{type(e).__name__}: {e}",
+            flush=True,
+        )
         logger.warning("[ML] load_model 失敗(%s):%s", path, e)
         return None
 
