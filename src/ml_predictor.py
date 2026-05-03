@@ -46,8 +46,11 @@ FEATURE_NAMES = [
 LABEL_LOOKAHEAD_DAYS = 5
 LABEL_ATR_MULT = 1.5
 
-# 訓練 lookback(每筆 sample 需 60 天歷史 + LABEL_LOOKAHEAD_DAYS 後續)
-MIN_HISTORY_DAYS = 60
+# 訓練 lookback(每筆 sample 需 N 天歷史 + LABEL_LOOKAHEAD_DAYS 後續)
+# 雲端全市場 2401 檔中位數 55 trading days(FinMind 90 calendar days 漏抓部分),
+# 只 6 檔 ≥60 天 → 60 天門檻幾乎所有 picks 都過不了。降 45:MACD(26+9=35)剛
+# 好夠 + 緩衝,ma_alignment 也改用 MA5/MA20(拿掉 MA60 因 60 天才能算)。
+MIN_HISTORY_DAYS = 45
 
 
 def _load_history(
@@ -140,21 +143,22 @@ def extract_features(
     macd_dif = float(macd["DIF"].iloc[-1]) if not macd.empty else float("nan")
     macd_hist = float(macd["HIST"].iloc[-1]) if not macd.empty else float("nan")
 
-    # MA 排列(score: 2=多頭排列,0=空頭,1=糾結)
+    # MA 排列 score:2=多頭(ma5 > ma20)/ 0=空頭 / 1=糾結
+    # 拿掉 MA60(需 60 天,雲端 95% picks 歷史不足)。短期 ma5/ma20 排列仍能
+    # 反映 trend 方向,給 RandomForest 學就好。
     ma5 = ind.sma(df, 5).iloc[-1]
     ma20 = ind.sma(df, 20).iloc[-1]
-    ma60 = ind.sma(df, 60).iloc[-1]
-    if pd.isna(ma5) or pd.isna(ma20) or pd.isna(ma60):
+    if pd.isna(ma5) or pd.isna(ma20):
         if verbose:
             print(
                 f"[ML/extract] {stock_id}@{target_date} skip: "
-                f"MA NaN(ma5={ma5}, ma20={ma20}, ma60={ma60})",
+                f"MA NaN(ma5={ma5}, ma20={ma20})",
                 flush=True,
             )
         return None
-    if ma5 > ma20 > ma60:
+    if ma5 > ma20:
         ma_alignment = 2.0
-    elif ma5 < ma20 < ma60:
+    elif ma5 < ma20:
         ma_alignment = 0.0
     else:
         ma_alignment = 1.0
