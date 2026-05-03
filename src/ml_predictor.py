@@ -96,17 +96,38 @@ def extract_features(
     stock_id: str,
     target_date: str,
     db_path: str | Path | None = None,
+    verbose: bool = False,
 ) -> dict[str, float] | None:
-    """抽 11 維 features 給訓練 / 推論用。資料不足 / NaN → 回 None。"""
+    """抽 11 維 features 給訓練 / 推論用。資料不足 / NaN → 回 None。
+
+    寬鬆 anchor:用「該股 daily_prices ≤ target_date 內最後可得一天」當基準
+    (不嚴格要求 df.iloc[-1].date == target_date)。雲端 preload 的某些 pick
+    在 target_date 那天 cache 缺(停牌 / 漏抓 / backfill 沒這檔最新一天)
+    時仍能算 features,只是 anchor 往前 1-N 天。
+
+    訓練時 sliding window 永遠用 in-cache date,等同 strict;只有推論時這個
+    寬鬆才生效 — 不影響 model 訓練 distribution。
+
+    verbose=True 印各失敗點原因(給 build_training_dataset 訓練診斷用)。
+    """
     df = _load_history(stock_id, target_date, days=90, db_path=db_path)
     if len(df) < MIN_HISTORY_DAYS:
-        return None
-    if df["date"].iloc[-1] != target_date:
-        # target_date 沒在 daily_prices(週末/假日 / cache 缺)
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} skip: "
+                f"history={len(df)} < {MIN_HISTORY_DAYS}",
+                flush=True,
+            )
         return None
 
     close_last = float(df["close"].iloc[-1])
     if close_last <= 0:
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} skip: "
+                f"close_last={close_last} ≤ 0",
+                flush=True,
+            )
         return None
 
     # KD
@@ -124,6 +145,12 @@ def extract_features(
     ma20 = ind.sma(df, 20).iloc[-1]
     ma60 = ind.sma(df, 60).iloc[-1]
     if pd.isna(ma5) or pd.isna(ma20) or pd.isna(ma60):
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} skip: "
+                f"MA NaN(ma5={ma5}, ma20={ma20}, ma60={ma60})",
+                flush=True,
+            )
         return None
     if ma5 > ma20 > ma60:
         ma_alignment = 2.0
@@ -182,7 +209,14 @@ def extract_features(
         "inst_5d": inst_5d,
         "inst_10d": inst_10d,
     }
-    if any(pd.isna(v) or np.isinf(v) for v in feats.values()):
+    bad_keys = [k for k, v in feats.items() if pd.isna(v) or np.isinf(v)]
+    if bad_keys:
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} skip: "
+                f"NaN/Inf in {bad_keys}",
+                flush=True,
+            )
         return None
     return feats
 

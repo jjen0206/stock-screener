@@ -593,11 +593,19 @@ def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
         from src.ml_predictor import predict_short_pick_winrate
         prob = predict_short_pick_winrate(model, sid, target_date)
         if prob is None:
-            _ai_log_once(
-                sid, f"none@{target_date}",
-                f"[ML] {sid}@{target_date} predict 回 None"
-                "(features 抽不到 / 歷史 < 60 天 / 該日無 row)",
-            )
+            # 重跑 verbose extract_features 印詳細失敗點(每 sid dedup)
+            verbose_key = (sid, "verbose_extract")
+            if verbose_key not in _ml_log_dedup:
+                _ml_log_dedup.add(verbose_key)
+                try:
+                    from src.ml_predictor import extract_features as _ef
+                    _ef(sid, target_date, verbose=True)
+                except Exception as e:  # noqa: BLE001
+                    print(
+                        f"[ML] {sid}@{target_date} verbose extract 也失敗"
+                        f":{type(e).__name__}: {e}",
+                        flush=True,
+                    )
             return "🎯 —"
         return f"🎯 AI 勝率 {prob * 100:.0f}%"
     except Exception as e:  # noqa: BLE001
