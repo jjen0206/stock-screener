@@ -173,6 +173,18 @@ SCHEMA: list[str] = [
         PRIMARY KEY (stock_id, dataset)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS trades (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_id   TEXT NOT NULL,
+        direction  TEXT NOT NULL CHECK(direction IN ('buy', 'sell')),
+        price      REAL NOT NULL CHECK(price > 0),
+        quantity   INTEGER NOT NULL CHECK(quantity > 0),
+        trade_date TEXT NOT NULL,
+        note       TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -181,6 +193,9 @@ SCHEMA: list[str] = [
     # 加速 watchlist 排序顯示
     "CREATE INDEX IF NOT EXISTS idx_watchlist_added_at "
     "ON watchlist(added_at DESC)",
+    # 加速 trades 按股號 / 日期查
+    "CREATE INDEX IF NOT EXISTS idx_trades_stock_date "
+    "ON trades(stock_id, trade_date)",
 ]
 
 
@@ -863,6 +878,138 @@ def stocks_with_min_history(
     return [r["stock_id"] for r in rows]
 
 
+# === Trades / P&L tracking ===
+
+def add_trade(
+    stock_id: str,
+    direction: str,
+    price: float,
+    quantity: int,
+    trade_date: str,
+    note: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """新增一筆交易,回 lastrowid。
+
+    direction: 'buy' / 'sell'
+    quantity: 張數(必須 > 0)
+    price: 每張價格(必須 > 0)
+    trade_date: 'YYYY-MM-DD'
+    """
+    if direction not in ("buy", "sell"):
+        raise ValueError(f"direction 必須是 'buy' 或 'sell',got {direction!r}")
+    if quantity <= 0:
+        raise ValueError(f"quantity 必須 > 0,got {quantity}")
+    if price <= 0:
+        raise ValueError(f"price 必須 > 0,got {price}")
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO trades "
+            "(stock_id, direction, price, quantity, trade_date, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (stock_id, direction, price, quantity, trade_date, note, now),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_trade(trade_id: int, db_path: str | Path | None = None) -> bool:
+    """刪一筆交易,回 True 若有刪掉、False 若 id 不存在。"""
+    with get_conn(db_path) as conn:
+        cur = conn.execute("DELETE FROM trades WHERE id=?", (trade_id,))
+        return cur.rowcount > 0
+
+
+def get_trades(
+    stock_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """list trades,可 filter by stock_id;按 trade_date desc, id desc 排序。"""
+    with get_conn(db_path) as conn:
+        if stock_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE stock_id=? "
+                "ORDER BY trade_date DESC, id DESC",
+                (stock_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trades ORDER BY trade_date DESC, id DESC"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_position(
+    stock_id: str,
+    db_path: str | Path | None = None,
+) -> dict:
+    """算該股當前 position(weighted average cost)+ 已實現 P&L。
+
+    Weighted average 算法:
+    - buy:新 avg_cost = (舊 qty × 舊 avg + q × p) / (舊 qty + q)
+    - sell:realized_pnl += (sell_price - 當下 avg_cost) × q,
+      avg_cost 維持不變(剩下的 lot 仍同成本)
+    - 全清倉(qty=0)後再 buy → avg_cost 從新 buy 重算
+
+    回 dict:
+        - quantity: 當前持有張數
+        - avg_cost: 加權平均成本(qty=0 時回 0.0)
+        - realized_pnl: 已實現損益(累計)
+        - total_buy_amount: 累計買入金額
+        - total_sell_amount: 累計賣出金額
+        - num_trades: 總筆數
+    """
+    trades = get_trades(stock_id, db_path)
+    # 處理時要按時間升序(早的先,影響 avg_cost 累計)
+    trades.sort(key=lambda t: (t["trade_date"], t["id"]))
+
+    qty = 0
+    avg_cost = 0.0
+    realized = 0.0
+    total_buy = 0.0
+    total_sell = 0.0
+
+    for t in trades:
+        d = t["direction"]
+        p = float(t["price"])
+        q = int(t["quantity"])
+        if d == "buy":
+            new_qty = qty + q
+            if new_qty > 0:
+                avg_cost = (qty * avg_cost + q * p) / new_qty
+            qty = new_qty
+            total_buy += p * q
+        else:  # sell(已在 add_trade 驗過 buy/sell)
+            realized += (p - avg_cost) * q
+            qty -= q
+            total_sell += p * q
+
+    return {
+        "stock_id": stock_id,
+        "quantity": qty,
+        "avg_cost": avg_cost if qty > 0 else 0.0,
+        "realized_pnl": realized,
+        "total_buy_amount": total_buy,
+        "total_sell_amount": total_sell,
+        "num_trades": len(trades),
+    }
+
+
+def get_unrealized_pnl(
+    stock_id: str,
+    current_price: float,
+    db_path: str | Path | None = None,
+) -> float:
+    """當前未實現 P&L = (current_price - avg_cost) × qty。
+    qty<=0(沒持倉)→ 回 0。
+    """
+    pos = get_position(stock_id, db_path)
+    if pos["quantity"] <= 0:
+        return 0.0
+    return (current_price - pos["avg_cost"]) * pos["quantity"]
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -882,6 +1029,11 @@ __all__ = [
     "cache_health_summary",
     "preload_snapshots",
     "get_latest_trading_date",
+    "add_trade",
+    "delete_trade",
+    "get_trades",
+    "get_position",
+    "get_unrealized_pnl",
     "stocks_with_min_history",
     "SCHEMA",
 ]

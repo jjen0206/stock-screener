@@ -283,3 +283,111 @@ def test_stocks_with_min_history_default_60(tmp_db):
     ])
     _seed_history({"A": 59, "B": 60})
     assert db.stocks_with_min_history() == ["B"]
+
+
+# === trades / P&L ===
+
+def test_trades_table_created(tmp_db):
+    """init_db 包含 trades 表 + 對應 index。"""
+    with db.get_conn() as conn:
+        names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        idx_names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+    assert "trades" in names
+    assert "idx_trades_stock_date" in idx_names
+
+
+def test_add_trade_returns_id_and_persists(tmp_db):
+    """add_trade INSERT 後,get_trades 拿得到。"""
+    tid = db.add_trade("2330", "buy", 600.0, 2, "2026-04-01", note="第一筆")
+    assert tid > 0
+    trades = db.get_trades("2330")
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["stock_id"] == "2330"
+    assert t["direction"] == "buy"
+    assert t["price"] == 600.0
+    assert t["quantity"] == 2
+    assert t["trade_date"] == "2026-04-01"
+    assert t["note"] == "第一筆"
+    assert t["created_at"]  # 自動填
+
+
+def test_add_trade_invalid_inputs_raise(tmp_db):
+    """direction / quantity / price 不合法 → ValueError。"""
+    with pytest.raises(ValueError):
+        db.add_trade("2330", "short", 600.0, 1, "2026-04-01")
+    with pytest.raises(ValueError):
+        db.add_trade("2330", "buy", 600.0, 0, "2026-04-01")
+    with pytest.raises(ValueError):
+        db.add_trade("2330", "buy", -1.0, 1, "2026-04-01")
+
+
+def test_delete_trade(tmp_db):
+    """delete_trade 刪掉指定 id;不存在 id 回 False。"""
+    tid = db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    assert db.delete_trade(tid) is True
+    assert db.get_trades("2330") == []
+    assert db.delete_trade(99999) is False
+
+
+def test_get_position_weighted_avg_cost(tmp_db):
+    """混合 buy 算 weighted average cost。
+    買 1 張 @ 600 + 買 2 張 @ 700 → avg = (1×600 + 2×700) / 3 = 666.67
+    """
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    db.add_trade("2330", "buy", 700.0, 2, "2026-04-02")
+
+    pos = db.get_position("2330")
+    assert pos["quantity"] == 3
+    assert abs(pos["avg_cost"] - (1 * 600 + 2 * 700) / 3) < 1e-6
+    assert pos["realized_pnl"] == 0.0
+    assert pos["total_buy_amount"] == 600 + 1400
+
+
+def test_get_position_realized_pnl_after_sell(tmp_db):
+    """買 2 張 @ 600,賣 1 張 @ 700 → realized = (700 - 600) × 1 = 100。
+    剩餘 1 張仍 avg_cost=600(賣不影響 avg)。
+    """
+    db.add_trade("2330", "buy", 600.0, 2, "2026-04-01")
+    db.add_trade("2330", "sell", 700.0, 1, "2026-04-05")
+
+    pos = db.get_position("2330")
+    assert pos["quantity"] == 1
+    assert abs(pos["avg_cost"] - 600.0) < 1e-6
+    assert abs(pos["realized_pnl"] - 100.0) < 1e-6
+    assert pos["total_sell_amount"] == 700.0
+
+
+def test_get_unrealized_pnl(tmp_db):
+    """avg_cost=600,qty=2,current_price=650 → unrealized = (650-600)×2 = 100。"""
+    db.add_trade("2330", "buy", 600.0, 2, "2026-04-01")
+    assert abs(db.get_unrealized_pnl("2330", 650.0) - 100.0) < 1e-6
+
+
+def test_get_unrealized_pnl_no_position_zero(tmp_db):
+    """沒倉位(qty=0)→ 未實現 0,不論 current_price。"""
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    db.add_trade("2330", "sell", 650.0, 1, "2026-04-05")
+    # 全清倉
+    pos = db.get_position("2330")
+    assert pos["quantity"] == 0
+    assert db.get_unrealized_pnl("2330", 700.0) == 0.0
+
+
+def test_get_trades_filter_by_stock(tmp_db):
+    """get_trades 支援 stock_id 過濾;None → 全部。"""
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    db.add_trade("2454", "buy", 1000.0, 1, "2026-04-02")
+    db.add_trade("2330", "sell", 650.0, 1, "2026-04-03")
+
+    assert len(db.get_trades("2330")) == 2
+    assert len(db.get_trades("2454")) == 1
+    assert len(db.get_trades()) == 3
