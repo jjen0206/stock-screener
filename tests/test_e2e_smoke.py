@@ -28,7 +28,7 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 PAGE_KEYS = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 設定",
+    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 系統", "⚙️ 設定",
 ]
 
 
@@ -1391,3 +1391,34 @@ def test_pick_card_expander_renders_for_watchlist(isolated_db):
     assert not any(
         "加入關注" in (lbl or "") for lbl in btn_labels
     ), f"watchlist 卡不該有「加入關注」按鈕, 實際 buttons: {btn_labels}"
+
+
+# ============================================================================
+# 系統健康監控頁
+# ============================================================================
+
+def test_system_health_renders_all_sections(isolated_db):
+    """灌假 daily_prices / institutional → 系統頁 5 個 section 都渲染、不炸。"""
+    _seed_distribution_scenario()  # 70 天 daily + institutional
+
+    def _harness():
+        import app
+        app._render_system_health()
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    for section in [
+        "資料覆蓋率", "上次更新",
+        "Backfill workflow", "API Token", "SQLite 資料庫",
+    ]:
+        assert section in md_text, (
+            f"系統頁缺 section「{section}」, 實際:\n{md_text}"
+        )
+
+    # 應該至少有一個 dataframe(更新時間 / token / SQLite tables)
+    assert len(at.dataframe) >= 2, (
+        f"預期 ≥2 個 dataframe, 實際 {len(at.dataframe)}"
+    )

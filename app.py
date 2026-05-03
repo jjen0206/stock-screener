@@ -59,7 +59,7 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 設定",
+    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -383,6 +383,8 @@ def main() -> None:
         _page_watchlist()
     elif page == "📊 大盤":
         _page_market_sentiment()
+    elif page == "⚙️ 系統":
+        _page_system()
     elif page == "⚙️ 設定":
         _page_settings()
 
@@ -2622,6 +2624,183 @@ def _page_market_sentiment() -> None:
         else:
             st.dataframe(df.head(20), use_container_width=True, hide_index=True)
             st.caption(f"💬 dataset 欄位:{list(df.columns)}")
+
+
+# === 系統健康監控頁 ===
+
+def _render_system_health() -> None:
+    """系統頁:資料覆蓋率 / 更新時間 / backfill workflow / API token / SQLite 統計。"""
+    import os
+    from pathlib import Path
+
+    db.init_db()
+
+    # === 📊 資料覆蓋率 ===
+    st.markdown("### 📊 資料覆蓋率")
+    health = db.cache_health_summary()
+    cols = st.columns(4)
+    cols[0].metric("全市場股票", f"{health['total_stocks']:,}")
+    cols[1].metric("有價量歷史", f"{health['with_prices']:,}")
+    b = health["buckets"]
+    cols[2].metric("≥60 天歷史", f"{b['60+']:,}")
+    cols[3].metric("<14 天 (新)", f"{b['<14']:,}")
+    st.caption(
+        f"分桶:60+ {b['60+']:,} / 20-59 {b['20-59']:,} / "
+        f"14-19 {b['14-19']:,} / <14 {b['<14']:,}"
+    )
+
+    # === 🔄 上次更新(各表 max date + count) ===
+    st.markdown("### 🔄 上次更新")
+    update_rows: list[dict] = []
+    with db.get_conn() as conn:
+        # daily_prices / institutional / daily_metrics 用 date 欄
+        for table, label in [
+            ("daily_prices", "daily_prices"),
+            ("institutional", "institutional"),
+            ("daily_metrics", "daily_metrics"),
+        ]:
+            try:
+                row = conn.execute(
+                    f"SELECT MAX(date) AS d, COUNT(*) AS n FROM {table}"
+                ).fetchone()
+                last = row["d"] if row else None
+                count = row["n"] if row else 0
+            except sqlite3.OperationalError:
+                last, count = None, 0
+            update_rows.append({
+                "表": label,
+                "最新日期": last or "—",
+                "行數": f"{count:,}" if count else "0",
+            })
+        # financials.quarterly 用 period 欄
+        try:
+            row = conn.execute(
+                "SELECT MAX(period) AS d, COUNT(*) AS n FROM financials "
+                "WHERE period_type='quarterly'"
+            ).fetchone()
+            update_rows.append({
+                "表": "financials.quarterly",
+                "最新日期": (row["d"] if row else None) or "—",
+                "行數": f"{(row['n'] if row else 0):,}",
+            })
+        except sqlite3.OperationalError:
+            update_rows.append({
+                "表": "financials.quarterly",
+                "最新日期": "—", "行數": "0",
+            })
+    st.dataframe(
+        pd.DataFrame(update_rows),
+        use_container_width=True, hide_index=True,
+    )
+
+    # === 🚦 Backfill workflow(讀 last_backfill.txt) ===
+    st.markdown("### 🚦 Backfill workflow(上次跑況)")
+    backfill_path = (
+        config.PROJECT_ROOT / "data" / "twse_snapshot" / "last_backfill.txt"
+    )
+    if backfill_path.exists():
+        info: dict[str, str] = {}
+        for line in backfill_path.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                info[k.strip()] = v.strip()
+        cols = st.columns(3)
+        cols[0].metric(
+            "Run ID",
+            info.get("run_id", "—"),
+            help=f"GitHub Actions Run ID(commit {info.get('git_sha','—')[:7]})",
+        )
+        cols[1].metric(
+            "Price 成功率",
+            f"{info.get('price_success_rate_pct', '—')}%",
+            help=(
+                f"price_ok={info.get('price_ok','—')} / "
+                f"price_fail={info.get('price_fail','—')} / "
+                f"todo={info.get('todo','—')}"
+            ),
+        )
+        cols[2].metric(
+            "Shards 完成",
+            info.get("shards_completed", "—"),
+        )
+        st.caption(
+            f"上次跑於 {info.get('backfilled_at', '—')}, "
+            f"耗時 {info.get('elapsed_min_max', '—')} 分鐘"
+        )
+    else:
+        st.info(
+            "🔍 `data/twse_snapshot/last_backfill.txt` 不存在 — "
+            "backfill workflow 還沒跑過(或 cloud snapshot 沒灌進來)"
+        )
+
+    # === 📤 API token / 推播狀態(只看 env var 是否非空,不顯示 token 數值) ===
+    st.markdown("### 📤 API Token / 推播狀態")
+    secrets_status = []
+    for env, label in [
+        ("FINMIND_TOKEN", "FinMind API"),
+        ("TELEGRAM_BOT_TOKEN", "Telegram Bot"),
+        ("TELEGRAM_CHAT_ID", "Telegram Chat ID"),
+        ("DISCORD_WEBHOOK_URL", "Discord webhook"),
+        ("GITHUB_PAT", "GitHub PAT(雲端 push 快取)"),
+    ]:
+        val = os.environ.get(env, "")
+        secrets_status.append({
+            "服務": label,
+            "Env Var": env,
+            "狀態": "✅ 已設定" if val else "❌ 未設定",
+        })
+    st.dataframe(
+        pd.DataFrame(secrets_status),
+        use_container_width=True, hide_index=True,
+    )
+    st.caption("Token 數值不顯示,只看 env var 是否非空(避免外洩)。")
+
+    # === 🗄️ SQLite 資料庫(各表行數 + 檔案大小) ===
+    st.markdown("### 🗄️ SQLite 資料庫")
+    db_path_str = str(config.DATABASE_PATH)
+    db_path = Path(db_path_str)
+    db_size_mb = (
+        db_path.stat().st_size / 1024 / 1024 if db_path.exists() else 0.0
+    )
+    st.metric(
+        "DB 大小", f"{db_size_mb:.2f} MB",
+        help=f"path: {db_path_str}",
+    )
+
+    table_rows = []
+    with db.get_conn() as conn:
+        try:
+            tables = [
+                r["name"] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            tables = []
+        for t in tables:
+            try:
+                row = conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()
+                table_rows.append({"表名": t, "行數": f"{row['n']:,}"})
+            except sqlite3.OperationalError:
+                table_rows.append({"表名": t, "行數": "?"})
+    if table_rows:
+        st.dataframe(
+            pd.DataFrame(table_rows),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("SQLite 還沒有任何 table。")
+
+
+def _page_system() -> None:
+    """系統健康監控頁(看資料覆蓋率 / 更新時間 / backfill / 推播狀態 / SQLite)。"""
+    st.header("⚙️ 系統健康")
+    st.caption(
+        "看資料管線當前狀態、各表覆蓋率、上次 backfill workflow 結果、API "
+        "token 是否設定。**不會 fetch 任何 API**,純讀 SQLite + 本地檔案。"
+    )
+    _render_system_health()
 
 
 # === 設定頁 ===
