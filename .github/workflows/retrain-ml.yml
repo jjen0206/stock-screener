@@ -13,6 +13,13 @@ on:
         type: boolean
         default: false
 
+# 防雙觸發 race(cron + manual dispatch 同時 / 連按兩下 manual 等)。
+# cancel-in-progress: false → 後一個排隊等,不 cancel 進行中的(model push
+# 順序重要,不能讓晚的覆蓋早的成功 commit)。
+concurrency:
+  group: retrain-ml
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: ubuntu-latest
