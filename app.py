@@ -60,7 +60,8 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 系統", "⚙️ 設定",
+    "🔍 個股", "⭐ 關注", "📊 大盤",
+    "💼 交易紀錄", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -302,6 +303,8 @@ def main() -> None:
         _page_watchlist()
     elif page == "📊 大盤":
         _page_market_sentiment()
+    elif page == "💼 交易紀錄":
+        _page_trades()
     elif page == "⚙️ 系統":
         _page_system()
     elif page == "⚙️ 設定":
@@ -2697,6 +2700,149 @@ def _split_margin_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
     return pd.DataFrame(), pd.DataFrame()
 
 
+# === 💼 交易紀錄頁 ===
+
+def _page_trades() -> None:
+    """個人交易紀錄 + P&L 追蹤頁。"""
+    st.header("💼 交易紀錄")
+    st.caption(
+        "記錄你的買賣 → 自動算 weighted average 成本 + 已實現 / 未實現 P&L。"
+        "雲端容器重啟會清光,本地 CSV snapshot 永久化(GitHub auto-push 待後續 commit)。"
+    )
+    db.init_db()
+
+    # === 新增交易表單 ===
+    with st.expander("✚ 新增交易", expanded=True):
+        with st.form("add_trade_form", clear_on_submit=True):
+            cols = st.columns([2, 1, 2, 1, 2])
+            sid = cols[0].text_input("股票代號", placeholder="2330")
+            direction_label = cols[1].radio(
+                "方向", ["買進", "賣出"], horizontal=True, key="trade_dir",
+            )
+            price = cols[2].number_input(
+                "價格(每張)", min_value=0.01, value=100.0, step=0.5,
+                format="%.2f", key="trade_price",
+            )
+            qty = cols[3].number_input(
+                "張數", min_value=1, value=1, step=1, key="trade_qty",
+            )
+            trade_date = cols[4].date_input(
+                "交易日期", value=_get_default_screen_date(), key="trade_date",
+            )
+            note = st.text_input("備註(選填)", key="trade_note")
+            submitted = st.form_submit_button("✚ 新增", type="primary")
+            if submitted:
+                sid_clean = sid.strip()
+                if not sid_clean:
+                    st.error("請輸入股票代號")
+                else:
+                    d = "buy" if direction_label == "買進" else "sell"
+                    try:
+                        tid = db.add_trade(
+                            sid_clean, d, float(price), int(qty),
+                            trade_date.isoformat(),
+                            note=note.strip() if note.strip() else None,
+                        )
+                        # 同步 dump 進 CSV(本地 snapshot,讓使用者下次 boot 還原)
+                        try:
+                            from src import portfolio_snapshot
+                            portfolio_snapshot.dump_to_csv()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        st.success(
+                            f"✅ #{tid}: {sid_clean} {direction_label} "
+                            f"{qty} 張 @ {price}"
+                        )
+                    except ValueError as e:
+                        st.error(f"❌ 輸入錯誤:{e}")
+
+    # === 列表 + 統計 ===
+    all_trades = db.get_trades()
+    if not all_trades:
+        st.info("尚無交易紀錄。從上方表單新增第一筆。")
+        return
+
+    # 計算所有 stock_id 的 position + P&L(統計用)
+    stock_ids = sorted(set(t["stock_id"] for t in all_trades))
+    total_realized = 0.0
+    total_unrealized = 0.0
+    total_buy_amount = 0.0
+    positions: list[dict] = []
+    with db.get_conn() as conn:
+        for sid_iter in stock_ids:
+            pos = db.get_position(sid_iter)
+            total_realized += pos["realized_pnl"]
+            total_buy_amount += pos["total_buy_amount"]
+            if pos["quantity"] > 0:
+                row = conn.execute(
+                    "SELECT close FROM daily_prices WHERE stock_id=? "
+                    "ORDER BY date DESC LIMIT 1",
+                    (sid_iter,),
+                ).fetchone()
+                if row and row["close"]:
+                    cur_price = float(row["close"])
+                    unrealized = (cur_price - pos["avg_cost"]) * pos["quantity"]
+                    total_unrealized += unrealized
+                    pct = (cur_price - pos["avg_cost"]) / pos["avg_cost"] * 100
+                    positions.append({
+                        "代號": sid_iter,
+                        "張數": pos["quantity"],
+                        "均價": round(pos["avg_cost"], 2),
+                        "現價": round(cur_price, 2),
+                        "未實現損益": round(unrealized),
+                        "未實現%": round(pct, 2),
+                        "已實現損益": round(pos["realized_pnl"]),
+                    })
+                else:
+                    positions.append({
+                        "代號": sid_iter,
+                        "張數": pos["quantity"],
+                        "均價": round(pos["avg_cost"], 2),
+                        "現價": None,
+                        "未實現損益": None,
+                        "未實現%": None,
+                        "已實現損益": round(pos["realized_pnl"]),
+                    })
+
+    st.markdown("### 📊 投資組合總覽")
+    cols = st.columns(3)
+    cols[0].metric("總投入金額", f"{total_buy_amount:,.0f}")
+    cols[1].metric(
+        "總實現損益", f"{total_realized:+,.0f}",
+        help="(賣出價 − 賣出當下均價) × 賣出張數,累計",
+    )
+    cols[2].metric(
+        "總未實現損益", f"{total_unrealized:+,.0f}",
+        help="(現價 − 均價) × 持有張數,僅算有持倉個股",
+    )
+
+    if positions:
+        st.markdown("### 🎯 當前持倉")
+        st.dataframe(
+            pd.DataFrame(positions),
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("### 📋 完整交易紀錄")
+    for t in all_trades:
+        cols = st.columns([1.5, 1, 1.2, 1, 1.5, 2, 1])
+        cols[0].markdown(f"**{t['stock_id']}**")
+        cols[1].write("買進" if t["direction"] == "buy" else "賣出")
+        cols[2].write(f"{t['price']:.2f}")
+        cols[3].write(f"{t['quantity']} 張")
+        cols[4].write(t["trade_date"])
+        cols[5].write(t.get("note") or "—")
+        if cols[6].button("🗑️", key=f"del_trade_{t['id']}", help="刪除此筆"):
+            db.delete_trade(t["id"])
+            try:
+                from src import portfolio_snapshot
+                portfolio_snapshot.dump_to_csv()
+            except Exception:  # noqa: BLE001
+                pass
+            st.toast(f"已刪除 #{t['id']}", icon="🗑️")
+            st.rerun()
+
+
 # === 系統健康監控頁 ===
 
 def _render_system_health() -> None:
@@ -2828,6 +2974,41 @@ def _render_system_health() -> None:
         use_container_width=True, hide_index=True,
     )
     st.caption("Token 數值不顯示,只看 env var 是否非空(避免外洩)。")
+
+    # === 💰 投資組合損益(從 trades 表算) ===
+    st.markdown("### 💰 投資組合損益")
+    trades_in_db = db.get_trades()
+    if not trades_in_db:
+        st.caption("尚無交易紀錄。到「💼 交易紀錄」頁新增。")
+    else:
+        sids_with_trade = sorted(set(t["stock_id"] for t in trades_in_db))
+        sys_total_realized = 0.0
+        sys_total_unrealized = 0.0
+        with db.get_conn() as _conn:
+            for _sid in sids_with_trade:
+                _pos = db.get_position(_sid)
+                sys_total_realized += _pos["realized_pnl"]
+                if _pos["quantity"] > 0:
+                    _row = _conn.execute(
+                        "SELECT close FROM daily_prices WHERE stock_id=? "
+                        "ORDER BY date DESC LIMIT 1",
+                        (_sid,),
+                    ).fetchone()
+                    if _row and _row["close"]:
+                        sys_total_unrealized += (
+                            float(_row["close"]) - _pos["avg_cost"]
+                        ) * _pos["quantity"]
+        cols = st.columns(3)
+        cols[0].metric("實現損益", f"{sys_total_realized:+,.0f}")
+        cols[1].metric("未實現損益", f"{sys_total_unrealized:+,.0f}")
+        cols[2].metric(
+            "合計",
+            f"{sys_total_realized + sys_total_unrealized:+,.0f}",
+        )
+        st.caption(
+            f"來自 trades 表 {len(trades_in_db)} 筆,涵蓋 "
+            f"{len(sids_with_trade)} 檔個股"
+        )
 
     # === 🗄️ SQLite 資料庫(各表行數 + 檔案大小) ===
     st.markdown("### 🗄️ SQLite 資料庫")

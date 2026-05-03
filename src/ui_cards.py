@@ -118,6 +118,29 @@ def render_pick_card(
                     f"🛑 {_fmt_num(sl)}{rr_str}"
                 )
 
+        # P&L 行(if 該股在 trades 表有持倉)— 紅綠染色
+        try:
+            from src import database as _db
+            _pos = _db.get_position(sid)
+            if _pos["quantity"] > 0 and close is not None:
+                _close_f = float(close) if not isinstance(close, float) else close
+                _avg = _pos["avg_cost"]
+                _qty = _pos["quantity"]
+                _unrealized = (_close_f - _avg) * _qty
+                _pct = (_close_f - _avg) / _avg * 100 if _avg > 0 else 0
+                _color = (
+                    "#d62728" if _unrealized > 0
+                    else "#2ca02c" if _unrealized < 0 else "#888"
+                )
+                st.markdown(
+                    f"<span style='color:{_color}'>📈 持有 {_qty} 張 @ "
+                    f"均價 {_avg:.2f} / 損益 {_unrealized:+,.0f} "
+                    f"({_pct:+.1f}%)</span>",
+                    unsafe_allow_html=True,
+                )
+        except Exception:  # noqa: BLE001
+            pass  # 沒倉位 / DB 錯誤都 silent skip(不影響卡片本體)
+
         if show_add_button:
             from src import database as db
             already = db.is_in_watchlist(sid)

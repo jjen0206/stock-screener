@@ -28,7 +28,8 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 PAGE_KEYS = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "📊 大盤", "⚙️ 系統", "⚙️ 設定",
+    "🔍 個股", "⭐ 關注", "📊 大盤",
+    "💼 交易紀錄", "⚙️ 系統", "⚙️ 設定",
 ]
 
 
@@ -1359,6 +1360,96 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
     assert "技術分析總覽" in md_text
     assert "關鍵價位" in md_text
     assert "操作建議" in md_text
+
+
+def test_pick_card_shows_pnl_row_when_position_exists(isolated_db):
+    """該股 trades 表有持倉 → 卡片渲染 P&L 行(持有/均價/損益)。"""
+    from src import database as db
+
+    # 灌一筆 buy → qty=1, avg_cost=600
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        # close=650,unrealized = (650-600)×1 = +50
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 650.0},
+            show_add_button=False,
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "持有 1 張" in md_text, f"應含持有訊息, md={md_text!r}"
+    assert "均價 600" in md_text
+    # +50 損益(close=650 > avg=600 → 紅利,但 markdown 只看數字 +50)
+    assert "+50" in md_text
+
+
+def test_pick_card_no_pnl_row_when_no_position(isolated_db):
+    """該股沒 trades → 卡片不渲染 P&L 行。"""
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 650.0},
+            show_add_button=False,
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "持有" not in md_text, f"沒倉位不該渲染持有訊息, md={md_text!r}"
+
+
+def test_portfolio_snapshot_dump_then_load_roundtrip(isolated_db, tmp_path):
+    """trades 表 → CSV → 清表 → 從 CSV load 回來,資料一致。"""
+    from src import database as db, portfolio_snapshot
+
+    db.add_trade("2330", "buy", 600.0, 2, "2026-04-01", note="測試")
+    db.add_trade("2330", "sell", 650.0, 1, "2026-04-05")
+
+    n_dumped = portfolio_snapshot.dump_to_csv(snapshot_dir=tmp_path)
+    assert n_dumped == 2
+    assert (tmp_path / "trades.csv").exists()
+
+    # 清表
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM trades")
+    assert db.get_trades() == []
+
+    # 從 csv load 回來
+    n_loaded = portfolio_snapshot.load_from_csv(snapshot_dir=tmp_path)
+    assert n_loaded == 2
+    trades = db.get_trades("2330")
+    assert len(trades) == 2
+    # 驗 position 重算對(buy 2×600 - sell 1×650 → qty=1, avg=600, realized=50)
+    pos = db.get_position("2330")
+    assert pos["quantity"] == 1
+    assert abs(pos["avg_cost"] - 600.0) < 1e-6
+    assert abs(pos["realized_pnl"] - 50.0) < 1e-6
+
+
+def test_portfolio_snapshot_load_skip_when_table_not_empty(isolated_db, tmp_path):
+    """trades 表已有資料 → load_from_csv skip(避免覆蓋本機新加的)。"""
+    from src import database as db, portfolio_snapshot
+
+    # 先寫一個 csv
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    portfolio_snapshot.dump_to_csv(snapshot_dir=tmp_path)
+    # 再加一筆(本機新增)
+    db.add_trade("2454", "buy", 1000.0, 1, "2026-04-02")
+    assert len(db.get_trades()) == 2
+
+    # load 應該 skip(因為表已有 2 筆 > 0)
+    n = portfolio_snapshot.load_from_csv(snapshot_dir=tmp_path)
+    assert n == 0
+    # 表仍是 2 筆,沒被覆蓋
+    assert len(db.get_trades()) == 2
 
 
 def test_pick_card_expander_renders_for_watchlist(isolated_db):

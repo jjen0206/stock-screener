@@ -838,6 +838,16 @@ def preload_snapshots(
             upsert_daily_prices(records, db_path=db_path)
             counts["taiex"] = len(records)
 
+    # 7. trades(P&L 紀錄)— delegate 給 portfolio_snapshot,只在表空時灌
+    # 避免覆蓋本機使用者新加的交易
+    try:
+        from src.portfolio_snapshot import load_from_csv as _load_trades
+        n_trades = _load_trades(snapshot_dir=snapshot_dir, db_path=db_path)
+        if n_trades > 0:
+            counts["trades"] = n_trades
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] trades load 失敗:%s", e)
+
     return counts
 
 
