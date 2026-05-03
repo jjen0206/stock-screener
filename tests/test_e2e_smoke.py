@@ -1397,6 +1397,45 @@ def test_pick_card_expander_renders_for_watchlist(isolated_db):
 # 系統健康監控頁
 # ============================================================================
 
+def test_short_page_advanced_expander_has_bias_sliders(isolated_db):
+    """短線頁進階參數 expander 含策略 3 的 3 個 slider + 預設值對應 DEFAULT_BIAS_PARAMS。"""
+    from src.strategies import DEFAULT_BIAS_PARAMS
+
+    at = _new_at("🔥 短線")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 三個 bias slider key 都該存在
+    bias_low = at.slider(key="short_bias_low")
+    bias_high = at.slider(key="short_bias_high")
+    vol_ratio = at.slider(key="short_vol_ratio")
+    assert bias_low.value == float(DEFAULT_BIAS_PARAMS["bias_low"])
+    assert bias_high.value == float(DEFAULT_BIAS_PARAMS["bias_high"])
+    assert vol_ratio.value == float(DEFAULT_BIAS_PARAMS["vol_ratio_min"])
+
+
+def test_short_page_reset_button_clears_session_state(isolated_db):
+    """改 slider 後按重設 → session_state 對應 key 被清 + 下次 rerun 回預設值。"""
+    from src.strategies import DEFAULT_BIAS_PARAMS
+
+    at = _new_at("🔥 短線")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 把 bias_low 拖到極端值
+    at.slider(key="short_bias_low").set_value(-12.0).run()
+    assert at.slider(key="short_bias_low").value == -12.0
+
+    # 按重設按鈕(它的 key="short_reset_params")
+    at.button(key="short_reset_params").click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # rerun 後 widget 回預設值
+    assert at.slider(key="short_bias_low").value == float(
+        DEFAULT_BIAS_PARAMS["bias_low"]
+    ), f"重設後應回預設, 實際 {at.slider(key='short_bias_low').value}"
+
+
 def test_system_health_renders_all_sections(isolated_db):
     """灌假 daily_prices / institutional → 系統頁 5 個 section 都渲染、不炸。"""
     _seed_distribution_scenario()  # 70 天 daily + institutional

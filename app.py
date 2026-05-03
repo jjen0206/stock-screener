@@ -48,6 +48,7 @@ from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS
 from src.ui_cards import render_picks_cards, view_mode_toggle
 from src.strategies import (
+    DEFAULT_BIAS_PARAMS,
     STRATEGY_LABELS,
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
@@ -611,21 +612,61 @@ def _page_short() -> None:
     enabled_keys = [label_to_key[lbl] for lbl in selected_labels]
 
     # sidebar 參數區(預設收起,進階使用者再展開)
-    with st.sidebar.expander("⚙️ 進階參數(策略 1)", expanded=False):
+    # 三策略 thresholds 共用一個 expander。值跨 rerun 透過 session_state 保留;
+    # 「執行選股」才會套用,避免每次拖 slider 都觸發 SQL 全掃。
+    with st.sidebar.expander("⚙️ 進階參數", expanded=False):
+        st.markdown("**策略 1:量價KD**")
         vol_mult = st.number_input(
             "均量倍數", min_value=1.0, max_value=5.0,
             value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+            key="short_vol_mult",
             help="當日量 > 過去 5 日均量 × 此倍數",
         )
         kd_low = st.number_input(
             "KD 門檻 K_low", min_value=0.0, max_value=80.0,
             value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+            key="short_kd_low",
             help="K 黃金交叉 D 後,K 至少要超過此值才入選",
         )
         inst_days = st.number_input(
             "法人連續買超天數", min_value=1, max_value=10,
             value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+            key="short_inst_days",
         )
+
+        st.markdown("**策略 2:多頭排列**")
+        st.caption(
+            "MA5 > MA10 > MA20 > MA60 條件式判斷,**無可調 threshold**"
+        )
+
+        st.markdown("**策略 3:乖離率收斂**")
+        bias_low = st.slider(
+            "乖離下限 (%)", min_value=-15.0, max_value=0.0,
+            value=float(DEFAULT_BIAS_PARAMS["bias_low"]), step=0.5,
+            key="short_bias_low",
+            help="20 日乖離率 (close vs MA20) 必須 ≥ 此下限",
+        )
+        bias_high = st.slider(
+            "乖離上限 (%)", min_value=-2.0, max_value=10.0,
+            value=float(DEFAULT_BIAS_PARAMS["bias_high"]), step=0.5,
+            key="short_bias_high",
+            help="20 日乖離率必須 ≤ 此上限(過熱就排除)",
+        )
+        vol_ratio_min = st.slider(
+            "量比門檻", min_value=0.5, max_value=3.0,
+            value=float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]), step=0.1,
+            key="short_vol_ratio",
+            help="今日量 / 5 日均量 ≥ 此值",
+        )
+
+        if st.button("🔄 重設預設值", use_container_width=True, key="short_reset_params"):
+            for k in (
+                "short_vol_mult", "short_kd_low", "short_inst_days",
+                "short_bias_low", "short_bias_high", "short_vol_ratio",
+            ):
+                st.session_state.pop(k, None)
+            st.rerun()
+        st.caption("調整後按主畫面「執行選股」生效")
 
     # cache 健康度(供下方 selectbox + caption 用)
     health = db.cache_health_summary()
@@ -721,11 +762,17 @@ def _page_short() -> None:
             f"{'...' if len(failures) > 5 else ''}"
         )
 
-    # 跑多策略並行
+    # 跑多策略並行(三策略共用一份 params,各自 merge DEFAULT_*_PARAMS,
+    # 多餘 key 對該策略無害)
     params = {
+        # 策略 1: volume_kd
         "volume_multiplier": float(vol_mult),
         "kd_threshold_low": float(kd_low),
         "inst_buy_days": int(inst_days),
+        # 策略 3: bias_convergence
+        "bias_low": float(bias_low),
+        "bias_high": float(bias_high),
+        "vol_ratio_min": float(vol_ratio_min),
     }
     if not enabled_keys:
         st.warning("⚠️ 至少要選一套策略")
