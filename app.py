@@ -2563,77 +2563,80 @@ def _page_market_sentiment() -> None:
     st.header("📊 大盤情緒")
     st.caption("資料 60 秒 cache;失敗區塊不影響其他指標。")
 
-    c1, c2 = st.columns(2)
+    # === 1. TAIEX K 線(升級成 candlestick + BB + MA,reuse 個股 _make_candlestick) ===
+    st.markdown("### 加權指數 (TAIEX)")
+    # 抓 120 天:夠 BB(20) + MA60 計算(SQLite 應有 130 天 from taiex.csv preload)
+    taiex_df = fetch_taiex(days=120)
+    if taiex_df.empty:
+        st.warning("加權指數抓取失敗(可能 FinMind 限流或 SQLite 沒 TAIEX)")
+    else:
+        last_close = float(taiex_df["close"].iloc[-1])
+        prev_close = (
+            float(taiex_df["close"].iloc[-2]) if len(taiex_df) >= 2 else last_close
+        )
+        delta = last_close - prev_close
+        delta_pct = delta / prev_close * 100 if prev_close else 0
+        st.metric(
+            f"當日收盤 {taiex_df['date'].iloc[-1]}",
+            f"{last_close:,.2f}",
+            f"{delta:+.2f} ({delta_pct:+.2f}%)",
+        )
+        # 算 MA + BB(reuse src.indicators)
+        try:
+            taiex_df = taiex_df.copy()
+            taiex_df["MA5"] = ind.sma(taiex_df, 5)
+            taiex_df["MA20"] = ind.sma(taiex_df, 20)
+            taiex_df["MA60"] = ind.sma(taiex_df, 60)
+            bb = ind.bollinger(taiex_df, period=20, num_std=2.0)
+            st.plotly_chart(
+                _make_candlestick(taiex_df, bb), use_container_width=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"K 線繪製失敗(歷史可能不足):{type(e).__name__}: {e}")
+        # 短評
+        short = "短期偏多" if delta > 0 else "短期偏空"
+        st.caption(f"💬 當日 {short}")
 
-    # 加權指數
-    with c1:
-        st.markdown("### 加權指數 (TAIEX)")
-        df = fetch_taiex(days=90)
-        if df.empty:
-            st.warning("加權指數抓取失敗(可能 FinMind 限流)")
-        else:
-            last_close = float(df["close"].iloc[-1])
-            prev_close = (
-                float(df["close"].iloc[-2]) if len(df) >= 2 else last_close
-            )
-            delta = last_close - prev_close
-            delta_pct = delta / prev_close * 100 if prev_close else 0
-            st.metric(
-                f"當日收盤 {df['date'].iloc[-1]}",
-                f"{last_close:,.2f}",
-                f"{delta:+.2f} ({delta_pct:+.2f}%)",
-            )
-            fig = go.Figure(go.Scatter(
-                x=df["date"], y=df["close"],
-                mode="lines", line=dict(color="#1f77b4", width=2),
-            ))
-            fig.update_layout(
-                height=250, margin=dict(t=10, b=10, l=10, r=10),
-                font=dict(size=14),
-                xaxis=dict(tickfont=dict(size=12)),
-                yaxis=dict(tickfont=dict(size=12)),
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            # 短評
-            short = "短期偏多" if delta > 0 else "短期偏空"
-            st.caption(f"💬 當日 {short}")
+    # === 2. TAIEX 技術分析總覽(reuse 個股 helper) ===
+    _render_technical_summary("TAIEX")
 
-    # VIX
-    with c2:
-        st.markdown("### VIX 恐慌指數 (美股)")
-        df = fetch_vix(days=90)
-        if df.empty:
-            st.warning("VIX 抓取失敗")
-        else:
-            last = float(df["Close"].iloc[-1])
-            st.metric("當前 VIX", f"{last:.2f}",
-                      help="高於 25 = 市場恐慌;低於 15 = 樂觀")
-            fig = go.Figure(go.Scatter(
-                x=df["Date"], y=df["Close"],
-                mode="lines", line=dict(color="#9467bd", width=2),
-            ))
-            fig.add_hline(y=25, line_dash="dash", line_color="#d62728",
-                          annotation_text="恐慌 25")
-            fig.add_hline(y=15, line_dash="dash", line_color="#2ca02c",
-                          annotation_text="樂觀 15")
-            fig.update_layout(
-                height=250, margin=dict(t=10, b=10, l=10, r=10),
-                font=dict(size=14),
-                xaxis=dict(tickfont=dict(size=12)),
-                yaxis=dict(tickfont=dict(size=12)),
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            zone = (
-                "市場恐慌" if last > 25
-                else "市場樂觀" if last < 15
-                else "中性"
-            )
-            st.caption(f"💬 {zone}")
+    # === 3. TAIEX 多週期分析(日 K + 週 K, reuse 個股 helper) ===
+    _render_multi_timeframe("TAIEX")
 
-    # 三大法人
-    st.markdown("### 三大法人合計買賣超(全市場,近 30 日)")
+    # === 4. VIX 恐慌指數(原樣保留,從 c2 拆出獨立全寬) ===
+    st.markdown("### VIX 恐慌指數 (美股)")
+    df = fetch_vix(days=90)
+    if df.empty:
+        st.warning("VIX 抓取失敗")
+    else:
+        last = float(df["Close"].iloc[-1])
+        st.metric("當前 VIX", f"{last:.2f}",
+                  help="高於 25 = 市場恐慌;低於 15 = 樂觀")
+        fig = go.Figure(go.Scatter(
+            x=df["Date"], y=df["Close"],
+            mode="lines", line=dict(color="#9467bd", width=2),
+        ))
+        fig.add_hline(y=25, line_dash="dash", line_color="#d62728",
+                      annotation_text="恐慌 25")
+        fig.add_hline(y=15, line_dash="dash", line_color="#2ca02c",
+                      annotation_text="樂觀 15")
+        fig.update_layout(
+            height=250, margin=dict(t=10, b=10, l=10, r=10),
+            font=dict(size=14),
+            xaxis=dict(tickfont=dict(size=12)),
+            yaxis=dict(tickfont=dict(size=12)),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        zone = (
+            "市場恐慌" if last > 25
+            else "市場樂觀" if last < 15
+            else "中性"
+        )
+        st.caption(f"💬 {zone}")
+
+    # === 5. 三大法人 + 5/10/20 日累計 metric(NEW) ===
+    st.markdown("### 三大法人合計買賣超(全市場)")
     df = fetch_institutional_total(days=30)
     if df.empty:
         st.warning("法人總額抓取失敗(FinMind 限流或 dataset 受限)")
@@ -2644,6 +2647,29 @@ def _page_market_sentiment() -> None:
             st.dataframe(df.head(20), use_container_width=True, hide_index=True)
             st.caption(f"💬 dataset 欄位:{list(df.columns)} — 與預期不同")
         else:
+            # 5/10/20 日累計 metric(在 bar chart 上方)
+            n5 = float(agg["net"].tail(5).sum())
+            n10 = float(agg["net"].tail(10).sum())
+            n20 = float(agg["net"].tail(20).sum())
+
+            def _color_arrow(v: float) -> str:
+                return "🔴" if v > 0 else ("🟢" if v < 0 else "⚪")
+
+            cols = st.columns(3)
+            cols[0].metric(
+                f"近 5 日累計 {_color_arrow(n5)}",
+                f"{n5:+.1f} 億",
+                help="近 5 個交易日法人合計 net 買賣超(正 = 買超,利多)",
+            )
+            cols[1].metric(
+                f"近 10 日累計 {_color_arrow(n10)}",
+                f"{n10:+.1f} 億",
+            )
+            cols[2].metric(
+                f"近 20 日累計 {_color_arrow(n20)}",
+                f"{n20:+.1f} 億",
+            )
+
             # 紅買綠賣(買超是利多 → 紅)
             colors = ["#d62728" if v > 0 else "#2ca02c" for v in agg["net"]]
             fig = go.Figure(go.Bar(
