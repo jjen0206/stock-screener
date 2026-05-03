@@ -1,10 +1,12 @@
 """
-短線多策略並行入口。
+短線多策略並行入口(6 套):
 
-三套策略:
-- volume_kd          量價突破 + KD 黃金交叉 + 法人連 N 日買超(原 screen_short)
-- ma_alignment       均線多頭排列(MA5>MA10>MA20>MA60 + 全部上揚 + 收盤站上 MA5)
-- bias_convergence   20 日乖離率收斂(-5% ~ +1%)+ 量比 > 1.2
+- volume_kd            量價突破 + KD 黃金交叉 + 法人連 N 日買超(原 screen_short)
+- ma_alignment         均線多頭排列(MA5>MA10>MA20>MA60 + 全部上揚 + 收盤站上 MA5)
+- bias_convergence     20 日乖離率收斂(-5% ~ +1%)+ 量比 > 1.2
+- macd_golden          MACD 黃金交叉 + DIF<0(初升段)+ 量比 ≥ 1.0
+- ma_squeeze_breakout  MA5/MA20/MA60 5 日內糾結 ≤ 2% + 突破 + 量比 ≥ 1.2
+- inst_consensus       外/投/自三家同時買超(net > 0)≥ N 個交易日連續
 
 run_all_strategies() 把多策略結果聚合,輸出 {stock_id: {name, signals: [...], details}}
 信號數越多 = 多套策略同時看好 = 信心越強。
@@ -35,6 +37,21 @@ DEFAULT_BIAS_PARAMS: dict[str, Any] = {
     "bias_low": -5.0,    # 乖離下限 (%)
     "bias_high": 1.0,    # 乖離上限 (%)
     "vol_ratio_min": 1.2,  # 量比門檻
+}
+
+DEFAULT_MACD_PARAMS: dict[str, Any] = {
+    "vol_ratio_min": 1.0,  # 黃金交叉時量比下限(基本量)
+}
+
+DEFAULT_SQUEEZE_PARAMS: dict[str, Any] = {
+    "squeeze_window_days": 5,    # 過去 N 日 MA 都要糾結
+    "squeeze_pct_max": 2.0,      # MA spread % 上限(糾結門檻)
+    "breakout_pct": 0.5,         # close 突破 max(MA) × (1 + N%)
+    "vol_ratio_min": 1.2,
+}
+
+DEFAULT_INST_CONSENSUS_PARAMS: dict[str, Any] = {
+    "consecutive_days": 3,  # 三家同時買超連續天數
 }
 
 
@@ -316,6 +333,265 @@ def _evaluate_bias(
     }
 
 
+# === 策略 4:MACD 黃金交叉(初升段) ===
+
+def screen_macd_golden(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 4:MACD 黃金交叉 + DIF < 0(初升段)+ 量比 ≥ 1.0。
+
+    意義:DIF 在 0 軸下方剛上穿 signal,代表趨勢從空翻多的早期階段。比突破
+    0 軸更早進場,風險也更高。
+    """
+    p = {**DEFAULT_MACD_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "macd_dif", "macd_signal", "vol_ratio", "matched_at",
+    ]
+    raw = _evaluate_strategy(
+        date, sids, cols,
+        evaluate_fn=lambda df, name: _evaluate_macd_golden(df, name, date, p),
+        lookback_days=60,  # MACD 12-26-9 需 35 天 + 緩衝
+        min_required=35,
+    )
+    return _enrich_with_targets(raw, date)
+
+
+def _evaluate_macd_golden(
+    df: pd.DataFrame, name: str, date: str, p: dict,
+) -> dict | None:
+    if df["date"].iloc[-1] != date:
+        return None
+    macd_df = ind.macd(df, fast=12, slow=26, signal=9)
+    if macd_df.empty or len(macd_df) < 2:
+        return None
+    dif_today = macd_df["DIF"].iloc[-1]
+    dif_prev = macd_df["DIF"].iloc[-2]
+    sig_today = macd_df["DEA"].iloc[-1]
+    sig_prev = macd_df["DEA"].iloc[-2]
+    if any(pd.isna(v) for v in [dif_today, dif_prev, sig_today, sig_prev]):
+        return None
+    # 黃金交叉:今日 DIF > sig,昨日 DIF ≤ sig
+    if not (dif_today > sig_today and dif_prev <= sig_prev):
+        return None
+    # 初升段:DIF < 0(0 軸下方剛上穿)
+    if dif_today >= 0:
+        return None
+    # 量比 ≥ 1.0(基本量)
+    today_vol = float(df["volume"].iloc[-1])
+    prev_5_vol = df["volume"].iloc[-6:-1]
+    if len(prev_5_vol) < 5:
+        return None
+    ma_vol = float(prev_5_vol.mean())
+    vol_ratio = today_vol / ma_vol if ma_vol > 0 else 0.0
+    if vol_ratio < p["vol_ratio_min"]:
+        return None
+    return {
+        "stock_id": str(df["stock_id"].iloc[-1]) if "stock_id" in df.columns else "",
+        "name": name,
+        "close": float(df["close"].iloc[-1]),
+        "macd_dif": float(dif_today),
+        "macd_signal": float(sig_today),
+        "vol_ratio": float(vol_ratio),
+        "matched_at": date,
+    }
+
+
+# === 策略 5:均線糾結突破 ===
+
+def screen_ma_squeeze_breakout(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 5:過去 N 日 MA5/MA20/MA60 範圍 ≤ 2%(糾結)+ 今日突破 max(MA) +
+    量比 ≥ 1.2。
+
+    意義:多重均線收斂表示橫盤整理,突破往往伴隨強趨勢開始。
+    """
+    p = {**DEFAULT_SQUEEZE_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "ma5", "ma20", "ma60", "squeeze_pct", "vol_ratio", "matched_at",
+    ]
+    raw = _evaluate_strategy(
+        date, sids, cols,
+        evaluate_fn=lambda df, name: _evaluate_squeeze(df, name, date, p),
+        lookback_days=80,  # MA60 + 5 天糾結 window
+        min_required=65,
+    )
+    return _enrich_with_targets(raw, date)
+
+
+def _evaluate_squeeze(
+    df: pd.DataFrame, name: str, date: str, p: dict,
+) -> dict | None:
+    if df["date"].iloc[-1] != date:
+        return None
+    ma5 = ind.sma(df, 5)
+    ma20 = ind.sma(df, 20)
+    ma60 = ind.sma(df, 60)
+    window = int(p["squeeze_window_days"])
+    if len(ma60) < window:
+        return None
+    # 過去 window 天每天 MA5/MA20/MA60 spread % 都 ≤ squeeze_pct_max
+    for i in range(-window, 0):
+        v5 = ma5.iloc[i]
+        v20 = ma20.iloc[i]
+        v60 = ma60.iloc[i]
+        if pd.isna(v5) or pd.isna(v20) or pd.isna(v60):
+            return None
+        avg = (v5 + v20 + v60) / 3
+        if avg <= 0:
+            return None
+        spread = (max(v5, v20, v60) - min(v5, v20, v60)) / avg * 100
+        if spread > p["squeeze_pct_max"]:
+            return None
+    # 今日 close 突破 max(MA) × (1 + breakout_pct/100)
+    close = float(df["close"].iloc[-1])
+    today_max = max(ma5.iloc[-1], ma20.iloc[-1], ma60.iloc[-1])
+    breakout_threshold = today_max * (1 + p["breakout_pct"] / 100)
+    if close <= breakout_threshold:
+        return None
+    # 量比
+    today_vol = float(df["volume"].iloc[-1])
+    prev_5_vol = df["volume"].iloc[-6:-1]
+    if len(prev_5_vol) < 5:
+        return None
+    ma_vol = float(prev_5_vol.mean())
+    vol_ratio = today_vol / ma_vol if ma_vol > 0 else 0.0
+    if vol_ratio < p["vol_ratio_min"]:
+        return None
+    last_avg = (ma5.iloc[-1] + ma20.iloc[-1] + ma60.iloc[-1]) / 3
+    last_spread = (
+        (max(ma5.iloc[-1], ma20.iloc[-1], ma60.iloc[-1])
+         - min(ma5.iloc[-1], ma20.iloc[-1], ma60.iloc[-1]))
+        / last_avg * 100
+    )
+    return {
+        "stock_id": str(df["stock_id"].iloc[-1]) if "stock_id" in df.columns else "",
+        "name": name,
+        "close": close,
+        "ma5": float(ma5.iloc[-1]),
+        "ma20": float(ma20.iloc[-1]),
+        "ma60": float(ma60.iloc[-1]),
+        "squeeze_pct": float(last_spread),
+        "vol_ratio": float(vol_ratio),
+        "matched_at": date,
+    }
+
+
+# === 策略 6:三大法人連買(共識買進) ===
+
+def screen_inst_consensus(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 6:外資 + 投信 + 自營商**同時**買超(net > 0)≥ N 個交易日連續。
+
+    意義:重「共識」而非單家絕對值。三家共識買超罕見,出現往往是強訊號。
+
+    跟 _evaluate_strategy 共用 skeleton 不一樣 — 此策略需 institutional 三欄
+    (外/投/自各 net),不只 total_buy_sell。寫獨立 inline SQL。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_INST_CONSENSUS_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "inst_consensus_days", "matched_at",
+    ]
+    n_days = int(p["consecutive_days"])
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    with db.get_conn() as conn:
+        # name_map
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+
+        # institutional 三欄(外/投/自,各自 net),撈 N × 3 天緩衝(週末/假日)
+        start_date = (
+            _date.fromisoformat(date) - _td(days=n_days * 3)
+        ).isoformat()
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            inst_rows = conn.execute(
+                f"SELECT stock_id, date, foreign_buy_sell, "
+                f"trust_buy_sell, dealer_buy_sell "
+                f"FROM institutional "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, date DESC",
+                (*sids, start_date, date),
+            ).fetchall()
+        else:
+            inst_rows = conn.execute(
+                "SELECT stock_id, date, foreign_buy_sell, "
+                "trust_buy_sell, dealer_buy_sell "
+                "FROM institutional "
+                "WHERE date BETWEEN ? AND ? "
+                "ORDER BY stock_id, date DESC",
+                (start_date, date),
+            ).fetchall()
+        # 拿每檔最新 close(目標日)
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    # group by sid(date desc)
+    inst_by_sid: dict[str, list[dict]] = {}
+    for r in inst_rows:
+        inst_by_sid.setdefault(r["stock_id"], []).append({
+            "f": r["foreign_buy_sell"] or 0,
+            "t": r["trust_buy_sell"] or 0,
+            "d": r["dealer_buy_sell"] or 0,
+        })
+
+    rows: list[dict] = []
+    for sid in sids:
+        recs = inst_by_sid.get(sid, [])
+        if len(recs) < n_days:
+            continue
+        # 最近 N 天三家都 > 0
+        latest_n = recs[:n_days]
+        all_consensus = all(
+            r["f"] > 0 and r["t"] > 0 and r["d"] > 0
+            for r in latest_n
+        )
+        if not all_consensus:
+            continue
+        price_df = prices_by_sid.get(sid)
+        # 最後一筆 close(若 price_df 沒對應日,用最後可得日,fallback 0)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "inst_consensus_days": n_days,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -375,12 +651,19 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "volume_kd": screen_volume_kd,
     "ma_alignment": screen_ma_alignment,
     "bias_convergence": screen_bias_convergence,
+    # commit 1 新加 3 個 strategies
+    "macd_golden": screen_macd_golden,
+    "ma_squeeze_breakout": screen_ma_squeeze_breakout,
+    "inst_consensus": screen_inst_consensus,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
     "volume_kd": "量價KD",
     "ma_alignment": "多頭排列",
     "bias_convergence": "乖離收斂",
+    "macd_golden": "MACD 黃金交叉",
+    "ma_squeeze_breakout": "均線糾結突破",
+    "inst_consensus": "三大法人連買",
 }
 
 
@@ -473,12 +756,18 @@ __all__ = [
     "screen_volume_kd",
     "screen_ma_alignment",
     "screen_bias_convergence",
+    "screen_macd_golden",
+    "screen_ma_squeeze_breakout",
+    "screen_inst_consensus",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
     "DEFAULT_MA_PARAMS",
+    "DEFAULT_MACD_PARAMS",
+    "DEFAULT_SQUEEZE_PARAMS",
+    "DEFAULT_INST_CONSENSUS_PARAMS",
     "DEFAULT_BIAS_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
