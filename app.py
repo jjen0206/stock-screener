@@ -637,8 +637,8 @@ def _page_short() -> None:
     cols = st.columns([2, 3, 1])
     target_date = cols[0].date_input("選股日期", value=_get_default_screen_date())
     universe_options = [
-        f"🎯 充足歷史的純股票 ({eligible_stocks} 檔, 20+ 天 / 不含 ETF & 債券)",
-        f"📊 充足歷史的股 ({eligible_stocks} 檔, 20+ 天 / 含 ETF & 債券)",
+        f"🎯 充足歷史的純股票 ({eligible_stocks} 檔, ≥20 天 / 不含 ETF & 債券)",
+        f"📊 充足歷史的股 ({eligible_stocks} 檔, ≥20 天 / 含 ETF & 債券)",
         "全市場 (約 2360 檔, twse + tpex + ETF)",
         "快速:50 檔大型股",
         "我的關注清單",
@@ -657,7 +657,7 @@ def _page_short() -> None:
     st.caption(
         f"📦 Cache 健康度:總 {health['total_stocks']} 檔 / "
         f"有價量 {health['with_prices']} 檔 — "
-        f"60+ 天 {b['60+']}・20-59 天 {b['20-59']}・"
+        f"60+ 天 {b['60+']}(可跑全策略)・20-59 天 {b['20-59']}・"
         f"14-19 天 {b['14-19']}・<14 天 {b['<14']}"
         + (
             "  ⚠️ 多數個股歷史不足,請按 sidebar『⏳ 一次性回補 90 日歷史』"
@@ -2638,15 +2638,18 @@ def _render_system_health() -> None:
     # === 📊 資料覆蓋率 ===
     st.markdown("### 📊 資料覆蓋率")
     health = db.cache_health_summary()
-    cols = st.columns(4)
+    b = health["buckets"]
+    ge_20 = b["60+"] + b["20-59"]  # 20+ 合計(短線 selectbox 用同一定義)
+    cols = st.columns(5)
     cols[0].metric("全市場股票", f"{health['total_stocks']:,}")
     cols[1].metric("有價量歷史", f"{health['with_prices']:,}")
-    b = health["buckets"]
-    cols[2].metric("≥60 天歷史", f"{b['60+']:,}")
-    cols[3].metric("<14 天 (新)", f"{b['<14']:,}")
+    cols[2].metric("≥60 天(可跑全策略)", f"{b['60+']:,}")
+    cols[3].metric("≥20 天(可跑量價KD/乖離)", f"{ge_20:,}")
+    cols[4].metric("<14 天(新)", f"{b['<14']:,}")
     st.caption(
         f"分桶:60+ {b['60+']:,} / 20-59 {b['20-59']:,} / "
-        f"14-19 {b['14-19']:,} / <14 {b['<14']:,}"
+        f"14-19 {b['14-19']:,} / <14 {b['<14']:,}。"
+        "20+ 天可跑量價KD 與乖離率策略;60+ 才能跑 ma_alignment(因為 MA60 需要)。"
     )
 
     # === 🔄 上次更新(各表 max date + count) ===
