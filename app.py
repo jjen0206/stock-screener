@@ -49,8 +49,13 @@ from src.screener_short import DEFAULT_SHORT_PARAMS
 from src.ui_cards import render_picks_cards, view_mode_toggle
 from src.strategies import (
     DEFAULT_BIAS_PARAMS,
+    DEFAULT_BB_REBOUND_PARAMS,
+    DEFAULT_GAP_UP_PARAMS,
     DEFAULT_INST_CONSENSUS_PARAMS,
+    DEFAULT_INST_SILENT_PARAMS,
+    DEFAULT_RSI_RECOVERY_PARAMS,
     DEFAULT_SQUEEZE_PARAMS,
+    DEFAULT_VOL_BREAKOUT_PARAMS,
     STRATEGY_LABELS,
     aggregated_to_dataframe, compute_target_prices, run_all_strategies,
 )
@@ -544,6 +549,16 @@ _SHORT_PARAM_DEFAULTS: dict[str, float | int] = {
     # 策略獨有 threshold;MACD 黃金沒可調 threshold 不暴露)
     "short_squeeze_pct_max": float(DEFAULT_SQUEEZE_PARAMS["squeeze_pct_max"]),
     "short_consensus_days": int(DEFAULT_INST_CONSENSUS_PARAMS["consecutive_days"]),
+    # commit 3 新增 5 個 strategies 各自獨有 thresholds
+    "short_bb_lookback": int(DEFAULT_BB_REBOUND_PARAMS["bb_touch_lookback"]),
+    "short_rsi_oversold": float(DEFAULT_RSI_RECOVERY_PARAMS["rsi_oversold"]),
+    "short_rsi_recovered": float(DEFAULT_RSI_RECOVERY_PARAMS["rsi_recovered"]),
+    "short_silent_pct_max": float(DEFAULT_INST_SILENT_PARAMS["pct_change_max"]),
+    "short_silent_bb_pos_max": float(DEFAULT_INST_SILENT_PARAMS["bb_position_max"]),
+    "short_vbo_vol_ratio": float(DEFAULT_VOL_BREAKOUT_PARAMS["vbo_vol_ratio_min"]),
+    "short_vbo_highest_lookback": int(DEFAULT_VOL_BREAKOUT_PARAMS["highest_lookback"]),
+    "short_gap_pct_min": float(DEFAULT_GAP_UP_PARAMS["gap_pct_min"]),
+    "short_gap_vol_ratio": float(DEFAULT_GAP_UP_PARAMS["gap_vol_ratio_min"]),
 }
 
 
@@ -559,6 +574,12 @@ _STRATEGY_CATEGORY: dict[str, str] = {
     "macd_golden": "趨勢",
     "ma_squeeze_breakout": "趨勢",
     "inst_consensus": "籌碼",
+    # commit 3
+    "bb_lower_rebound": "反轉",
+    "rsi_recovery": "反轉",
+    "inst_silent_accum": "籌碼",
+    "volume_breakout": "動能",
+    "gap_up": "動能",
 }
 
 
@@ -711,6 +732,60 @@ def _page_short() -> None:
             help="外資 + 投信 + 自營商三家 net 都 > 0 連續 N 天",
         )
 
+        st.markdown("**策略 7:布林下軌反彈**")
+        bb_lookback = st.slider(
+            "下軌觸碰回溯天數", min_value=3, max_value=15, step=1,
+            key="short_bb_lookback",
+            help="過去 N 日內任一日 close 觸 BB 下軌",
+        )
+
+        st.markdown("**策略 8:RSI 回升**")
+        rsi_oversold = st.slider(
+            "超賣門檻", min_value=20.0, max_value=40.0, step=1.0,
+            key="short_rsi_oversold",
+            help="14 日內 RSI 須曾低於此值",
+        )
+        rsi_recovered = st.slider(
+            "回升門檻", min_value=45.0, max_value=70.0, step=1.0,
+            key="short_rsi_recovered",
+            help="今日 RSI 須高於此值",
+        )
+
+        st.markdown("**策略 9:主力默默吸貨**")
+        silent_pct_max = st.slider(
+            "平盤定義 |%|", min_value=0.5, max_value=3.0, step=0.1,
+            key="short_silent_pct_max",
+            help="今日漲跌幅絕對值 < 此值才算「平盤」",
+        )
+        silent_bb_pos_max = st.slider(
+            "BB 位置 % 上限", min_value=20.0, max_value=70.0, step=5.0,
+            key="short_silent_bb_pos_max",
+            help="close 在 BB 內位置 %(0=下軌, 100=上軌),須 < 此值",
+        )
+
+        st.markdown("**策略 10:量爆突破**")
+        vbo_vol_ratio = st.slider(
+            "量比門檻 (爆量)", min_value=1.5, max_value=5.0, step=0.1,
+            key="short_vbo_vol_ratio",
+            help="今日量 / 5 日均量 ≥ 此值",
+        )
+        vbo_highest_lookback = st.slider(
+            "新高回溯天數", min_value=10, max_value=60, step=5,
+            key="short_vbo_highest_lookback",
+            help="close 須突破近 N 日 max(close)",
+        )
+
+        st.markdown("**策略 11:跳空缺口**")
+        gap_pct_min = st.slider(
+            "跳空門檻 %", min_value=0.5, max_value=5.0, step=0.1,
+            key="short_gap_pct_min",
+            help="今日 open / 昨日 close − 1 ≥ 此 %",
+        )
+        gap_vol_ratio = st.slider(
+            "量比門檻 (跳空)", min_value=1.0, max_value=3.0, step=0.1,
+            key="short_gap_vol_ratio",
+        )
+
         # widget 全 key-only(沒 value=),session_state 是 SoT;callback 直接
         # 寫 session_state[key] = default → widget 下次 render 從 session_state
         # 拿到正確值,UI 立刻刷新。雲端「click 後不刷新」的 race 解掉。
@@ -816,9 +891,10 @@ def _page_short() -> None:
             f"{'...' if len(failures) > 5 else ''}"
         )
 
-    # 跑多策略並行(六策略共用一份 params,各自 merge DEFAULT_*_PARAMS,
-    # 多餘 key 對該策略無害。注意 vol_ratio_min 三策略共用同名 key,
-    # 此處用乖離收斂的設定,MACD 黃金 / 均線糾結 也吃這個值,可接受)
+    # 跑多策略並行(11 套共用一份 params,各自 merge DEFAULT_*_PARAMS,
+    # 多餘 key 對該策略無害。共用 key:
+    # - vol_ratio_min:bias / macd / squeeze 共用此處 bias 的值(三策略量比期望相近)
+    # - 策略 10/11 用獨立 vbo_vol_ratio_min / gap_vol_ratio_min(差異大,獨立暴露)
     params = {
         # 策略 1: volume_kd
         "volume_multiplier": float(vol_mult),
@@ -832,6 +908,21 @@ def _page_short() -> None:
         "squeeze_pct_max": float(squeeze_pct_max),
         # 策略 6: inst_consensus
         "consecutive_days": int(consensus_days),
+        # 策略 7: bb_lower_rebound
+        "bb_touch_lookback": int(bb_lookback),
+        # 策略 8: rsi_recovery
+        "rsi_oversold": float(rsi_oversold),
+        "rsi_recovered": float(rsi_recovered),
+        # rsi_window_days 預設 14,UI 不暴露(改 14 天框架等於改策略本質)
+        # 策略 9: inst_silent_accum
+        "pct_change_max": float(silent_pct_max),
+        "bb_position_max": float(silent_bb_pos_max),
+        # 策略 10: volume_breakout
+        "vbo_vol_ratio_min": float(vbo_vol_ratio),
+        "highest_lookback": int(vbo_highest_lookback),
+        # 策略 11: gap_up
+        "gap_pct_min": float(gap_pct_min),
+        "gap_vol_ratio_min": float(gap_vol_ratio),
     }
     if not enabled_keys:
         st.warning("⚠️ 至少要選一套策略")

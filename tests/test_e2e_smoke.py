@@ -420,6 +420,59 @@ def test_short_advanced_params_new_sliders_render(isolated_db):
     assert at.session_state["short_consensus_days"] == 3
 
 
+def test_short_commit3_new_strategies_sliders_render(isolated_db):
+    """commit 3 新加 5 個 strategies 對應的 9 個 sliders 都要 render +
+    session_state default 值正確。
+    """
+    at = _new_at("🔥 短線")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 策略 7: bb_lower_rebound
+    assert at.session_state["short_bb_lookback"] == 5
+    # 策略 8: rsi_recovery
+    assert at.session_state["short_rsi_oversold"] == 30.0
+    assert at.session_state["short_rsi_recovered"] == 50.0
+    # 策略 9: inst_silent_accum
+    assert at.session_state["short_silent_pct_max"] == 1.0
+    assert at.session_state["short_silent_bb_pos_max"] == 50.0
+    # 策略 10: volume_breakout
+    assert at.session_state["short_vbo_vol_ratio"] == 2.5
+    assert at.session_state["short_vbo_highest_lookback"] == 20
+    # 策略 11: gap_up
+    assert at.session_state["short_gap_pct_min"] == 1.5
+    assert at.session_state["short_gap_vol_ratio"] == 1.5
+
+
+def test_short_eleven_strategies_registered():
+    """run_all_strategies 應認得全 11 套策略 keys。"""
+    from src import strategies as strat
+
+    assert len(strat.ALL_STRATEGIES) == 11
+    assert len(strat.STRATEGY_LABELS) == 11
+    expected = {
+        "volume_kd", "ma_alignment", "bias_convergence",
+        "macd_golden", "ma_squeeze_breakout", "inst_consensus",
+        "bb_lower_rebound", "rsi_recovery", "inst_silent_accum",
+        "volume_breakout", "gap_up",
+    }
+    assert set(strat.ALL_STRATEGIES.keys()) == expected
+    assert set(strat.STRATEGY_LABELS.keys()) == expected
+
+
+def test_short_strategy_category_covers_all_eleven():
+    """app._STRATEGY_CATEGORY 必須涵蓋全 11 套策略,否則 5 tabs 篩選會漏。"""
+    sys.modules.pop("app", None)
+    import app as app_mod
+    from src import strategies as strat
+
+    missing = set(strat.ALL_STRATEGIES.keys()) - set(app_mod._STRATEGY_CATEGORY.keys())
+    assert not missing, f"_STRATEGY_CATEGORY 漏了:{missing}"
+    # 各 cat 都要有人(沒孤兒 cat)
+    cats = set(app_mod._STRATEGY_CATEGORY.values())
+    assert cats == {"趨勢", "反轉", "籌碼", "動能"}
+
+
 def test_short_filter_agg_by_category_logic():
     """`_filter_agg_by_category` 純邏輯測試 — 不過 streamlit。
     確保「同檔有兩個策略屬不同類」時,兩個 cat 都會選到該檔。

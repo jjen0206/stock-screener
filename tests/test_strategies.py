@@ -498,3 +498,269 @@ def test_inst_consensus_one_house_neg_fails(tmp_db):
     } for i in range(5)])
     df = strat.screen_inst_consensus(_DATES[4], stock_ids=["MIX"])
     assert df.empty
+
+
+# === 策略 7:bb_lower_rebound ===
+
+def _seed_dip_then_red_k(stock_id: str, name: str):
+    """前 20 天 100 平盤(BB mid=100, σ 從 0 → 隨後段急跌變大) + 最後 5 天急
+    跌觸下軌(day 22 close=70 跌穿 lower)+ 最後一天 open 75 → close 80(紅 K)
+    + 量增。
+
+    BB 算法:closes[6..25] 平盤 14 個 100 + 後 6 個 [90,80,70,70,75,80],
+    mean≈93.25 σ≈11,lower≈71;但檢查 last-5 是逐日 lower,day 22 close=70
+    vs day 22 lower≈81 → 觸下軌成立。
+    """
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    closes = [100.0] * 20 + [90.0, 80.0, 70.0, 70.0, 75.0, 80.0]
+    opens = list(closes)
+    opens[-1] = 75.0  # day 25:open 75,close 80 = 紅 K
+    volumes = [1000] * (len(closes) - 1) + [2000]  # 最後一天量比 2.0
+    rows = []
+    for i, c in enumerate(closes):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": opens[i], "high": max(opens[i], c) + 0.5,
+            "low": min(opens[i], c) - 0.5, "close": c,
+            "volume": volumes[i],
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    db.upsert_daily_prices(rows)
+    return _DATES[len(closes) - 1]
+
+
+def test_bb_lower_rebound_dip_then_red_k_passes(tmp_db):
+    """跌至下軌 + 最後一天反彈收紅 K + 量增 → 入選。"""
+    last = _seed_dip_then_red_k("BBR", "下軌反彈")
+    df = strat.screen_bb_lower_rebound(last, stock_ids=["BBR"])
+    assert len(df) == 1, f"期望入選,實際 df={df}"
+    row = df.iloc[0]
+    assert row["close"] > row["open"]  # 紅 K
+    assert row["vol_ratio"] >= 1.0
+
+
+def test_bb_lower_rebound_uptrend_no_touch_lower_fails(tmp_db):
+    """線性上漲 → 從未觸下軌 → 不入選。"""
+    last = _seed_uptrend("UP_BB", "上升股", n=30)
+    df = strat.screen_bb_lower_rebound(last, stock_ids=["UP_BB"])
+    assert df.empty
+
+
+# === 策略 8:rsi_recovery ===
+
+def _seed_rsi_dip_recovery(stock_id: str, name: str, n: int = 35):
+    """前段大跌讓 RSI < 30,後段反彈讓 RSI 回 50+(monotonic 上升)。"""
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    closes = []
+    # 前 22 天線性大跌 100 → 60(RSI 14 會降到很低)
+    for i in range(22):
+        closes.append(100.0 - i * (40.0 / 22))
+    # 後 13 天線性持續上漲 60 → 80(RSI 從低點 monotonic 回升)
+    for i in range(13):
+        closes.append(60.0 + (i + 1) * (20.0 / 13))
+    rows = []
+    for i in range(n):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": closes[i], "high": closes[i] + 0.3,
+            "low": closes[i] - 0.3, "close": closes[i],
+            "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    db.upsert_daily_prices(rows)
+    return _DATES[n - 1]
+
+
+def test_rsi_recovery_dip_then_recovery_passes(tmp_db):
+    """RSI 在 14 日內曾 < 30 + 今日 > 50 + monotonic 上升 → 入選。"""
+    last = _seed_rsi_dip_recovery("RSIR", "RSI回升")
+    df = strat.screen_rsi_recovery(last, stock_ids=["RSIR"])
+    assert len(df) == 1, f"期望入選,實際 df={df}"
+    row = df.iloc[0]
+    assert row["rsi_today"] > 50.0
+    assert row["rsi_min_in_window"] < 30.0
+
+
+def test_rsi_recovery_flat_fails(tmp_db):
+    """平盤 → RSI 永遠 ~50,既沒 < 30 也不算反轉 → 不入選。"""
+    last = _seed_flat("FLAT_R", "平盤R", n=35)
+    df = strat.screen_rsi_recovery(last, stock_ids=["FLAT_R"])
+    assert df.empty
+
+
+# === 策略 9:inst_silent_accum ===
+
+def _seed_silent_accum(
+    stock_id: str, name: str, n: int = 25, inst_per_day: int = 100,
+):
+    """5/10/20 日法人累計都 > 0 + 平盤 + close 在 BB 下半部。
+
+    BB 下半部:在最後一段做小幅下跌讓 close 落在 mid 之下。
+    """
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    closes = []
+    # 前 20 天 100 平盤
+    for _ in range(20):
+        closes.append(100.0)
+    # 後 5 天緩降到 95(讓 close 在 BB mid 之下,但不超過 -1% 平盤門檻)
+    closes.extend([99.0, 98.0, 97.0, 96.0, 95.5])  # 最後一天 95.5 vs 前一天 96 = -0.52%
+    rows = []
+    for i in range(n):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": closes[i], "high": closes[i] + 0.3,
+            "low": closes[i] - 0.3, "close": closes[i],
+            "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    db.upsert_daily_prices(rows)
+    # 灌 institutional:全部 net > 0(三家 sum > 0)
+    insts = []
+    for i in range(n):
+        insts.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "foreign_buy_sell": inst_per_day, "trust_buy_sell": inst_per_day // 2,
+            "dealer_buy_sell": inst_per_day // 4,
+            "total_buy_sell": inst_per_day + inst_per_day // 2 + inst_per_day // 4,
+        })
+    db.upsert_institutional(insts)
+    return _DATES[n - 1]
+
+
+def test_inst_silent_accum_three_window_positive_passes(tmp_db):
+    """5/10/20 日累計都 > 0 + 平盤 + 低檔 → 入選。"""
+    last = _seed_silent_accum("SILENT", "默默吸貨")
+    df = strat.screen_inst_silent_accum(last, stock_ids=["SILENT"])
+    assert len(df) == 1, f"期望入選,實際 df={df}"
+    row = df.iloc[0]
+    assert row["inst_5d"] > 0
+    assert row["inst_10d"] > 0
+    assert row["inst_20d"] > 0
+    assert abs(row["pct_change"]) < 1.0
+    assert row["bb_position_pct"] < 50.0
+
+
+def test_inst_silent_accum_inst_negative_fails(tmp_db):
+    """法人連續賣超 → 累計負 → 不入選。"""
+    last = _seed_silent_accum("SOLD", "賣超", inst_per_day=-100)
+    df = strat.screen_inst_silent_accum(last, stock_ids=["SOLD"])
+    assert df.empty
+
+
+# === 策略 10:volume_breakout ===
+
+def _seed_break_to_new_high(stock_id: str, name: str, n: int = 25):
+    """前 20 天平盤 100 + 最後一天爆量收 105(突破 20 日新高)。"""
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    rows = []
+    for i in range(n - 1):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # 最後一天:close 105(> 20 日 max=100), 量 3000(2.5×1000=2500 → 1.2倍 > 2.5)
+    rows.append({
+        "stock_id": stock_id, "date": _DATES[n - 1],
+        "open": 100.0, "high": 105.5, "low": 100.0, "close": 105.0,
+        "volume": 3000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    return _DATES[n - 1]
+
+
+def test_volume_breakout_new_high_with_volume_passes(tmp_db):
+    """突破 20 日高 + 量爆 (3×) → 入選。"""
+    last = _seed_break_to_new_high("VBO", "量爆突破")
+    df = strat.screen_volume_breakout(last, stock_ids=["VBO"])
+    assert len(df) == 1, f"期望入選,實際 df={df}"
+    row = df.iloc[0]
+    assert row["close"] > row["high_20d"]
+    assert row["vol_ratio"] >= 2.5
+
+
+def test_volume_breakout_no_volume_fails(tmp_db):
+    """突破但量沒爆(量比 < 2.5)→ 不入選。"""
+    db.upsert_stocks([{
+        "stock_id": "NOVOL", "name": "突破無量", "market": "TW",
+    }])
+    rows = []
+    for i in range(24):
+        rows.append({
+            "stock_id": "NOVOL", "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # close 突破但量比 1.2 < 2.5
+    rows.append({
+        "stock_id": "NOVOL", "date": _DATES[24],
+        "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+        "volume": 1200,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    df = strat.screen_volume_breakout(_DATES[24], stock_ids=["NOVOL"])
+    assert df.empty
+
+
+# === 策略 11:gap_up ===
+
+def _seed_gap_up_with_red_k(stock_id: str, name: str, n: int = 7):
+    """前 6 天平盤 100 + 最後一天 open=102(跳空 +2%)+ close=104(紅 K)+ 量增。"""
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    rows = []
+    for i in range(n - 1):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # 跳空 2%(open 102 vs 昨 close 100)+ 收 104(紅 K)+ 量 1800(量比 1.8)
+    rows.append({
+        "stock_id": stock_id, "date": _DATES[n - 1],
+        "open": 102.0, "high": 105.0, "low": 102.0, "close": 104.0,
+        "volume": 1800,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    return _DATES[n - 1]
+
+
+def test_gap_up_with_red_k_passes(tmp_db):
+    """跳空 +2% + 收紅 + 量比 1.8 → 入選。"""
+    last = _seed_gap_up_with_red_k("GAP", "跳空缺口")
+    df = strat.screen_gap_up(last, stock_ids=["GAP"])
+    assert len(df) == 1, f"期望入選,實際 df={df}"
+    row = df.iloc[0]
+    assert row["gap_pct"] >= 1.5
+    assert row["close"] > row["open"]
+    assert row["vol_ratio"] >= 1.5
+
+
+def test_gap_up_red_k_but_no_gap_fails(tmp_db):
+    """收紅 + 量增,但 open 沒跳空(open ≈ 昨日 close)→ 不入選。"""
+    db.upsert_stocks([{
+        "stock_id": "NOGAP", "name": "無跳空", "market": "TW",
+    }])
+    rows = []
+    for i in range(6):
+        rows.append({
+            "stock_id": "NOGAP", "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # open 100.5(只 +0.5%,< 1.5%)
+    rows.append({
+        "stock_id": "NOGAP", "date": _DATES[6],
+        "open": 100.5, "high": 103.0, "low": 100.5, "close": 102.0,
+        "volume": 1800,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    df = strat.screen_gap_up(_DATES[6], stock_ids=["NOGAP"])
+    assert df.empty
