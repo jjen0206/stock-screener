@@ -1752,6 +1752,111 @@ def test_format_multi_strategy_empty_includes_weekend_hint(isolated_db):
     assert "今日無任一策略選中" in msg
 
 
+def test_extract_features_returns_dict_with_sufficient_history(isolated_db):
+    """灌 70 天 daily_prices(無 institutional)→ extract_features 回 11 個 key 都齊。"""
+    from src import ml_predictor
+    _seed_trend_prices(direction="up", n_days=70)
+
+    # 用 daily_prices 最後一個日期當 target_date
+    from src import database as db
+    latest = db.get_latest_trading_date()
+    feats = ml_predictor.extract_features("2330", latest)
+    assert feats is not None, "70 天歷史應該夠抽 features"
+    for k in ml_predictor.FEATURE_NAMES:
+        assert k in feats
+    # 沒 institutional → inst_5d / inst_10d 應該是 0
+    assert feats["inst_5d"] == 0.0
+    assert feats["inst_10d"] == 0.0
+
+
+def test_extract_features_returns_none_when_history_insufficient(isolated_db):
+    """少於 60 天歷史 → 回 None。"""
+    from src import ml_predictor
+    _seed_trend_prices(direction="up", n_days=30)
+
+    feats = ml_predictor.extract_features("2330", "2026-01-30")
+    assert feats is None
+
+
+def test_compute_label_win_when_target_reached(isolated_db):
+    """進場後 5 天 high 觸到 entry + 1.5×ATR → label = 1。"""
+    from src import database as db, ml_predictor
+    # 灌 60 天歷史(算 ATR + 進場日)+ 5 天後續(高點觸到 target)
+    _seed_trend_prices(direction="up", n_days=70)
+    latest = db.get_latest_trading_date()
+
+    # 70 天線性漲(close 從 100 到 169,每天 +1)→ ATR 約 1
+    # 倒數第 6 天當 entry,target = entry_close + 1.5,後 5 天 high 必過(每天漲 1)
+    from datetime import date as _date, timedelta as _td
+    target_date_obj = _date.fromisoformat(latest) - _td(days=5)
+    target_date = target_date_obj.isoformat()
+
+    label = ml_predictor.compute_label("2330", target_date)
+    assert label == 1, f"線性漲後 5 天必觸 target,期望 1, 實際 {label}"
+
+
+def test_compute_label_returns_none_when_no_future_data(isolated_db):
+    """target_date 後沒足夠 lookahead 資料 → None。"""
+    from src import database as db, ml_predictor
+    _seed_trend_prices(direction="up", n_days=70)
+
+    # 用最新日期當 target → 後續 0 天 → None
+    latest = db.get_latest_trading_date()
+    label = ml_predictor.compute_label("2330", latest)
+    assert label is None
+
+
+def test_format_pick_summary_includes_ai_part_when_model_loaded(
+    isolated_db, monkeypatch,
+):
+    """mock model.load 回非 None,format_pick_summary 應含「🎯 AI 勝率」part。"""
+    from src import individual_sections
+
+    class _FakeModel:
+        classes_ = [0, 1]
+
+        def predict_proba(self, X):
+            import numpy as _np
+            return _np.array([[0.30, 0.70]])
+
+    # 重置 module cache 避免之前的 load 結果污染
+    individual_sections._ml_model_cache = None
+    individual_sections._ml_model_loaded = False
+    monkeypatch.setattr(
+        individual_sections, "_get_ml_model", lambda: _FakeModel(),
+    )
+
+    # 也要 mock predict_short_pick_winrate(否則會 call extract_features 看 SQLite)
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_short_pick_winrate",
+        lambda model, sid, target_date, db_path=None: 0.70,
+    )
+
+    # 同時要灌一個 latest_trading_date 否則 _ai_winrate_part 走 None fallback
+    _seed_distribution_scenario()
+
+    summary = individual_sections.format_pick_summary("2330")
+    assert "AI 勝率" in summary, f"應含 AI part, 實際: {summary!r}"
+    assert "70%" in summary, f"勝率應 70%, 實際: {summary!r}"
+
+
+def test_format_pick_summary_ai_part_dash_when_no_model(
+    isolated_db, monkeypatch,
+):
+    """沒模型 → AI part = 「🎯 —」(維持 4 part 格式統一)。"""
+    from src import individual_sections
+
+    individual_sections._ml_model_cache = None
+    individual_sections._ml_model_loaded = False
+    monkeypatch.setattr(individual_sections, "_get_ml_model", lambda: None)
+
+    summary = individual_sections.format_pick_summary("9999")
+    assert "🎯 —" in summary, f"沒模型應「🎯 —」佔位, 實際: {summary!r}"
+    # 結構仍 4 part(3 個 / 分隔)
+    assert summary.count("/") == 3
+
+
 def test_format_pick_summary_with_data(isolated_db):
     """灌足夠歷史(70 天)+ institutional → 摘要含 📊 / 🚦 / 💡 三個 part。"""
     from src.individual_sections import format_pick_summary
@@ -1772,12 +1877,13 @@ def test_format_pick_summary_no_data_returns_placeholders(isolated_db):
     from src.individual_sections import format_pick_summary
 
     summary = format_pick_summary("9999", indent="   ")
-    # 3 part 都用「—」
+    # 4 part 都用「—」(技術 / 主力 / 操作 / AI 勝率)
     assert "📊 —" in summary, f"技術 part 應佔位, 實際: {summary!r}"
     assert "🚦 —" in summary, f"主力 part 應佔位, 實際: {summary!r}"
     assert "💡 —" in summary, f"操作 part 應佔位, 實際: {summary!r}"
-    # 結構含 2 個分隔符
-    assert summary.count("/") == 2
+    assert "🎯 —" in summary, f"AI 勝率 part 應佔位, 實際: {summary!r}"
+    # 結構含 3 個分隔符
+    assert summary.count("/") == 3
     assert summary.startswith("   ")  # indent 開頭
 
 
@@ -1796,8 +1902,9 @@ def test_format_pick_summary_partial_fallback_keeps_format(isolated_db):
     assert "🚦 —" in summary, f"主力 part 應佔位(無法人資料), 實際: {summary!r}"
     # 💡 應有實值(summary OK 就能查 _ACTION_CORE_BY_SUMMARY)
     assert "💡 —" not in summary, f"操作 part 應有實值, 實際: {summary!r}"
-    # 結構仍 3 part
-    assert summary.count("/") == 2
+    # 🎯 AI 勝率(本機有 model.pkl 可能有實值,test 不嚴格驗值)
+    # 結構仍 4 part
+    assert summary.count("/") == 3
 
 
 def test_format_short_picks_includes_detail_under_4096_chars(isolated_db):

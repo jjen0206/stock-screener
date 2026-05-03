@@ -14,6 +14,10 @@ numpy>=1.26.0
 # 視覺化
 plotly>=5.20.0
 
+# ML 模型(短線勝率預測,RandomForestClassifier)
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
 # 環境變數
 python-dotenv>=1.0.0
 

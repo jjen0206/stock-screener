@@ -513,14 +513,59 @@ def _compute_main_force_signal(sid: str) -> dict:
     }
 
 
+_ML_MODEL_PATH = "models/short_pick.pkl"
+# Module-level cache:避免每張卡都 joblib.load(50ms × 138 picks = 7s 浪費)
+_ml_model_cache: object | None = None
+_ml_model_loaded = False
+
+
+def _get_ml_model():
+    """lazy load 模型 + cache。檔不存在 / load 失敗 → 永遠回 None,後續呼叫直接 short-circuit。"""
+    global _ml_model_cache, _ml_model_loaded
+    if _ml_model_loaded:
+        return _ml_model_cache
+    _ml_model_loaded = True
+    try:
+        from src.ml_predictor import load_model
+        from src import config as _config
+        from pathlib import Path as _Path
+        path = _Path(_config.PROJECT_ROOT) / _ML_MODEL_PATH
+        _ml_model_cache = load_model(path)
+    except Exception:  # noqa: BLE001
+        _ml_model_cache = None
+    return _ml_model_cache
+
+
+def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
+    """產 「🎯 AI 勝率 N%」 part。沒模型 / 預測失敗 → 「🎯 —」(維持格式)。
+
+    target_date None → 用 SQLite daily_prices 最新日期(週末/假日也能跑)。
+    """
+    model = _get_ml_model()
+    if model is None:
+        return "🎯 —"
+    try:
+        if target_date is None:
+            target_date = db.get_latest_trading_date()
+        if target_date is None:
+            return "🎯 —"
+        from src.ml_predictor import predict_short_pick_winrate
+        prob = predict_short_pick_winrate(model, sid, target_date)
+        if prob is None:
+            return "🎯 —"
+        return f"🎯 AI 勝率 {prob * 100:.0f}%"
+    except Exception:  # noqa: BLE001
+        return "🎯 —"
+
+
 def format_pick_summary(sid: str, indent: str = "   ") -> str:
     """產生推播 / 卡片用的 1-line 精簡分析摘要(沒 streamlit 依賴,純字串)。
 
-    格式永遠 3 part(用「—」佔位保持格式統一,即使全 fallback):
-        `{indent}📊 {trend} + {bb_pos} / 🚦 主力 {status} / 💡 {操作核心}`
+    格式永遠 4 part(用「—」佔位保持格式統一,即使全 fallback):
+        `{indent}📊 {trend}+{bb_pos} / 🚦 主力 {status} / 💡 {操作核心} / 🎯 AI 勝率 N%`
 
-    任一 part 沒資料(歷史不足 / 無法人籌碼)→ 該 part 顯示「—」,不 skip。
-    這樣推播訊息每檔的詳細行對齊整齊,user 一看格式就知道該檔哪一面缺資料。
+    任一 part 沒資料(歷史不足 / 無法人籌碼 / 無 ML 模型)→ 該 part 顯示「—」,
+    不 skip。user 一看格式就知道該檔哪一面缺資料。
 
     給 src.notifier / src.discord_notifier reuse,讓推播訊息每檔加一行詳細
     (原本只 close + 量比 + KD + 法人 3 日)。
@@ -560,7 +605,10 @@ def format_pick_summary(sid: str, indent: str = "   ") -> str:
     else:
         action_part = "💡 —"
 
-    return indent + " / ".join([tech_part, force_part, action_part])
+    # 🎯 AI 勝率(如果 model 存在)
+    ai_part = _ai_winrate_part(sid)
+
+    return indent + " / ".join([tech_part, force_part, action_part, ai_part])
 
 
 def _render_main_force_signal(sid: str) -> None:
