@@ -1460,6 +1460,47 @@ def test_short_page_reset_button_resets_all_widgets(isolated_db):
     assert at.number_input(key="short_vol_mult").value == expected["short_vol_mult"]
 
 
+def test_split_margin_dataset_long_format():
+    """FinMind long format(name 欄分 MarginPurchase / ShortSale)→ 切成兩個 DF。"""
+    import app
+
+    df = pd.DataFrame([
+        {"date": "2026-04-30", "name": "MarginPurchase", "TodayBalance": 100_000_000_000},
+        {"date": "2026-04-30", "name": "ShortSale", "TodayBalance": 5_000_000_000},
+        {"date": "2026-04-29", "name": "MarginPurchase", "TodayBalance": 99_000_000_000},
+        {"date": "2026-04-29", "name": "ShortSale", "TodayBalance": 4_800_000_000},
+    ])
+    margin, short = app._split_margin_dataset(df)
+    assert len(margin) == 2 and len(short) == 2
+    # 換算億元(/ 1e8):100B/1e8 = 1000 億
+    assert abs(margin["balance_billion"].iloc[-1] - 1000.0) < 0.1
+    assert abs(short["balance_billion"].iloc[-1] - 50.0) < 0.1
+
+
+def test_split_margin_dataset_wide_format_fallback():
+    """舊版 wide format(MarginPurchaseTodayBalance / ShortSaleTodayBalance 兩欄)。"""
+    import app
+
+    df = pd.DataFrame([
+        {"date": "2026-04-30", "MarginPurchaseTodayBalance": 100_000_000_000,
+         "ShortSaleTodayBalance": 5_000_000_000},
+        {"date": "2026-04-29", "MarginPurchaseTodayBalance": 99_000_000_000,
+         "ShortSaleTodayBalance": 4_800_000_000},
+    ])
+    margin, short = app._split_margin_dataset(df)
+    assert len(margin) == 2 and len(short) == 2
+    assert abs(margin["balance_billion"].iloc[0] - 1000.0) < 0.1
+
+
+def test_split_margin_dataset_unknown_schema_returns_empty():
+    """完全不認得的 schema → 回兩個空 DataFrame(caller 走 warning fallback)。"""
+    import app
+
+    df = pd.DataFrame([{"foo": 1, "bar": 2}])
+    margin, short = app._split_margin_dataset(df)
+    assert margin.empty and short.empty
+
+
 def test_system_health_renders_all_sections(isolated_db):
     """灌假 daily_prices / institutional → 系統頁 5 個 section 都渲染、不炸。"""
     _seed_distribution_scenario()  # 70 天 daily + institutional

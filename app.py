@@ -2701,24 +2701,15 @@ def _page_market_sentiment() -> None:
     if df.empty:
         st.warning("融資券抓取失敗")
     else:
-        # FinMind 通常給 MarginPurchaseTodayBalance / ShortSaleTodayBalance
-        # 欄位名隨版本可能不同,defensive 處理
-        margin_col = next(
-            (c for c in df.columns if "Margin" in c and "Balance" in c),
-            None,
-        )
-        short_col = next(
-            (c for c in df.columns if "Short" in c and "Balance" in c),
-            None,
-        )
-        if margin_col and short_col:
+        margin_df, short_df = _split_margin_dataset(df)
+        if not margin_df.empty and not short_df.empty:
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=df["date"], y=df[margin_col] / 1e8,
+                x=margin_df["date"], y=margin_df["balance_billion"],
                 name="融資餘額(億)", line=dict(color="#d62728"),
             ))
             fig.add_trace(go.Scatter(
-                x=df["date"], y=df[short_col] / 1e8,
+                x=short_df["date"], y=short_df["balance_billion"],
                 name="融券餘額(億)", line=dict(color="#2ca02c"),
                 yaxis="y2",
             ))
@@ -2734,9 +2725,72 @@ def _page_market_sentiment() -> None:
                 legend=dict(font=dict(size=14), orientation="h"),
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            # 最新一日數值短評
+            latest_margin = float(margin_df["balance_billion"].iloc[-1])
+            latest_short = float(short_df["balance_billion"].iloc[-1])
+            st.caption(
+                f"💬 最新 ({margin_df['date'].iloc[-1]}):"
+                f"融資 **{latest_margin:.0f} 億** / "
+                f"融券 **{latest_short:.0f} 億**"
+            )
         else:
-            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
-            st.caption(f"💬 dataset 欄位:{list(df.columns)}")
+            st.warning("融資券 dataset schema 暫不支援,無法繪製。")
+
+
+def _split_margin_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """把 FinMind margin/short 資料切成融資 + 融券兩個 DataFrame,並換算成「億」。
+
+    支援兩種 schema(FinMind 不同版本回的格式):
+    1. **Long format**(目前主流):每日兩列,`name` 欄區分 'MarginPurchase' /
+       'ShortSale','TodayBalance' 是當日餘額(股數)
+    2. **Wide format**(舊版):一列含 `MarginPurchaseTodayBalance` /
+       `ShortSaleTodayBalance` 兩個欄位
+
+    都不符 → 回兩個空 DataFrame。caller 看到空就走 fallback warning。
+
+    回值各 DataFrame 都帶 `date` + `balance_billion`(餘額億元)兩欄。
+    """
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    cols = set(df.columns)
+
+    # Long format(FinMind 主流)
+    if {"name", "TodayBalance", "date"} <= cols:
+        margin_df = df[df["name"].astype(str).str.contains(
+            "MarginPurchase|融資", case=False, na=False, regex=True,
+        )].copy()
+        short_df = df[df["name"].astype(str).str.contains(
+            "ShortSale|融券", case=False, na=False, regex=True,
+        )].copy()
+        for d in (margin_df, short_df):
+            if not d.empty:
+                d.sort_values("date", inplace=True)
+                d["balance_billion"] = pd.to_numeric(
+                    d["TodayBalance"], errors="coerce"
+                ) / 1e8
+        return margin_df, short_df
+
+    # Wide format(舊版)— 留著兼容
+    margin_col = next(
+        (c for c in df.columns if "Margin" in c and "Balance" in c), None,
+    )
+    short_col = next(
+        (c for c in df.columns if "Short" in c and "Balance" in c), None,
+    )
+    if margin_col and short_col and "date" in cols:
+        m = df[["date", margin_col]].rename(
+            columns={margin_col: "balance_raw"}
+        ).copy()
+        s = df[["date", short_col]].rename(
+            columns={short_col: "balance_raw"}
+        ).copy()
+        m["balance_billion"] = pd.to_numeric(m["balance_raw"], errors="coerce") / 1e8
+        s["balance_billion"] = pd.to_numeric(s["balance_raw"], errors="coerce") / 1e8
+        return m, s
+
+    return pd.DataFrame(), pd.DataFrame()
 
 
 # === 系統健康監控頁 ===
