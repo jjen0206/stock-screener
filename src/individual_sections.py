@@ -600,19 +600,28 @@ def _ai_winrate_part(sid: str, target_date: str | None = None) -> str:
         from src.ml_predictor import predict_short_pick_winrate
         prob = predict_short_pick_winrate(model, sid, target_date)
         if prob is None:
-            # 重跑 verbose extract_features 印詳細失敗點(每 sid dedup)
-            verbose_key = (sid, "verbose_extract")
-            if verbose_key not in _ml_log_dedup:
-                _ml_log_dedup.add(verbose_key)
-                try:
-                    from src.ml_predictor import extract_features as _ef
-                    _ef(sid, target_date, verbose=True)
-                except Exception as e:  # noqa: BLE001
+            # 無條件重跑 verbose extract_features(每 sid 必印一次)
+            # — 之前 dedup 太緊,extract 成功(features OK)時沒任何 verbose log,
+            # 看不出是 sklearn 端失敗還是 features 抽不到。現在改無條件,根據
+            # extract 結果判斷:
+            #   features = None → verbose 印 [ML/extract] 失敗點(歷史 / NaN 等)
+            #   features ≠ None → 確認 sklearn 端失敗(predict_proba 已印 [ML/predict])
+            try:
+                from src.ml_predictor import extract_features as _ef
+                feats_check = _ef(sid, target_date, verbose=True)
+                if feats_check is not None:
                     print(
-                        f"[ML] {sid}@{target_date} verbose extract 也失敗"
-                        f":{type(e).__name__}: {e}",
+                        f"[ML] {sid}@{target_date} verbose extract 成功"
+                        f"(features 抽到 11 keys),所以 prob is None 是"
+                        f"**sklearn predict 端**失敗,見上方 [ML/predict] log",
                         flush=True,
                     )
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[ML] {sid}@{target_date} verbose extract 拋例外"
+                    f":{type(e).__name__}: {e}",
+                    flush=True,
+                )
             _ai_log_once(
                 sid, f"prob_none@{target_date}",
                 f"[ML] {sid}@{target_date} fallback「🎯 —」: prob is None",

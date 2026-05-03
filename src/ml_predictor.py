@@ -363,7 +363,11 @@ def predict_short_pick_winrate(
     target_date: str,
     db_path: str | Path | None = None,
 ) -> float | None:
-    """對單檔單日預測 win 機率(0-1)。資料不足 → None。"""
+    """對單檔單日預測 win 機率(0-1)。資料不足 → None。
+
+    print(flush=True) 取代 logger.warning,確保 GitHub Actions / streamlit cloud
+    log 看得到 sklearn 端失敗(predict_proba shape / dtype / class mismatch)。
+    """
     feats = extract_features(stock_id, target_date, db_path=db_path)
     if feats is None:
         return None
@@ -374,8 +378,20 @@ def predict_short_pick_winrate(
         if 1 in model.classes_:
             idx = list(model.classes_).index(1)
             return float(proba[idx])
+        # weird case:model 訓練時沒看到 win class(全 loss)
+        print(
+            f"[ML/predict] {stock_id}@{target_date} model.classes_="
+            f"{list(model.classes_)} 沒包含 1,回 0.0",
+            flush=True,
+        )
         return 0.0
     except Exception as e:  # noqa: BLE001
+        # 雲端 log:logger.warning 不一定 capture,改 print 確保看得到
+        print(
+            f"[ML/predict] {stock_id}@{target_date} sklearn predict_proba 失敗:"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
         logger.warning("[ML] predict 失敗:%s", e)
         return None
 
