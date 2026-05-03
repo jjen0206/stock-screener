@@ -1434,6 +1434,86 @@ def test_portfolio_snapshot_dump_then_load_roundtrip(isolated_db, tmp_path):
     assert abs(pos["realized_pnl"] - 50.0) < 1e-6
 
 
+def test_push_trades_to_github_no_pat_returns_false(monkeypatch):
+    """無 GITHUB_PAT 環境 → push_trades_to_github 直接回 False,不發 HTTP。"""
+    from src import github_sync
+
+    monkeypatch.delenv("GITHUB_PAT", raising=False)
+    assert github_sync.push_trades_to_github("foo,bar\n") is False
+
+
+def test_fetch_trades_from_github_no_pat_returns_none(monkeypatch):
+    """無 GITHUB_PAT → fetch 回 None,不發 HTTP。"""
+    from src import github_sync
+
+    monkeypatch.delenv("GITHUB_PAT", raising=False)
+    assert github_sync.fetch_trades_from_github() is None
+
+
+def test_portfolio_safe_boot_load_uses_remote_csv(isolated_db, monkeypatch):
+    """fetch_trades_from_github 回 csv string → load_from_string 灌進 SQLite,
+    safe_boot_load 回 'remote'。
+    """
+    from src import portfolio_snapshot
+    from src import github_sync
+    from src import database as db
+
+    csv_text = (
+        "id,stock_id,direction,price,quantity,trade_date,note,created_at\n"
+        "1,2330,buy,600.0,1,2026-04-01,test,2026-04-01T10:00:00+00:00\n"
+    )
+    monkeypatch.setattr(
+        github_sync, "fetch_trades_from_github", lambda: csv_text,
+    )
+
+    result = portfolio_snapshot.safe_boot_load()
+    assert result == "remote"
+
+    trades = db.get_trades("2330")
+    assert len(trades) == 1
+    assert trades[0]["direction"] == "buy"
+    assert trades[0]["price"] == 600.0
+
+
+def test_portfolio_safe_boot_load_fallback_when_no_remote(
+    isolated_db, monkeypatch,
+):
+    """fetch 回 None → fallback 本機 load_from_csv,result='fallback-no-remote'。"""
+    from src import portfolio_snapshot
+    from src import github_sync
+
+    monkeypatch.setattr(github_sync, "fetch_trades_from_github", lambda: None)
+    result = portfolio_snapshot.safe_boot_load()
+    assert result == "fallback-no-remote"
+
+
+def test_portfolio_safe_boot_load_fallback_when_fetch_raises(
+    isolated_db, monkeypatch,
+):
+    """fetch 拋例外 → safe_boot_load 不 raise,走 fallback。"""
+    from src import portfolio_snapshot
+    from src import github_sync
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(github_sync, "fetch_trades_from_github", _raise)
+    result = portfolio_snapshot.safe_boot_load()
+    assert result == "fallback-fetch-exception"
+
+
+def test_dump_trades_csv_skip_outside_project(isolated_db):
+    """test fixture 用 tmp DB(不在 PROJECT_ROOT)→ dump_to_csv silent skip 回 -1
+    避免污染 repo trades.csv。
+    """
+    from src import database as db, portfolio_snapshot
+
+    db.add_trade("2330", "buy", 600.0, 1, "2026-04-01")
+    # snapshot_dir=None → 預設 PROJECT_ROOT,但 db 在 tmp → 應該 skip
+    n = portfolio_snapshot.dump_to_csv()
+    assert n == -1, "tmp DB 應 silent skip 不寫 repo"
+
+
 def test_portfolio_snapshot_load_skip_when_table_not_empty(isolated_db, tmp_path):
     """trades 表已有資料 → load_from_csv skip(避免覆蓋本機新加的)。"""
     from src import database as db, portfolio_snapshot

@@ -433,19 +433,22 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
 
 # === watchlist helpers(自選股清單) ===
 
-def _spawn_github_push_thread(csv_content: str) -> None:
-    """fire-and-forget thread:把 csv_content 推到 GitHub。
+def _spawn_github_push_thread(push_fn, csv_content: str, label: str) -> None:
+    """fire-and-forget thread:用 push_fn(csv_content) 推到 GitHub。
 
-    雲端容器(Streamlit Cloud)會設 GITHUB_PAT,push 後讓 watchlist 跨重啟保留。
+    雲端容器(Streamlit Cloud)會設 GITHUB_PAT,push 後讓 CSV 跨重啟保留。
     本地 dev / tests 沒設 PAT 時 caller 不會呼叫此函式。
     thread 內任何錯誤只 log 不 raise,避免 UI 死掉。
+
+    push_fn: callable(csv_content: str) -> bool — 通常是
+             github_sync.push_watchlist_to_github / push_trades_to_github
+    label:   log 標籤(watchlist / trades 等)
     """
     def _worker() -> None:
         try:
-            from src.github_sync import push_watchlist_to_github
-            push_watchlist_to_github(csv_content)
+            push_fn(csv_content)
         except Exception as ex:  # noqa: BLE001
-            logger.error("[GH_SYNC] thread 內未預期錯誤:%s", ex)
+            logger.error("[GH_SYNC] %s thread 內未預期錯誤:%s", label, ex)
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -469,9 +472,43 @@ def _dump_watchlist_snapshot(db_path: str | Path | None) -> None:
     try:
         csv_content = dump_to_string(db_path=db_path)
     except Exception as ex:  # noqa: BLE001
-        logger.error("[GH_SYNC] 取 csv 字串失敗:%s", ex)
+        logger.error("[GH_SYNC] 取 watchlist csv 字串失敗:%s", ex)
         return
-    _spawn_github_push_thread(csv_content)
+    from src.github_sync import push_watchlist_to_github
+    _spawn_github_push_thread(
+        push_watchlist_to_github, csv_content, "watchlist",
+    )
+
+
+def _dump_trades_snapshot(db_path: str | Path | None) -> None:
+    """在 trades 變動後 dump CSV + 自動 push GitHub(雲端永久化)。
+
+    跟 _dump_watchlist_snapshot 同 pattern:
+    - 一律 dump 進本地 trades.csv(讓本機 streamlit 也能 reload 還原)
+    - 有 GITHUB_PAT → fire-and-forget thread push 到 watchlist-sync 分支
+    - 沒 PAT → 不開 thread,本機行為不變
+    """
+    try:
+        from src import portfolio_snapshot
+        n = portfolio_snapshot.dump_to_csv(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] dump trades.csv 失敗:%s", ex)
+        return
+    if n < 0:
+        return
+    if not os.environ.get("GITHUB_PAT"):
+        return
+    # 讀回 csv 內容(string)送進 push_fn
+    try:
+        from src.portfolio_snapshot import _csv_path
+        csv_content = _csv_path().read_text(encoding="utf-8")
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] 讀 trades.csv 字串失敗:%s", ex)
+        return
+    from src.github_sync import push_trades_to_github
+    _spawn_github_push_thread(
+        push_trades_to_github, csv_content, "trades",
+    )
 
 
 def add_to_watchlist(
@@ -921,14 +958,21 @@ def add_trade(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (stock_id, direction, price, quantity, trade_date, note, now),
         )
-        return int(cur.lastrowid)
+        new_id = int(cur.lastrowid)
+    # dump CSV + 雲端 GitHub auto-push(沒 PAT 時不開 thread)
+    _dump_trades_snapshot(db_path)
+    return new_id
 
 
 def delete_trade(trade_id: int, db_path: str | Path | None = None) -> bool:
     """刪一筆交易,回 True 若有刪掉、False 若 id 不存在。"""
     with get_conn(db_path) as conn:
         cur = conn.execute("DELETE FROM trades WHERE id=?", (trade_id,))
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    if deleted:
+        # dump CSV + 雲端 GitHub auto-push
+        _dump_trades_snapshot(db_path)
+    return deleted
 
 
 def get_trades(

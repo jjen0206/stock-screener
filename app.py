@@ -247,6 +247,11 @@ def _load_snapshot_if_needed() -> None:
     from src import watchlist_snapshot
     watchlist_snapshot.safe_boot_load()
 
+    # 灌 trades(P&L 紀錄)— 跟 watchlist 同 pattern:remote-first GitHub →
+    # fallback 本機 trades.csv。雲端容器重啟仍能還原使用者新加的交易。
+    from src import portfolio_snapshot
+    portfolio_snapshot.safe_boot_load()
+
     _snapshot_loaded = True
 
 
