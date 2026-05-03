@@ -516,43 +516,51 @@ def _compute_main_force_signal(sid: str) -> dict:
 def format_pick_summary(sid: str, indent: str = "   ") -> str:
     """產生推播 / 卡片用的 1-line 精簡分析摘要(沒 streamlit 依賴,純字串)。
 
-    格式:`{indent}📊 {trend} + {bb_pos} / 🚦 主力 {status} / 💡 {操作核心}`
+    格式永遠 3 part(用「—」佔位保持格式統一,即使全 fallback):
+        `{indent}📊 {trend} + {bb_pos} / 🚦 主力 {status} / 💡 {操作核心}`
 
-    任何 helper 走 fallback(歷史不足 / 無法人籌碼)→ 對應 part 跳過。
-    全部 part 都拿不到 → 回空字串,caller 應該 skip 不 append。
+    任一 part 沒資料(歷史不足 / 無法人籌碼)→ 該 part 顯示「—」,不 skip。
+    這樣推播訊息每檔的詳細行對齊整齊,user 一看格式就知道該檔哪一面缺資料。
 
-    給 src.notifier / src.discord_notifier reuse,讓推播訊息每檔加一行
-    詳細(原本只 close + 量比 + KD + 法人 3 日)。
+    給 src.notifier / src.discord_notifier reuse,讓推播訊息每檔加一行詳細
+    (原本只 close + 量比 + KD + 法人 3 日)。
     """
     summary = _compute_technical_summary(sid)
     main_force = _compute_main_force_signal(sid)
 
-    parts: list[str] = []
-
+    # 📊 技術:trend + bb_pos
     if "error" not in summary:
         trend = summary.get("trend", "")
         bb_pos = summary.get("bb_pos", "")
         # bb_pos 含括號註解(如「貼近上軌(偏強)」)— 取「(」前精簡
         bb_short = bb_pos.split("(")[0].strip()
-        if trend and bb_short:
-            parts.append(f"📊 {trend} + {bb_short}")
+        tech_part = (
+            f"📊 {trend} + {bb_short}" if trend and bb_short else "📊 —"
+        )
+    else:
+        tech_part = "📊 —"
 
+    # 🚦 主力燈號 status
     if "error" not in main_force:
         status = main_force.get("status", "")
-        if status:
-            parts.append(f"🚦 主力 {status}")
+        force_part = f"🚦 主力 {status}" if status else "🚦 —"
+    else:
+        force_part = "🚦 —"
 
+    # 💡 操作核心(查 _ACTION_CORE_BY_SUMMARY,缺就「—」)
     if "error" not in summary:
         summary_key = summary.get("summary", "")
         action_core = _ACTION_CORE_BY_SUMMARY.get(summary_key, "")
         if action_core:
-            # action_core 模板較長(「順勢續抱,跌破 MA20 ...」)→ 取第一段(「,」前)
-            short = action_core.split(",")[0].split(",")[0]
-            parts.append(f"💡 {short}")
+            # action_core 模板較長(「順勢續抱,跌破 MA20 ...」)→ 取「,」前精簡
+            short = action_core.split(",")[0]
+            action_part = f"💡 {short}"
+        else:
+            action_part = "💡 —"
+    else:
+        action_part = "💡 —"
 
-    if not parts:
-        return ""
-    return indent + " / ".join(parts)
+    return indent + " / ".join([tech_part, force_part, action_part])
 
 
 def _render_main_force_signal(sid: str) -> None:

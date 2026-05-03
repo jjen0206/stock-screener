@@ -1594,12 +1594,39 @@ def test_format_pick_summary_with_data(isolated_db):
     assert summary.startswith("   "), f"應以 indent 開頭: {summary!r}"
 
 
-def test_format_pick_summary_no_data_returns_empty(isolated_db):
-    """完全沒歷史(不存在的股號)→ 全部 fallback → 回空字串。"""
+def test_format_pick_summary_no_data_returns_placeholders(isolated_db):
+    """完全沒歷史(不存在的股號)→ 三 part 都用「—」佔位,維持格式統一。
+    永不回空字串(caller 不必判斷 skip,訊息每檔行數一致)。
+    """
     from src.individual_sections import format_pick_summary
 
-    summary = format_pick_summary("9999")
-    assert summary == "", f"預期空字串, 實際 {summary!r}"
+    summary = format_pick_summary("9999", indent="   ")
+    # 3 part 都用「—」
+    assert "📊 —" in summary, f"技術 part 應佔位, 實際: {summary!r}"
+    assert "🚦 —" in summary, f"主力 part 應佔位, 實際: {summary!r}"
+    assert "💡 —" in summary, f"操作 part 應佔位, 實際: {summary!r}"
+    # 結構含 2 個分隔符
+    assert summary.count("/") == 2
+    assert summary.startswith("   ")  # indent 開頭
+
+
+def test_format_pick_summary_partial_fallback_keeps_format(isolated_db):
+    """灌 daily_prices 60+ 天但無 institutional → summary OK / main_force fallback
+    → 📊 有實值 + 🚦 — + 💡 有實值。永遠回三 part。
+    """
+    from src.individual_sections import format_pick_summary
+    # _seed_trend_prices 灌 daily_prices 線性漲 70 天,沒 institutional
+    _seed_trend_prices(direction="up", n_days=70)
+
+    summary = format_pick_summary("2330", indent="   ")
+    # 📊 應有實值(線性漲 → 多頭)
+    assert "📊 多頭" in summary, f"技術 part 應有實值, 實際: {summary!r}"
+    # 🚦 應佔位(沒 institutional)
+    assert "🚦 —" in summary, f"主力 part 應佔位(無法人資料), 實際: {summary!r}"
+    # 💡 應有實值(summary OK 就能查 _ACTION_CORE_BY_SUMMARY)
+    assert "💡 —" not in summary, f"操作 part 應有實值, 實際: {summary!r}"
+    # 結構仍 3 part
+    assert summary.count("/") == 2
 
 
 def test_format_short_picks_includes_detail_under_4096_chars(isolated_db):
