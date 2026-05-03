@@ -110,6 +110,14 @@ def main() -> int:
     out_path = Path(args.output)
     ml_predictor.save_model(model, out_path)
     print(f"[TRAIN] 模型已存 {out_path}", flush=True)
+
+    # dump sidecar metadata 給「⚙️ 系統」頁顯示
+    meta_path = ml_predictor.dump_model_meta(
+        out_path,
+        metrics=metrics,
+        feature_names=ml_predictor.FEATURE_NAMES,
+    )
+    print(f"[TRAIN] Metadata 已存 {meta_path}", flush=True)
     return 0
 
 

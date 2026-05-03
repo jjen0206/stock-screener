@@ -1971,6 +1971,61 @@ def test_split_margin_dataset_unknown_schema_returns_empty():
     assert margin.empty and short.empty
 
 
+def test_load_model_meta_returns_dict_when_exists(tmp_path):
+    """有 pkl + sidecar .meta.json → load_model_meta 回 dict。"""
+    from src import ml_predictor
+
+    pkl = tmp_path / "test_model.pkl"
+    pkl.write_bytes(b"fake")  # joblib 不要,只是要 pkl 存在
+    metrics = {
+        "n_train": 600, "n_test": 150,
+        "win_rate_overall": 0.42,
+        "accuracy": 0.66, "precision": 0.59, "recall": 0.61, "f1": 0.60,
+    }
+    ml_predictor.dump_model_meta(pkl, metrics=metrics)
+
+    meta = ml_predictor.load_model_meta(pkl)
+    assert meta is not None
+    assert meta["samples"] == 750
+    assert meta["features_count"] == 11
+    assert abs(meta["metrics"]["accuracy"] - 0.66) < 1e-6
+    assert meta["min_history_days"] == ml_predictor.MIN_HISTORY_DAYS
+    assert meta["model_type"] == "RandomForestClassifier"
+
+
+def test_load_model_meta_returns_none_when_missing(tmp_path):
+    """sidecar .meta.json 不存在 → 回 None(caller fallback)。"""
+    from src import ml_predictor
+
+    fake_pkl = tmp_path / "missing.pkl"
+    assert ml_predictor.load_model_meta(fake_pkl) is None
+
+
+def test_system_health_renders_ml_section_with_real_meta(isolated_db):
+    """既有 models/short_pick.meta.json 存在(本機訓練生成)→ 系統頁應渲染 5 個
+    ML metric。"""
+    def _harness():
+        import app
+        app._render_system_health()
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "🤖 AI 模型" in md_text, "應渲染 AI 模型 section"
+    # 5 metric label 出現(streamlit metric label 在 markdown 內可見)
+    metric_labels = [m.label for m in at.metric]
+    for expected in ["訓練樣本", "Accuracy", "Precision", "Recall", "F1"]:
+        assert expected in metric_labels, (
+            f"應有 metric「{expected}」, 實際: {metric_labels}"
+        )
+    # 副資訊文字
+    assert "模型類型" in md_text
+    assert "RandomForestClassifier" in md_text
+    assert "最低歷史" in md_text
+
+
 def test_system_health_renders_all_sections(isolated_db):
     """灌假 daily_prices / institutional → 系統頁 5 個 section 都渲染、不炸。"""
     _seed_distribution_scenario()  # 70 天 daily + institutional

@@ -3015,6 +3015,61 @@ def _render_system_health() -> None:
             f"{len(sids_with_trade)} 檔個股"
         )
 
+    # === 🤖 AI 模型(短線勝率預測) ===
+    st.markdown("### 🤖 AI 模型(短線勝率預測)")
+    try:
+        from src.ml_predictor import load_model_meta
+        ml_pkl = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+        meta = load_model_meta(ml_pkl)
+    except Exception:  # noqa: BLE001
+        meta = None
+
+    if not ml_pkl.exists():
+        st.warning(
+            "🤖 模型尚未訓練。本機跑 `python scripts/train_ml_model.py` 生成"
+            " `models/short_pick.pkl` + `.meta.json`,commit 後推送即可。"
+        )
+    elif meta is None:
+        st.warning(
+            "⚠️ `short_pick.meta.json` 不存在。pkl 檔在但缺 metadata,"
+            "重訓一次:`python scripts/train_ml_model.py`"
+        )
+    else:
+        m = meta.get("metrics", {})
+        cols = st.columns(5)
+        cols[0].metric(
+            "訓練樣本", f"{meta.get('samples', 0):,}",
+            help=f"train={meta.get('n_train',0)} / test={meta.get('n_test',0)}",
+        )
+        cols[1].metric(
+            "Accuracy", f"{m.get('accuracy', 0) * 100:.1f}%",
+            help=f"基準勝率(隨機猜):{m.get('base_win_rate', 0) * 100:.1f}%",
+        )
+        cols[2].metric("Precision", f"{m.get('precision', 0) * 100:.1f}%")
+        cols[3].metric("Recall", f"{m.get('recall', 0) * 100:.1f}%")
+        cols[4].metric("F1", f"{m.get('f1', 0) * 100:.1f}%")
+
+        # 副資訊
+        try:
+            pkl_size_kb = ml_pkl.stat().st_size / 1024
+        except Exception:  # noqa: BLE001
+            pkl_size_kb = 0
+        feat_names = meta.get("feature_names", [])
+        st.markdown(
+            f"- **模型類型**:{meta.get('model_type', '—')}\n"
+            f"- **版本**:{meta.get('version', '—')}\n"
+            f"- **特徵維度**:{meta.get('features_count', 0)} 個 "
+            f"({', '.join(feat_names[:5])}...)\n"
+            f"- **最低歷史**:{meta.get('min_history_days', 0)} trading days\n"
+            f"- **上次訓練**:{meta.get('trained_at', '—')}\n"
+            f"- **模型檔大小**:{pkl_size_kb:.1f} KB"
+        )
+        st.caption(
+            "模型 metrics 來自上次訓練的 hold-out test set(8:2 train/test split)。"
+            "**預測結果僅供參考,不構成投資建議。** 重訓:"
+            "`python scripts/train_ml_model.py`"
+        )
+
     # === 🗄️ SQLite 資料庫(各表行數 + 檔案大小) ===
     st.markdown("### 🗄️ SQLite 資料庫")
     db_path_str = str(config.DATABASE_PATH)

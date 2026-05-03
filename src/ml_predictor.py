@@ -407,6 +407,66 @@ def save_model(model, path: str | Path) -> None:
     joblib.dump(model, p)
 
 
+def _meta_path(model_path: str | Path) -> Path:
+    """sidecar metadata 路徑:把 .pkl 換成 .meta.json。"""
+    p = Path(model_path)
+    return p.with_suffix(".meta.json")
+
+
+def dump_model_meta(
+    model_path: str | Path,
+    metrics: dict,
+    feature_names: list[str] | None = None,
+    model_type: str = "RandomForestClassifier",
+    version: str = "v2",
+    min_history_days: int = MIN_HISTORY_DAYS,
+) -> Path:
+    """訓練完成後 dump metadata 到 .meta.json sidecar。
+
+    給「⚙️ 系統」頁顯示模型 metrics 用。回寫入路徑。
+    """
+    import json
+    from datetime import datetime, timezone
+
+    p = _meta_path(model_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "samples": int(metrics.get("n_train", 0) + metrics.get("n_test", 0)),
+        "n_train": int(metrics.get("n_train", 0)),
+        "n_test": int(metrics.get("n_test", 0)),
+        "features_count": len(feature_names) if feature_names else len(FEATURE_NAMES),
+        "feature_names": feature_names or FEATURE_NAMES,
+        "min_history_days": int(min_history_days),
+        "metrics": {
+            "base_win_rate": float(metrics.get("win_rate_overall", 0.0)),
+            "accuracy": float(metrics.get("accuracy", 0.0)),
+            "precision": float(metrics.get("precision", 0.0)),
+            "recall": float(metrics.get("recall", 0.0)),
+            "f1": float(metrics.get("f1", 0.0)),
+        },
+        "model_type": model_type,
+        "version": version,
+    }
+    p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def load_model_meta(model_path: str | Path) -> dict | None:
+    """讀 .meta.json sidecar。檔不存在 / parse 失敗 → 回 None。"""
+    import json
+
+    p = _meta_path(model_path)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ML] load_model_meta 失敗(%s):%s", p, e)
+        return None
+
+
 def load_model(path: str | Path):
     """joblib load。檔不存在或 load 失敗 → 回 None。
 
@@ -433,6 +493,7 @@ def load_model(path: str | Path):
 
 __all__ = [
     "FEATURE_NAMES",
+    "MIN_HISTORY_DAYS",
     "extract_features",
     "compute_label",
     "build_training_dataset",
@@ -440,4 +501,6 @@ __all__ = [
     "predict_short_pick_winrate",
     "save_model",
     "load_model",
+    "dump_model_meta",
+    "load_model_meta",
 ]
