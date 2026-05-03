@@ -369,7 +369,10 @@ def _page_dashboard() -> None:
     else:
         with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天 / 純股票)..."):
             try:
-                today_iso = date.today().isoformat()
+                # 用最後交易日而非 today,週末 / 假日跑 today 會找不到當日 close
+                # → 0 picks。跟短線頁 / daily_notify 同 _get_default_screen_date 邏輯。
+                target_date = _get_default_screen_date()
+                today_iso = target_date.isoformat()
                 agg = run_all_strategies(today_iso, stock_ids=eligible_sids)
                 df_picks = aggregated_to_dataframe(agg).head(3)
             except Exception as e:  # noqa: BLE001
@@ -1019,9 +1022,11 @@ def _page_stock_query() -> None:
     stock_id = cols[0].text_input(
         "股票代碼", value=default_stock, help="例:2330(台積電)",
     )
-    today = date.today()
-    start = cols[1].date_input("起始日", value=today - timedelta(days=90))
-    end = cols[2].date_input("結束日", value=today)
+    # 用最後交易日當 anchor,週末/假日打開個股頁 K 線結束日 = today 沒交易資料
+    # 會抓到空區間或部分區間。跟短線頁 / 回測頁同 _get_default_screen_date 邏輯。
+    anchor = _get_default_screen_date()
+    start = cols[1].date_input("起始日", value=anchor - timedelta(days=90))
+    end = cols[2].date_input("結束日", value=anchor)
     cols[3].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[3].button("查詢", use_container_width=True, type="primary")
 
