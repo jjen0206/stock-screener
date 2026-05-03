@@ -688,6 +688,144 @@ def cache_health_summary(db_path: str | Path | None = None) -> dict:
     }
 
 
+def preload_snapshots(
+    snapshot_dir: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """從 snapshot_dir 讀 6 個 CSV 並 upsert 進 SQLite。
+
+    給 streamlit cloud boot + GitHub Actions workflow 共用 — workflow runner
+    是 fresh container,checkout 後 SQLite 空,沒這個 preload 會看到 daily_prices
+    cache 空 → 短線篩選 0 picks。
+
+    snapshot_dir None → PROJECT_ROOT/data/twse_snapshot/。
+    db_path None → config.DATABASE_PATH。
+
+    Loads(順序保留依賴關係:stocks 先行,daily_prices/institutional 後續):
+      stocks.csv / daily_metrics.csv / financials_quarterly.csv /
+      daily_prices.csv / institutional.csv / taiex.csv
+
+    回 {csv stem: rows loaded} 給 caller 用 log。任何 csv 不存在 → skip。
+
+    watchlist 不在這個 helper(streamlit 專屬,workflow 不需要)。
+    """
+    import pandas as pd
+
+    if snapshot_dir is None:
+        snapshot_dir = config.PROJECT_ROOT / "data" / "twse_snapshot"
+    snapshot_dir = Path(snapshot_dir)
+
+    counts: dict[str, int] = {}
+    if not snapshot_dir.exists():
+        return counts
+
+    init_db(db_path)
+
+    # 1. stocks(含 industry)
+    stocks_csv = snapshot_dir / "stocks.csv"
+    if stocks_csv.exists():
+        df = pd.read_csv(stocks_csv, dtype={"stock_id": str})
+        rows: list[dict] = []
+        for _, r in df.iterrows():
+            rows.append({
+                "stock_id": str(r["stock_id"]),
+                "name": str(r["name"]) if pd.notna(r.get("name")) else "",
+                "industry": (
+                    str(r["industry"]) if pd.notna(r.get("industry")) else None
+                ),
+                "market": "TW",
+            })
+        if rows:
+            upsert_stocks(rows, db_path=db_path)
+            counts["stocks"] = len(rows)
+
+    # 2. daily_metrics
+    metrics_csv = snapshot_dir / "daily_metrics.csv"
+    if metrics_csv.exists():
+        df = pd.read_csv(metrics_csv, dtype={"stock_id": str})
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                "stock_id": str(r["stock_id"]),
+                "date": str(r["date"]),
+                "close": float(r["close"]) if pd.notna(r.get("close")) else None,
+                "pe": float(r["pe"]) if pd.notna(r.get("pe")) else None,
+                "pb": float(r["pb"]) if pd.notna(r.get("pb")) else None,
+                "dividend_yield": (
+                    float(r["dividend_yield"])
+                    if pd.notna(r.get("dividend_yield")) else None
+                ),
+            })
+        if rows:
+            upsert_daily_metrics(rows, db_path=db_path)
+            counts["daily_metrics"] = len(rows)
+
+    # 3. financials.quarterly
+    fin_csv = snapshot_dir / "financials_quarterly.csv"
+    if fin_csv.exists():
+        df = pd.read_csv(fin_csv, dtype={"stock_id": str})
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                "stock_id": str(r["stock_id"]),
+                "period_type": "quarterly",
+                "period": str(r["period"]),
+                "revenue": (
+                    float(r["revenue"]) if pd.notna(r.get("revenue")) else None
+                ),
+                "revenue_yoy": (
+                    float(r["revenue_yoy"])
+                    if pd.notna(r.get("revenue_yoy")) else None
+                ),
+                "eps": float(r["eps"]) if pd.notna(r.get("eps")) else None,
+                "roe": float(r["roe"]) if pd.notna(r.get("roe")) else None,
+            })
+        if rows:
+            upsert_financials(rows, db_path=db_path)
+            counts["financials_quarterly"] = len(rows)
+
+    # 4. daily_prices(從 backfill_history 產生的 ~130K 行 snapshot)
+    prices_csv = snapshot_dir / "daily_prices.csv"
+    if prices_csv.exists():
+        df = pd.read_csv(prices_csv, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            upsert_daily_prices(records, db_path=db_path)
+            counts["daily_prices"] = len(records)
+
+    # 5. institutional
+    inst_csv = snapshot_dir / "institutional.csv"
+    if inst_csv.exists():
+        df = pd.read_csv(inst_csv, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            upsert_institutional(records, db_path=db_path)
+            counts["institutional"] = len(records)
+
+    # 6. TAIEX(獨立 csv,from weekly_market_update)
+    taiex_csv = snapshot_dir / "taiex.csv"
+    if taiex_csv.exists():
+        df = pd.read_csv(taiex_csv, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            upsert_daily_prices(records, db_path=db_path)
+            counts["taiex"] = len(records)
+
+    return counts
+
+
 def stocks_with_min_history(
     min_days: int = 60, db_path: str | Path | None = None,
 ) -> list[str]:
@@ -722,6 +860,7 @@ __all__ = [
     "get_synced_range",
     "update_synced_range",
     "cache_health_summary",
+    "preload_snapshots",
     "stocks_with_min_history",
     "SCHEMA",
 ]

@@ -1460,6 +1460,62 @@ def test_short_page_reset_button_resets_all_widgets(isolated_db):
     assert at.number_input(key="short_vol_mult").value == expected["short_vol_mult"]
 
 
+def test_preload_snapshots_loads_csvs_into_sqlite(isolated_db, tmp_path):
+    """db.preload_snapshots 從 tmp snapshot dir 讀 csv → upsert 進 SQLite。
+
+    給 GitHub Actions workflow runner 用 — fresh container 沒走 streamlit
+    boot path,要靠這個 helper preload daily_prices.csv 等 snapshot,否則
+    短線篩選看到 cache 空 = 0 picks。
+    """
+    from src import database as db
+
+    snap_dir = tmp_path / "twse_snapshot"
+    snap_dir.mkdir()
+    # 灌 stocks.csv
+    pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "industry": "半導體"},
+    ]).to_csv(snap_dir / "stocks.csv", index=False)
+    # 灌 daily_prices.csv
+    pd.DataFrame([
+        {
+            "stock_id": "2330", "date": "2026-04-30",
+            "open": 600.0, "high": 605.0, "low": 595.0, "close": 600.0,
+            "volume": 10000,
+        }
+    ]).to_csv(snap_dir / "daily_prices.csv", index=False)
+    # 灌 taiex.csv(stock_id='TAIEX' 也是 daily_prices schema)
+    pd.DataFrame([
+        {
+            "stock_id": "TAIEX", "date": "2026-04-30",
+            "open": 39000.0, "high": 39500.0, "low": 38900.0, "close": 39200.0,
+            "volume": 100000,
+        }
+    ]).to_csv(snap_dir / "taiex.csv", index=False)
+
+    counts = db.preload_snapshots(snapshot_dir=snap_dir)
+
+    assert counts.get("stocks") == 1
+    assert counts.get("daily_prices") == 1
+    assert counts.get("taiex") == 1
+
+    # 真的灌進 SQLite 了
+    with db.get_conn() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM daily_prices WHERE stock_id='2330'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM daily_prices WHERE stock_id='TAIEX'"
+        ).fetchone()[0] == 1
+
+
+def test_preload_snapshots_missing_dir_returns_empty(tmp_path):
+    """snapshot_dir 不存在 → 回空 dict,不 raise。"""
+    from src import database as db
+
+    counts = db.preload_snapshots(snapshot_dir=tmp_path / "nonexistent")
+    assert counts == {}
+
+
 def test_format_pick_summary_with_data(isolated_db):
     """灌足夠歷史(70 天)+ institutional → 摘要含 📊 / 🚦 / 💡 三個 part。"""
     from src.individual_sections import format_pick_summary

@@ -24,6 +24,10 @@ _spec.loader.exec_module(daily_fetch)
 def tmp_db(monkeypatch, tmp_path):
     db_file = tmp_path / "fetch.db"
     monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    # daily_fetch.run() 開頭新加了 db.preload_snapshots() 把 main repo 的
+    # snapshot CSV 灌進 SQLite — 對 unit test 是污染(會塞 131K 行)。mock 成
+    # no-op,test 用 mock_universe + monkeypatch 控制 SQLite 內容。
+    monkeypatch.setattr(db, "preload_snapshots", lambda *a, **kw: {})
     db.init_db()
     return db_file
 

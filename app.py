@@ -221,124 +221,28 @@ _snapshot_loaded = False
 
 
 def _load_snapshot_if_needed() -> None:
-    """雲端 startup 時:若 SQLite 內 financials/daily_metrics 為空,
-    讀 data/twse_snapshot/*.csv 灌進去。
+    """Streamlit cloud startup 時 preload snapshot CSV 進 SQLite。
 
     解決 Streamlit Cloud IP 被 TWSE OpenAPI 擋的問題,改用每週六 GitHub Actions
     自動抓資料 commit CSV → Cloud 容器 git pull 時自動拿到 → app 啟動時讀進 SQLite。
 
-    用 module-level flag 避免每次 page rerun 都重灌(streamlit hot-reload 不會重 import module)。
+    Module-level flag 避免每次 page rerun 都重灌(streamlit hot-reload 不會重
+    import module)。實際 CSV preload 邏輯抽到 db.preload_snapshots,給
+    GitHub Actions workflow runner 也能 reuse(daily_fetch / daily_notify 入口
+    script 開頭呼叫,避免 fresh container 沒走 streamlit boot path 導致
+    SQLite 空)。
     """
     global _snapshot_loaded
     if _snapshot_loaded:
         return
 
-    snapshot_dir = config.PROJECT_ROOT / "data" / "twse_snapshot"
-    if not snapshot_dir.exists():
-        _snapshot_loaded = True
-        return
-
-    db.init_db()
-
-    # 一律 load CSV — 所有 upsert_* 都是 idempotent (PRIMARY KEY ON CONFLICT
-    # DO UPDATE),即使 SQLite 已有資料也安全。之前用 prices_cnt < 1000 等門檻
-    # 會擋住:雲端 daily_fetch 累積幾天 prices_cnt 早就 > 1000,結果 backfill
-    # snapshot 的 90 天歷史完全灌不進去。
-
-    # 灌 stocks (含 industry)
-    stocks_csv = snapshot_dir / "stocks.csv"
-    if stocks_csv.exists():
-        df = pd.read_csv(stocks_csv, dtype={"stock_id": str})
-        rows = []
-        for _, r in df.iterrows():
-            rows.append({
-                "stock_id": str(r["stock_id"]),
-                "name": str(r["name"]) if pd.notna(r.get("name")) else "",
-                "industry": str(r["industry"]) if pd.notna(r.get("industry")) else None,
-                "market": "TW",
-            })
-        if rows:
-            db.upsert_stocks(rows)
-
-    # 灌 daily_metrics
-    metrics_csv = snapshot_dir / "daily_metrics.csv"
-    if metrics_csv.exists():
-        df = pd.read_csv(metrics_csv, dtype={"stock_id": str})
-        rows = []
-        for _, r in df.iterrows():
-            rows.append({
-                "stock_id": str(r["stock_id"]),
-                "date": str(r["date"]),
-                "close": float(r["close"]) if pd.notna(r.get("close")) else None,
-                "pe": float(r["pe"]) if pd.notna(r.get("pe")) else None,
-                "pb": float(r["pb"]) if pd.notna(r.get("pb")) else None,
-                "dividend_yield": float(r["dividend_yield"]) if pd.notna(r.get("dividend_yield")) else None,
-            })
-        if rows:
-            db.upsert_daily_metrics(rows)
-
-    # 灌 financials.quarterly
-    fin_csv = snapshot_dir / "financials_quarterly.csv"
-    if fin_csv.exists():
-        df = pd.read_csv(fin_csv, dtype={"stock_id": str})
-        rows = []
-        for _, r in df.iterrows():
-            rows.append({
-                "stock_id": str(r["stock_id"]),
-                "period_type": "quarterly",
-                "period": str(r["period"]),
-                "revenue": float(r["revenue"]) if pd.notna(r.get("revenue")) else None,
-                "revenue_yoy": float(r["revenue_yoy"]) if pd.notna(r.get("revenue_yoy")) else None,
-                "eps": float(r["eps"]) if pd.notna(r.get("eps")) else None,
-                "roe": float(r["roe"]) if pd.notna(r.get("roe")) else None,
-            })
-        if rows:
-            db.upsert_financials(rows)
-
-    # 灌 daily_prices(從 backfill_history.py 產生的 snapshot)
-    prices_csv = snapshot_dir / "daily_prices.csv"
-    if prices_csv.exists():
-        df = pd.read_csv(prices_csv, dtype={"stock_id": str})
-        # 用 to_dict('records') 比 iterrows 快 30-50x(180K 行差很大)
-        records = df.to_dict("records")
-        # NaN → None(SQLite 不接受 NaN)
-        for r in records:
-            for k, v in list(r.items()):
-                if pd.isna(v):
-                    r[k] = None
-        if records:
-            db.upsert_daily_prices(records)
-
-    # 灌 institutional(同樣從 backfill snapshot)
-    inst_csv = snapshot_dir / "institutional.csv"
-    if inst_csv.exists():
-        df = pd.read_csv(inst_csv, dtype={"stock_id": str})
-        records = df.to_dict("records")
-        for r in records:
-            for k, v in list(r.items()):
-                if pd.isna(v):
-                    r[k] = None
-        if records:
-            db.upsert_institutional(records)
-
-    # 灌 TAIEX 加權指數(weekly_market_update 抓 200 天,大盤頁 K 線 / 多週期 /
-    # 技術總覽用。獨立 csv 因為 backfill_history 的 daily_prices.csv 只含個股,
-    # 不含指數)
-    taiex_csv = snapshot_dir / "taiex.csv"
-    if taiex_csv.exists():
-        df = pd.read_csv(taiex_csv, dtype={"stock_id": str})
-        records = df.to_dict("records")
-        for r in records:
-            for k, v in list(r.items()):
-                if pd.isna(v):
-                    r[k] = None
-        if records:
-            db.upsert_daily_prices(records)
+    db.preload_snapshots()  # 6 個 CSV(stocks / metrics / fin / prices / inst / taiex)
 
     # 灌 watchlist(避免雲端 reboot 後 user 關注清單丟光)
     # 走 safe_boot_load:會優先嘗試 watchlist-sync 遠端,任何錯誤(ImportError、
     # 認證失敗、parse error 等)一律 silent fallback 到本機 seed CSV,絕不 raise
-    # — boot 路徑禁止 crash。
+    # — boot 路徑禁止 crash。watchlist 是 streamlit 專屬,不在 db.preload_snapshots
+    # 裡(workflow runner 不需要 watchlist)。
     from src import watchlist_snapshot
     watchlist_snapshot.safe_boot_load()
 

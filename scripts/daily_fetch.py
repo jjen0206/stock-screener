@@ -44,6 +44,12 @@ def run(institutional_days: int = 7) -> dict:
     """
     t_start = time.time()
     db.init_db()
+    # GitHub Actions runner 是 fresh container,SQLite 空 → 先 preload snapshot
+    # CSV(daily_prices ~130K 行歷史)避免短線篩選看到 cache 空 = 0 picks。
+    # streamlit cloud boot 走 _load_snapshot_if_needed 也 reuse 同 helper。
+    preload_counts = db.preload_snapshots()
+    if preload_counts:
+        print(f"[FETCH] preload snapshots: {preload_counts}", flush=True)
     db_path_before = config.PROJECT_ROOT / config.DATABASE_PATH
     size_before = (
         os.path.getsize(db_path_before) if db_path_before.exists() else 0

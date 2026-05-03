@@ -30,6 +30,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from src import database as db  # noqa: E402
 from src.notifier import notify_multi_strategy  # noqa: E402
 
 
@@ -54,6 +55,15 @@ def main() -> int:
         help="跳過 Discord 推播",
     )
     args = p.parse_args()
+
+    # GitHub Actions runner fresh container,SQLite 空 → preload snapshot CSV
+    # 確保短線篩選看到 daily_prices 90 天歷史 + institutional / TAIEX 資料。
+    # daily_fetch step 已 preload 過,但這裡再 preload 一次:
+    # (a) 萬一 daily_fetch step 失敗或被 skip,daily_notify 仍能正常跑
+    # (b) idempotent,upsert ON CONFLICT 不重複資料
+    preload_counts = db.preload_snapshots()
+    if preload_counts:
+        print(f"[NOTIFY] preload snapshots: {preload_counts}", flush=True)
 
     params = json.loads(args.params_json) if args.params_json else None
 
