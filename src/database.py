@@ -69,6 +69,19 @@ def _reset_path_cache() -> None:
 def get_conn(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
     """取得 SQLite 連線(context manager,自動 commit / close)。
 
+    並發策略(救火 cloud `database is locked`):
+    - **WAL mode**:讀寫分離 — 1 writer + N reader 不互相 block
+      (預設 rollback journal mode 是 reader 跟 writer 互鎖,Streamlit
+      Cloud worker 有時跑 ML retrain / preload + 使用者刷頁,wait 不過
+      就 OperationalError)
+    - **busy_timeout=30000ms**:contention 時等 30 秒(取代立即 raise)
+    - **isolation_level=None + 手動 BEGIN/COMMIT**:避開 Python sqlite3
+      preset 的 implicit transaction(對 DML 自動 BEGIN 但 COMMIT 時機綁
+      在 module-level magic,雲端有時抓不準)
+
+    WAL mode 是 DB 檔屬性,設一次留 -wal/-shm sidecar files;但容器重啟
+    這些 sidecar 重建,所以每 boot 都重設(idempotent,免外部 migration)。
+
     使用範例::
 
         with get_conn() as conn:
@@ -76,11 +89,27 @@ def get_conn(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
     """
     path = _resolve_db_path(db_path)
     # mkdir 已在 _resolve_db_path 內 cache 處理過,這裡不重複
-    conn = sqlite3.connect(path)
+    # timeout=30 是 sqlite3.connect 的 C-level busy timeout(秒),配合
+    # PRAGMA busy_timeout(毫秒)雙保險。
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     try:
+        # WAL 對 in-memory DB 不適用(:memory: 不能 WAL),讀錯不致命
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("BEGIN")
         yield conn
         conn.commit()
+    except Exception:
+        # 錯誤時 rollback 釋放 writer lock,讓其他 worker 立刻進得來
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
     finally:
         conn.close()
 
