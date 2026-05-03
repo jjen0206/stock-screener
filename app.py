@@ -1115,10 +1115,17 @@ def _page_stock_query() -> None:
         _render_summary(df, kd_df, rsi14, macd_df)
 
     with tab_kline:
-        st.plotly_chart(_make_candlestick(df, bb), use_container_width=True)
-        sub_kd, sub_macd, sub_rsi = st.tabs(
-            ["KD (9, 3, 3)", "MACD (12, 26, 9)", "RSI (14)"]
-        )
+        # 5 sub-tabs:每個視角獨立一張圖,單屏看完不用滾。預設選中「主圖」。
+        sub_main, sub_vol, sub_kd, sub_macd, sub_rsi = st.tabs([
+            "📈 主圖", "📊 成交量",
+            "🔵 KD (9,3,3)", "🟠 MACD (12,26,9)", "🟢 RSI (14)",
+        ])
+        with sub_main:
+            st.plotly_chart(
+                _make_candlestick_main(df, bb), use_container_width=True,
+            )
+        with sub_vol:
+            st.plotly_chart(_make_volume_chart(df), use_container_width=True)
         with sub_kd:
             st.plotly_chart(_make_kd_chart(df, kd_df), use_container_width=True)
         with sub_macd:
@@ -1827,6 +1834,69 @@ def _make_candlestick(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
                      title_font=dict(size=16), row=1, col=1)
     fig.update_yaxes(title_text="成交量", tickfont=dict(size=14),
                      title_font=dict(size=16), row=2, col=1)
+    return fig
+
+
+def _make_candlestick_main(df: pd.DataFrame, bb: pd.DataFrame) -> go.Figure:
+    """蠟燭圖 + BB + MA(不含量子圖)— 個股頁 K線 tab 主圖 sub-tab 用,
+    跟 _make_candlestick 拆開避免「主圖 + 量」共用一張縱切兩半的圖,單屏滾動少。
+    """
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df["date"],
+        open=df["open"], high=df["high"],
+        low=df["low"], close=df["close"],
+        increasing_line_color="#d62728",
+        decreasing_line_color="#2ca02c",
+        name="K 線",
+    ))
+    for col, color in [("MA5", "#1f77b4"), ("MA20", "#ff7f0e"), ("MA60", "#9467bd")]:
+        if col in df.columns and df[col].notna().any():
+            fig.add_trace(go.Scatter(
+                x=df["date"], y=df[col],
+                name=col, line=dict(width=1.2, color=color),
+            ))
+    if not bb.empty and bb["upper"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=bb["upper"], name="BB 上",
+            line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=bb["lower"], name="BB 下",
+            line=dict(width=1, dash="dot", color="rgba(120,120,120,0.7)"),
+            fill="tonexty", fillcolor="rgba(120,120,120,0.08)",
+        ))
+    fig.update_layout(
+        height=400,
+        xaxis_rangeslider_visible=False,
+        showlegend=True,
+        margin=dict(t=20, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=16)),
+        font=dict(size=16),
+    )
+    fig.update_xaxes(type="category", tickfont=dict(size=14))
+    fig.update_yaxes(title_text="股價", tickfont=dict(size=14),
+                     title_font=dict(size=16))
+    return fig
+
+
+def _make_volume_chart(df: pd.DataFrame) -> go.Figure:
+    """獨立的量 bar 圖(紅綠對應 K 線),個股頁 K線 tab 量 sub-tab 用。"""
+    vol_colors = [
+        "#d62728" if c >= o else "#2ca02c"
+        for c, o in zip(df["close"], df["open"])
+    ]
+    fig = go.Figure(go.Bar(
+        x=df["date"], y=df["volume"],
+        marker_color=vol_colors, name="量", showlegend=False,
+    ))
+    fig.update_layout(
+        height=320, margin=dict(t=20, b=20, l=20, r=20),
+        font=dict(size=16),
+    )
+    fig.update_xaxes(type="category", tickfont=dict(size=14))
+    fig.update_yaxes(title_text="成交量", tickfont=dict(size=14),
+                     title_font=dict(size=16))
     return fig
 
 
