@@ -38,7 +38,7 @@ except Exception as _e:  # noqa: BLE001
     logger.info("[COMPANY] google-generativeai 未安裝(%s),LLM 生成停用", _e)
 
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 def _now_iso() -> str:
