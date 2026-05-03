@@ -1102,6 +1102,29 @@ def _page_stock_query() -> None:
         f"取得 {len(df)} 筆,日期 {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}"
     )
 
+    # CSS 注入給 6 main tabs 各自顏色(語意對應:藍=圖表 / 紫=籌碼 / 青=趨勢
+    # / 橘=警示 / 粉=行動)。只在個股頁 render 時注入,streamlit page change
+    # 整個 main area 重 render → 前一頁 style 自然消,不污染其他頁。
+    # nth-child 對 K 線 tab 內 5 sub-tabs 也會 match(沒第 6,所以 reuse 1-5
+    # 顏色),視覺上沒太擾接受。
+    st.markdown(
+        """
+        <style>
+        .stTabs [role="tab"]:nth-child(1) { color: inherit; }
+        .stTabs [role="tab"]:nth-child(2) { color: #185FA5; }
+        .stTabs [role="tab"]:nth-child(3) { color: #7F77DD; }
+        .stTabs [role="tab"]:nth-child(4) { color: #1D9E75; }
+        .stTabs [role="tab"]:nth-child(5) { color: #BA7517; }
+        .stTabs [role="tab"]:nth-child(6) { color: #D4537E; }
+        .stTabs [role="tab"][aria-selected="true"] {
+            border-bottom: 2px solid currentColor;
+            font-weight: 500;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # 6 tabs:摘要 預設選中(streamlit 第一個 tab),user 打開個股頁第一眼
     # 看到核心數字 metric grid + 目標價,不用滑、不用點。想看圖才切「📈 K線」。
     (
