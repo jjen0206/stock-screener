@@ -1414,26 +1414,50 @@ def test_short_page_advanced_expander_has_bias_sliders(isolated_db):
     assert vol_ratio.value == float(DEFAULT_BIAS_PARAMS["vol_ratio_min"])
 
 
-def test_short_page_reset_button_clears_session_state(isolated_db):
-    """改 slider 後按重設 → session_state 對應 key 被清 + 下次 rerun 回預設值。"""
+def test_short_page_reset_button_resets_all_widgets(isolated_db):
+    """改多個 widget 後按重設 → 所有 widget value + session_state[key] 都回預設。
+
+    雲端發現過 bug:widget 同時帶 `value=` 跟 `key=` 時,callback pop
+    session_state 不刷新 widget(F5 才生效)。改 key-only + callback 直接
+    set value 後,widget 下次 render 立即從 session_state 拿到 default。
+    這個 test 同時 assert widget value 跟 session_state[key],兩層都對才算過。
+    """
     from src.strategies import DEFAULT_BIAS_PARAMS
+    from src.screener_short import DEFAULT_SHORT_PARAMS
 
     at = _new_at("🔥 短線")
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # 把 bias_low 拖到極端值
+    # 改 3 個 widget 到非預設值
     at.slider(key="short_bias_low").set_value(-12.0).run()
+    at.slider(key="short_bias_high").set_value(8.0).run()
+    at.number_input(key="short_vol_mult").set_value(3.5).run()
     assert at.slider(key="short_bias_low").value == -12.0
+    assert at.session_state["short_bias_low"] == -12.0
+    assert at.session_state["short_vol_mult"] == 3.5
 
-    # 按重設按鈕(它的 key="short_reset_params")
+    # 點重設按鈕(on_click=_reset_short_params 設 default)
     at.button(key="short_reset_params").click().run()
     assert not at.exception, _exc_msgs(at)
 
-    # rerun 後 widget 回預設值
-    assert at.slider(key="short_bias_low").value == float(
-        DEFAULT_BIAS_PARAMS["bias_low"]
-    ), f"重設後應回預設, 實際 {at.slider(key='short_bias_low').value}"
+    # 兩層都該回預設值:session_state(SoT) + widget value(UI)
+    expected = {
+        "short_bias_low": float(DEFAULT_BIAS_PARAMS["bias_low"]),
+        "short_bias_high": float(DEFAULT_BIAS_PARAMS["bias_high"]),
+        "short_vol_ratio": float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]),
+        "short_vol_mult": float(DEFAULT_SHORT_PARAMS["volume_multiplier"]),
+        "short_kd_low": float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]),
+        "short_inst_days": int(DEFAULT_SHORT_PARAMS["inst_buy_days"]),
+    }
+    for k, v in expected.items():
+        assert at.session_state[k] == v, (
+            f"session_state[{k}] 應 = {v}, 實際 {at.session_state[k]}"
+        )
+    # widget value 也應該對齊(雲端 bug 的真正 reproducer:widget 不刷新)
+    assert at.slider(key="short_bias_low").value == expected["short_bias_low"]
+    assert at.slider(key="short_bias_high").value == expected["short_bias_high"]
+    assert at.number_input(key="short_vol_mult").value == expected["short_vol_mult"]
 
 
 def test_system_health_renders_all_sections(isolated_db):

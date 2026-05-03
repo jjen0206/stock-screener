@@ -597,21 +597,29 @@ def _render_manual_push_button(picks_df: "pd.DataFrame") -> None:
 
 # === 短線推薦頁 ===
 
-# 短線進階參數 6 個 widget 的 session_state key(用於重設按鈕一次性清掉)
-_SHORT_PARAM_KEYS = (
-    "short_vol_mult", "short_kd_low", "short_inst_days",
-    "short_bias_low", "short_bias_high", "short_vol_ratio",
-)
+# 短線進階參數 6 個 widget 的 default 值(session_state key → default)
+# 用 dict 而非 tuple,callback 才能直接設預設值(不是 pop)。
+# Pattern:widget key-only(沒 value= 參數),session_state 是 single source of
+# truth — 既避開 streamlit「同時帶 value 跟 key」的 race(雲端 click 後不刷新),
+# 又讓 callback 一次寫入就保證 widget 下次 render 拿到正確值。
+_SHORT_PARAM_DEFAULTS: dict[str, float | int] = {
+    "short_vol_mult": float(DEFAULT_SHORT_PARAMS["volume_multiplier"]),
+    "short_kd_low": float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]),
+    "short_inst_days": int(DEFAULT_SHORT_PARAMS["inst_buy_days"]),
+    "short_bias_low": float(DEFAULT_BIAS_PARAMS["bias_low"]),
+    "short_bias_high": float(DEFAULT_BIAS_PARAMS["bias_high"]),
+    "short_vol_ratio": float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]),
+}
 
 
 def _reset_short_params() -> None:
     """重設預設值按鈕的 on_click callback。
-    callback 在 widget render 前跑,pop 完 session_state 後 widget 才重新
-    用 value= default 初始化(用 if st.button(): + st.rerun() 在某些 cloud
-    版本會 race,widget 看到舊 session_state 值不刷新)。
+    直接寫入 session_state[key] = default(不是 pop),配合 widget key-only
+    pattern → widget 下次 render 從 session_state 拿到 default 值,UI 立即
+    刷新(原本 pop + value= 的 pattern 在雲端某些版本不刷新)。
     """
-    for k in _SHORT_PARAM_KEYS:
-        st.session_state.pop(k, None)
+    for k, v in _SHORT_PARAM_DEFAULTS.items():
+        st.session_state[k] = v
 
 
 def _page_short() -> None:
@@ -631,23 +639,25 @@ def _page_short() -> None:
     # sidebar 參數區(預設收起,進階使用者再展開)
     # 三策略 thresholds 共用一個 expander。值跨 rerun 透過 session_state 保留;
     # 「執行選股」才會套用,避免每次拖 slider 都觸發 SQL 全掃。
+    # 進 expander 前先 setdefault init session_state — widget 用 key-only
+    # pattern(沒 value= 參數),需要保證 key 已在 session_state 才能 render。
+    for _k, _v in _SHORT_PARAM_DEFAULTS.items():
+        st.session_state.setdefault(_k, _v)
+
     with st.sidebar.expander("⚙️ 進階參數", expanded=False):
         st.markdown("**策略 1:量價KD**")
         vol_mult = st.number_input(
-            "均量倍數", min_value=1.0, max_value=5.0,
-            value=float(DEFAULT_SHORT_PARAMS["volume_multiplier"]), step=0.1,
+            "均量倍數", min_value=1.0, max_value=5.0, step=0.1,
             key="short_vol_mult",
             help="當日量 > 過去 5 日均量 × 此倍數",
         )
         kd_low = st.number_input(
-            "KD 門檻 K_low", min_value=0.0, max_value=80.0,
-            value=float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]), step=5.0,
+            "KD 門檻 K_low", min_value=0.0, max_value=80.0, step=5.0,
             key="short_kd_low",
             help="K 黃金交叉 D 後,K 至少要超過此值才入選",
         )
         inst_days = st.number_input(
-            "法人連續買超天數", min_value=1, max_value=10,
-            value=int(DEFAULT_SHORT_PARAMS["inst_buy_days"]), step=1,
+            "法人連續買超天數", min_value=1, max_value=10, step=1,
             key="short_inst_days",
         )
 
@@ -658,29 +668,24 @@ def _page_short() -> None:
 
         st.markdown("**策略 3:乖離率收斂**")
         bias_low = st.slider(
-            "乖離下限 (%)", min_value=-15.0, max_value=0.0,
-            value=float(DEFAULT_BIAS_PARAMS["bias_low"]), step=0.5,
+            "乖離下限 (%)", min_value=-15.0, max_value=0.0, step=0.5,
             key="short_bias_low",
             help="20 日乖離率 (close vs MA20) 必須 ≥ 此下限",
         )
         bias_high = st.slider(
-            "乖離上限 (%)", min_value=-2.0, max_value=10.0,
-            value=float(DEFAULT_BIAS_PARAMS["bias_high"]), step=0.5,
+            "乖離上限 (%)", min_value=-2.0, max_value=10.0, step=0.5,
             key="short_bias_high",
             help="20 日乖離率必須 ≤ 此上限(過熱就排除)",
         )
         vol_ratio_min = st.slider(
-            "量比門檻", min_value=0.5, max_value=3.0,
-            value=float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]), step=0.1,
+            "量比門檻", min_value=0.5, max_value=3.0, step=0.1,
             key="short_vol_ratio",
             help="今日量 / 5 日均量 ≥ 此值",
         )
 
-        # 用 on_click callback 而不是 `if st.button(): pop + rerun()` —
-        # callback 在 widget render **之前** 執行,pop 完 session_state 後
-        # 6 個 widget 才重新 evaluate,看到 key 不存在 → fallback 到 value=
-        # default。原本 if-pattern 在雲端某些版本有 race:widget 在當次 run
-        # 已根據舊 session_state 評估,rerun 後 cache 沒清掉導致 slider 不變。
+        # widget 全 key-only(沒 value=),session_state 是 SoT;callback 直接
+        # 寫 session_state[key] = default → widget 下次 render 從 session_state
+        # 拿到正確值,UI 立刻刷新。雲端「click 後不刷新」的 race 解掉。
         st.button(
             "🔄 重設預設值",
             use_container_width=True,
