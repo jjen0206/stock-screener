@@ -1516,6 +1516,71 @@ def test_preload_snapshots_missing_dir_returns_empty(tmp_path):
     assert counts == {}
 
 
+def test_get_latest_trading_date_returns_max_date(isolated_db):
+    """灌 daily_prices 多筆日期 → get_latest_trading_date 回 MAX(date)。"""
+    from src import database as db
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+    db.upsert_daily_prices([
+        {"stock_id": "2330", "date": "2026-04-28",
+         "open": 600, "high": 605, "low": 595, "close": 600, "volume": 1000},
+        {"stock_id": "2330", "date": "2026-04-30",
+         "open": 605, "high": 610, "low": 600, "close": 610, "volume": 1100},
+        {"stock_id": "2330", "date": "2026-04-29",
+         "open": 600, "high": 608, "low": 598, "close": 605, "volume": 1050},
+    ])
+    assert db.get_latest_trading_date() == "2026-04-30"
+
+
+def test_get_latest_trading_date_empty_returns_none(isolated_db):
+    """daily_prices 空 → 回 None(caller fallback today)。"""
+    from src import database as db
+    assert db.get_latest_trading_date() is None
+
+
+def test_format_short_picks_includes_weekend_hint_when_not_today(isolated_db):
+    """date 不是 today → 訊息含週末/假日提示。"""
+    from src.notifier import format_short_picks
+    import pandas as _pd
+
+    picks = _pd.DataFrame([
+        {
+            "stock_id": "2330", "name": "台積電", "close": 600.0,
+            "volume": 10000, "ma_volume_5": 9000,
+            "k": 60.0, "d": 50.0, "inst_total_3d": 0,
+        }
+    ])
+    msg = format_short_picks(picks, "2020-01-01")  # 絕對不是 today
+    assert "週末/假日" in msg, f"預期週末提示, msg=\n{msg}"
+
+
+def test_format_short_picks_no_hint_when_today():
+    """date == today → 不加週末提示(避免每日推播都看到)。"""
+    from datetime import date as _date
+    from src.notifier import format_short_picks
+    import pandas as _pd
+
+    today = _date.today().isoformat()
+    picks = _pd.DataFrame([
+        {
+            "stock_id": "2330", "name": "台積電", "close": 600.0,
+            "volume": 10000, "ma_volume_5": 9000,
+            "k": 60.0, "d": 50.0, "inst_total_3d": 0,
+        }
+    ])
+    msg = format_short_picks(picks, today)
+    assert "週末/假日" not in msg, f"today 不該有週末提示, msg=\n{msg}"
+
+
+def test_format_multi_strategy_empty_includes_weekend_hint(isolated_db):
+    """空 picks(無入選)+ 非 today → 訊息含週末提示。"""
+    from src.notifier import format_multi_strategy_picks
+
+    msg = format_multi_strategy_picks({}, "2020-01-01")
+    assert "週末/假日" in msg
+    assert "今日無任一策略選中" in msg
+
+
 def test_format_pick_summary_with_data(isolated_db):
     """灌足夠歷史(70 天)+ institutional → 摘要含 📊 / 🚦 / 💡 三個 part。"""
     from src.individual_sections import format_pick_summary

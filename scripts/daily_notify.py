@@ -65,10 +65,27 @@ def main() -> int:
     if preload_counts:
         print(f"[NOTIFY] preload snapshots: {preload_counts}", flush=True)
 
+    # 篩選日期:user 指定 > 最後交易日 > today fallback
+    # 週末 / 假日跑 today() 找不到當日 close → 推「今日無入選」誤判,改用
+    # SQLite daily_prices MAX(date) 當 target。
+    if args.date:
+        target_date = args.date
+    else:
+        latest = db.get_latest_trading_date()
+        from datetime import date as _date
+        target_date = latest or _date.today().isoformat()
+        if latest:
+            print(
+                f"[NOTIFY] 使用最後交易日 {latest} 當篩選日期"
+                f"(系統時區今日 = {_date.today().isoformat()})",
+                flush=True,
+            )
+
     params = json.loads(args.params_json) if args.params_json else None
 
     results = notify_multi_strategy(
-        date=args.date, params=params,
+        date=target_date,
+        params=params,
         send_telegram=not args.no_telegram,
         send_discord=not args.no_discord,
     )

@@ -129,12 +129,20 @@ def send_discord_message(
 
 def format_short_picks_discord(picks: pd.DataFrame, date: str) -> str:
     """Discord Markdown 格式;與 Telegram 類似但開頭加 banner。"""
-    from src.notifier import _empty_pick_suffix
+    from src.notifier import _empty_pick_suffix, _weekend_hint
     banner = f"📊 **stock-screener** | {date}"
     if picks is None or picks.empty:
-        return f"{banner}\n\n📭 今日無符合條件的個股{_empty_pick_suffix()}"
+        return (
+            f"{banner}\n\n📭 今日無符合條件的個股"
+            f"{_weekend_hint(date)}"
+            f"{_empty_pick_suffix()}"
+        )
 
-    lines = [banner, f"📈 短線推薦 ({len(picks)} 檔)", ""]
+    lines = [
+        banner,
+        f"📈 短線推薦 ({len(picks)} 檔){_weekend_hint(date)}",
+        "",
+    ]
     for i, (_, row) in enumerate(picks.iterrows(), start=1):
         sid = row.get("stock_id", "?")
         name = row.get("name", "")
@@ -174,9 +182,13 @@ def format_multi_strategy_picks_discord(
         date_label = date
     banner = f"📊 **stock-screener** | {date_label}"
 
-    from src.notifier import _empty_pick_suffix
+    from src.notifier import _empty_pick_suffix, _weekend_hint
     if not aggregated:
-        return f"{banner}\n\n📭 今日無任一策略選中個股{_empty_pick_suffix()}"
+        return (
+            f"{banner}\n\n📭 今日無任一策略選中個股"
+            f"{_weekend_hint(date)}"
+            f"{_empty_pick_suffix()}"
+        )
 
     sorted_items = sorted(
         aggregated.items(),
@@ -185,7 +197,7 @@ def format_multi_strategy_picks_discord(
     n = len(sorted_items)
     lines = [
         banner,
-        f"📈 短線推薦 ({n} 檔,多策略並行)",
+        f"📈 短線推薦 ({n} 檔,多策略並行){_weekend_hint(date)}",
         "",
     ]
     for i, (sid, info) in enumerate(sorted_items, start=1):

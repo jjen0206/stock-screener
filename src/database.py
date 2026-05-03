@@ -826,6 +826,26 @@ def preload_snapshots(
     return counts
 
 
+def get_latest_trading_date(
+    db_path: str | Path | None = None,
+) -> str | None:
+    """SQLite daily_prices 內最新一筆 date(ISO string,YYYY-MM-DD)。
+
+    給 daily_notify / streamlit 用,週末 / 假日 today() 沒當日 close 時改用
+    這個當篩選日期(避免「今日無入選」誤判)。
+
+    daily_prices 空 → 回 None,caller 自己 fallback today。
+    """
+    with get_conn(db_path) as conn:
+        try:
+            row = conn.execute(
+                "SELECT MAX(date) AS d FROM daily_prices"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return row["d"] if row and row["d"] else None
+
+
 def stocks_with_min_history(
     min_days: int = 60, db_path: str | Path | None = None,
 ) -> list[str]:
@@ -861,6 +881,7 @@ __all__ = [
     "update_synced_range",
     "cache_health_summary",
     "preload_snapshots",
+    "get_latest_trading_date",
     "stocks_with_min_history",
     "SCHEMA",
 ]

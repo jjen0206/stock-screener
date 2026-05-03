@@ -93,6 +93,18 @@ def send_telegram_message(
     return False
 
 
+def _weekend_hint(date_iso: str) -> str:
+    """如果 date_iso 不是 today(週末 / 假日跑 → 用最後交易日),回提示字串
+    給訊息 header append。否則回空字串。
+    """
+    try:
+        if _date.fromisoformat(date_iso) != _date.today():
+            return "\n📅 (今日為週末/假日,顯示最後交易日結果)"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _empty_pick_suffix() -> str:
     """0 入選時的補充說明:多數情況不是 bug 而是 cache 歷史不足。
 
@@ -119,9 +131,16 @@ def format_short_picks(picks: pd.DataFrame, date: str) -> str:
     空 picks → 回「📭 今日無符合條件」訊息。
     """
     if picks is None or picks.empty:
-        return f"📭 *{date}* 今日無符合條件的個股{_empty_pick_suffix()}"
+        return (
+            f"📭 *{date}* 今日無符合條件的個股"
+            f"{_weekend_hint(date)}"
+            f"{_empty_pick_suffix()}"
+        )
 
-    lines: list[str] = [f"📈 *{date} 短線推薦* ({len(picks)} 檔)", ""]
+    lines: list[str] = [
+        f"📈 *{date} 短線推薦* ({len(picks)} 檔){_weekend_hint(date)}",
+        "",
+    ]
     for i, (_, row) in enumerate(picks.iterrows(), start=1):
         sid = row.get("stock_id", "?")
         name = row.get("name", "")
@@ -194,7 +213,11 @@ def format_multi_strategy_picks(
     優先列 信號數 多的(多策略同時看好 = 信心強)。
     """
     if not aggregated:
-        return f"📭 *{date}* 今日無任一策略選中個股{_empty_pick_suffix()}"
+        return (
+            f"📭 *{date}* 今日無任一策略選中個股"
+            f"{_weekend_hint(date)}"
+            f"{_empty_pick_suffix()}"
+        )
 
     # 按信號數降序、stock_id 升序
     sorted_items = sorted(
@@ -210,7 +233,7 @@ def format_multi_strategy_picks(
     except Exception:  # noqa: BLE001
         date_label = date
     lines = [
-        f"📈 *{date_label} 短線推薦* ({n} 檔,多策略並行)",
+        f"📈 *{date_label} 短線推薦* ({n} 檔,多策略並行){_weekend_hint(date)}",
         "",
     ]
     for i, (sid, info) in enumerate(sorted_items, start=1):
