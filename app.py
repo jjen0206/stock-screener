@@ -597,6 +597,23 @@ def _render_manual_push_button(picks_df: "pd.DataFrame") -> None:
 
 # === 短線推薦頁 ===
 
+# 短線進階參數 6 個 widget 的 session_state key(用於重設按鈕一次性清掉)
+_SHORT_PARAM_KEYS = (
+    "short_vol_mult", "short_kd_low", "short_inst_days",
+    "short_bias_low", "short_bias_high", "short_vol_ratio",
+)
+
+
+def _reset_short_params() -> None:
+    """重設預設值按鈕的 on_click callback。
+    callback 在 widget render 前跑,pop 完 session_state 後 widget 才重新
+    用 value= default 初始化(用 if st.button(): + st.rerun() 在某些 cloud
+    版本會 race,widget 看到舊 session_state 值不刷新)。
+    """
+    for k in _SHORT_PARAM_KEYS:
+        st.session_state.pop(k, None)
+
+
 def _page_short() -> None:
     st.header("🔥 短線推薦")
 
@@ -659,13 +676,17 @@ def _page_short() -> None:
             help="今日量 / 5 日均量 ≥ 此值",
         )
 
-        if st.button("🔄 重設預設值", use_container_width=True, key="short_reset_params"):
-            for k in (
-                "short_vol_mult", "short_kd_low", "short_inst_days",
-                "short_bias_low", "short_bias_high", "short_vol_ratio",
-            ):
-                st.session_state.pop(k, None)
-            st.rerun()
+        # 用 on_click callback 而不是 `if st.button(): pop + rerun()` —
+        # callback 在 widget render **之前** 執行,pop 完 session_state 後
+        # 6 個 widget 才重新 evaluate,看到 key 不存在 → fallback 到 value=
+        # default。原本 if-pattern 在雲端某些版本有 race:widget 在當次 run
+        # 已根據舊 session_state 評估,rerun 後 cache 沒清掉導致 slider 不變。
+        st.button(
+            "🔄 重設預設值",
+            use_container_width=True,
+            key="short_reset_params",
+            on_click=_reset_short_params,
+        )
         st.caption("調整後按主畫面「執行選股」生效")
 
     # cache 健康度(供下方 selectbox + caption 用)
