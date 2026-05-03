@@ -1098,27 +1098,36 @@ def _page_stock_query() -> None:
     rsi14 = ind.rsi(df, period=14)
     macd_df = ind.macd(df, fast=12, slow=26, signal=9)
 
-    st.caption(f"取得 {len(df)} 筆,日期 {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}")
-
-    st.plotly_chart(_make_candlestick(df, bb), use_container_width=True)
-
-    tab_kd, tab_macd, tab_rsi = st.tabs(
-        ["KD (9, 3, 3)", "MACD (12, 26, 9)", "RSI (14)"]
+    st.caption(
+        f"取得 {len(df)} 筆,日期 {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}"
     )
-    with tab_kd:
-        st.plotly_chart(_make_kd_chart(df, kd_df), use_container_width=True)
-    with tab_macd:
-        st.plotly_chart(_make_macd_chart(df, macd_df), use_container_width=True)
-    with tab_rsi:
-        st.plotly_chart(_make_rsi_chart(df, rsi14), use_container_width=True)
 
-    _render_summary(df, kd_df, rsi14, macd_df)
-
-    # 8 sections 改 tabs 防頁面過長(原本縱向堆疊太長,手機要捲很久)
-    # 分組原則:功能相近合一個 tab(籌碼類 / 趨勢類 / 形勢類 / 操作)
-    tab_chip, tab_trend, tab_shape, tab_action = st.tabs([
+    # 6 tabs:摘要 預設選中(streamlit 第一個 tab),user 打開個股頁第一眼
+    # 看到核心數字 metric grid + 目標價,不用滑、不用點。想看圖才切「📈 K線」。
+    (
+        tab_overview, tab_kline, tab_chip, tab_trend, tab_shape, tab_action,
+    ) = st.tabs([
+        "📊 摘要", "📈 K線",
         "🚦 籌碼", "📊 趨勢", "🎯 形勢", "💡 操作",
     ])
+
+    with tab_overview:
+        _render_summary(df, kd_df, rsi14, macd_df)
+
+    with tab_kline:
+        st.plotly_chart(_make_candlestick(df, bb), use_container_width=True)
+        sub_kd, sub_macd, sub_rsi = st.tabs(
+            ["KD (9, 3, 3)", "MACD (12, 26, 9)", "RSI (14)"]
+        )
+        with sub_kd:
+            st.plotly_chart(_make_kd_chart(df, kd_df), use_container_width=True)
+        with sub_macd:
+            st.plotly_chart(
+                _make_macd_chart(df, macd_df), use_container_width=True,
+            )
+        with sub_rsi:
+            st.plotly_chart(_make_rsi_chart(df, rsi14), use_container_width=True)
+
     with tab_chip:
         _render_institutional_table(sid)
         _render_institutional_cumulative_table(sid)
