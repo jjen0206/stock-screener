@@ -513,6 +513,48 @@ def _compute_main_force_signal(sid: str) -> dict:
     }
 
 
+def format_pick_summary(sid: str, indent: str = "   ") -> str:
+    """產生推播 / 卡片用的 1-line 精簡分析摘要(沒 streamlit 依賴,純字串)。
+
+    格式:`{indent}📊 {trend} + {bb_pos} / 🚦 主力 {status} / 💡 {操作核心}`
+
+    任何 helper 走 fallback(歷史不足 / 無法人籌碼)→ 對應 part 跳過。
+    全部 part 都拿不到 → 回空字串,caller 應該 skip 不 append。
+
+    給 src.notifier / src.discord_notifier reuse,讓推播訊息每檔加一行
+    詳細(原本只 close + 量比 + KD + 法人 3 日)。
+    """
+    summary = _compute_technical_summary(sid)
+    main_force = _compute_main_force_signal(sid)
+
+    parts: list[str] = []
+
+    if "error" not in summary:
+        trend = summary.get("trend", "")
+        bb_pos = summary.get("bb_pos", "")
+        # bb_pos 含括號註解(如「貼近上軌(偏強)」)— 取「(」前精簡
+        bb_short = bb_pos.split("(")[0].strip()
+        if trend and bb_short:
+            parts.append(f"📊 {trend} + {bb_short}")
+
+    if "error" not in main_force:
+        status = main_force.get("status", "")
+        if status:
+            parts.append(f"🚦 主力 {status}")
+
+    if "error" not in summary:
+        summary_key = summary.get("summary", "")
+        action_core = _ACTION_CORE_BY_SUMMARY.get(summary_key, "")
+        if action_core:
+            # action_core 模板較長(「順勢續抱,跌破 MA20 ...」)→ 取第一段(「,」前)
+            short = action_core.split(",")[0].split(",")[0]
+            parts.append(f"💡 {short}")
+
+    if not parts:
+        return ""
+    return indent + " / ".join(parts)
+
+
 def _render_main_force_signal(sid: str) -> None:
     """個股頁:主力燈號(出貨 / 吸貨判斷 + 強度條 + 解讀)。"""
     result = _compute_main_force_signal(sid)

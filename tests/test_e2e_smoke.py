@@ -1460,6 +1460,50 @@ def test_short_page_reset_button_resets_all_widgets(isolated_db):
     assert at.number_input(key="short_vol_mult").value == expected["short_vol_mult"]
 
 
+def test_format_pick_summary_with_data(isolated_db):
+    """灌足夠歷史(70 天)+ institutional → 摘要含 📊 / 🚦 / 💡 三個 part。"""
+    from src.individual_sections import format_pick_summary
+    _seed_distribution_scenario()  # 70 天 daily + institutional
+
+    summary = format_pick_summary("2330", indent="   ")
+    assert summary, f"預期非空摘要, 實際 {summary!r}"
+    assert "📊" in summary, f"缺技術部分: {summary!r}"
+    assert "🚦" in summary, f"缺主力燈號部分: {summary!r}"
+    assert "💡" in summary, f"缺操作核心部分: {summary!r}"
+    assert summary.startswith("   "), f"應以 indent 開頭: {summary!r}"
+
+
+def test_format_pick_summary_no_data_returns_empty(isolated_db):
+    """完全沒歷史(不存在的股號)→ 全部 fallback → 回空字串。"""
+    from src.individual_sections import format_pick_summary
+
+    summary = format_pick_summary("9999")
+    assert summary == "", f"預期空字串, 實際 {summary!r}"
+
+
+def test_format_short_picks_includes_detail_under_4096_chars(isolated_db):
+    """7 picks 推播訊息 ≤ Telegram 4096 字元上限,且含詳細分析行。"""
+    from src.notifier import format_short_picks
+    _seed_distribution_scenario()
+
+    # 構造 7 picks 都用 stock_id=2330(灌過資料的那檔),測 message 長度上限
+    picks = pd.DataFrame([
+        {
+            "stock_id": "2330", "name": "台積電", "close": 169.0,
+            "volume": 10000, "ma_volume_5": 9000,
+            "k": 60.0, "d": 50.0, "inst_total_3d": -5_000_000,
+        }
+        for _ in range(7)
+    ])
+
+    msg = format_short_picks(picks, "2026-04-30")
+    assert len(msg) <= 4096, f"訊息超 Telegram 4096 上限: {len(msg)}"
+    # 應該每 pick 都有詳細(7 picks → 至少 7 個📊 emoji)
+    assert msg.count("📊") >= 7 or msg.count("🚦") >= 7, (
+        f"預期每 pick 都有詳細分析行, msg=\n{msg}"
+    )
+
+
 def test_split_margin_dataset_long_format():
     """FinMind long format(name 欄分 MarginPurchase / ShortSale)→ 切成兩個 DF。"""
     import app

@@ -151,6 +151,11 @@ def format_short_picks_discord(picks: pd.DataFrame, date: str) -> str:
             f"    收 {close:.2f} | 量比 {vol_ratio:.1f}x | "
             f"K {k:.1f} > D {d:.1f} | 法人 {inst / 1000:.0f}K"
         )
+        # 詳細分析(reuse 個股頁 helper)
+        from src.individual_sections import format_pick_summary
+        detail = format_pick_summary(str(sid), indent="    ")
+        if detail:
+            lines.append(detail)
     lines.append("")
     lines.append("⚠️ 僅供研究,非投資建議")
     return "\n".join(lines)
@@ -207,6 +212,11 @@ def format_multi_strategy_picks_discord(
                 f"    🎯 目標 {target_low:.2f}~{target_high:.2f}"
                 f" / 🛑 停損 {stop_loss:.2f}{rr_str}"
             )
+        # 詳細分析(reuse 個股頁 helper)
+        from src.individual_sections import format_pick_summary
+        detail = format_pick_summary(str(sid), indent="    ")
+        if detail:
+            lines.append(detail)
     lines.append("")
     lines.append("⚠️ 僅供研究,非投資建議。目標價為 ATR 統計參考,非實際預測。")
     return "\n".join(lines)
