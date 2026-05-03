@@ -18,6 +18,10 @@ plotly>=5.20.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
 
+# LLM(個股頁公司資訊 description / uniqueness / moat 生成,用 Gemini 1.5 Flash)
+# 註:Google 已將 google-generativeai 標 deprecated,等之後再 migrate google-genai
+google-generativeai>=0.7.0
+
 # 環境變數
 python-dotenv>=1.0.0
 

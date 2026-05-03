@@ -185,6 +185,23 @@ SCHEMA: list[str] = [
         created_at TEXT NOT NULL
     )
     """,
+    # 個股公司資訊:FinMind facts(industry/market/listing_date/foreign_limit)
+    # + LLM 生成 (description/uniqueness/moat) — cache-first lookup,LLM 慢
+    # 不影響 boot;regenerate 才會重打 Gemini API。
+    """
+    CREATE TABLE IF NOT EXISTS company_profiles (
+        stock_id           TEXT PRIMARY KEY,
+        industry           TEXT,
+        market             TEXT,
+        listing_date       TEXT,
+        foreign_limit      REAL,
+        description        TEXT,
+        uniqueness         TEXT,
+        moat               TEXT,
+        finmind_updated_at TEXT,
+        llm_updated_at     TEXT
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC

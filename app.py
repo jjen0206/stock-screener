@@ -1372,7 +1372,7 @@ def _page_stock_query() -> None:
     ])
 
     with tab_overview:
-        _render_summary(df, kd_df, rsi14, macd_df)
+        _render_summary(sid, df, kd_df, rsi14, macd_df)
 
     with tab_kline:
         # 5 sub-tabs:每個視角獨立一張圖,單屏看完不用滾。預設選中「主圖」。
@@ -1410,6 +1410,7 @@ def _page_stock_query() -> None:
 
 
 def _render_summary(
+    sid: str,
     df: pd.DataFrame,
     kd_df: pd.DataFrame,
     rsi14: pd.Series,
@@ -1469,6 +1470,87 @@ def _render_summary(
         st.caption(
             "⚠️ 目標價為 ATR(14) 波動度估計,**非實際預測**;"
             "個人交易仍應自行評估。"
+        )
+
+    # === 🏢 公司資訊(FinMind facts + Gemini LLM) ===
+    _render_company_profile(sid)
+
+
+def _render_company_profile(sid: str) -> None:
+    """個股頁摘要 tab 內的公司資訊區塊。
+
+    - FinMind facts(industry/market)即時拿(已 cache 在 SQLite stocks 表)
+    - LLM 生成(description/uniqueness/moat)是 lazy:打開個股頁第一次
+      會 spinner 跑一次,結果寫 SQLite cache 之後秒級
+    - regenerate 按鈕:強制重打 Gemini API
+    - 沒設 GEMINI_API_KEY → 顯示 placeholder 而非空白
+    """
+    from src import company_profile as cp
+
+    st.markdown("### 🏢 公司資訊")
+
+    regen_key = f"company_regen_{sid}"
+    regenerate = st.session_state.pop(regen_key, False)
+
+    has_gemini = bool(config.GEMINI_API_KEY)
+    # 走 spinner — 第一次 view / regenerate 會打 LLM,可能 1-3 秒
+    spinner_msg = (
+        "重新生成公司資訊..." if regenerate else "載入公司資訊..."
+    )
+    with st.spinner(spinner_msg):
+        try:
+            profile = cp.get_company_profile(sid, regenerate=regenerate)
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"⚠️ 無法載入公司資訊:{e}")
+            return
+
+    # 上排:industry / market / 名稱(facts,瞬間出來)
+    fact_cols = st.columns(3)
+    fact_cols[0].metric("產業類別", profile.get("industry") or "—")
+    fact_cols[1].metric("市場別", profile.get("market") or "—")
+    fact_cols[2].metric(
+        "公司名稱",
+        profile.get("name") or profile.get("stock_id") or "—",
+    )
+
+    # LLM 生成區塊
+    desc = profile.get("description")
+    uniq = profile.get("uniqueness")
+    moat = profile.get("moat")
+    llm_error = profile.get("llm_error")
+
+    if not has_gemini:
+        st.info(
+            "需設 **GEMINI_API_KEY** 開啟 LLM 生成(description / uniqueness / moat)。"
+            "申請:https://aistudio.google.com/apikey"
+        )
+        return
+
+    if llm_error:
+        st.warning(f"⚠️ {llm_error}")
+
+    if desc:
+        st.markdown(f"**📝 業務描述**\n\n{desc}")
+    if uniq:
+        st.markdown(f"**✨ 獨特性**\n\n{uniq}")
+    if moat:
+        st.markdown(f"**🏰 護城河 / 壟斷性**\n\n{moat}")
+
+    if not (desc or uniq or moat) and not llm_error:
+        st.caption("LLM 生成中...(下次刷新會看到)")
+
+    # 重新生成按鈕(強制重打 Gemini)
+    if st.button(
+        "🔄 重新生成公司資訊",
+        key=f"company_regen_btn_{sid}",
+        help="重打 Gemini API 重新生成 description / uniqueness / moat",
+    ):
+        st.session_state[regen_key] = True
+        st.rerun()
+
+    if profile.get("llm_updated_at"):
+        st.caption(
+            f"📅 LLM 上次更新:{profile['llm_updated_at'][:19].replace('T', ' ')} UTC"
         )
 
 
