@@ -96,7 +96,7 @@ from src.universe import (
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
     "🔍 個股", "⭐ 關注", "📊 大盤",
-    "💼 交易紀錄", "⚙️ 系統", "⚙️ 設定",
+    "💼 交易紀錄", "🧪 實測追蹤", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -827,6 +827,8 @@ def main() -> None:
         _page_market_sentiment()
     elif page == "💼 交易紀錄":
         _page_trades()
+    elif page == "🧪 實測追蹤":
+        _page_paper_tracking()
     elif page == "⚙️ 系統":
         _page_system()
     elif page == "⚙️ 設定":
@@ -4162,6 +4164,255 @@ def _render_system_health() -> None:
         )
     else:
         st.info("SQLite 還沒有任何 table。")
+
+
+def _page_paper_tracking() -> None:
+    """🧪 實測追蹤 — paper trading 驗證 Stage 2B v2 ML 過濾在實盤是否吻合 backtest 預測。
+
+    3 sections:
+    1. 今日 picks 一鍵加入(reuse 現有 `_run_all_strategies_cached` + 高信心模式
+       toggle)
+    2. 進行中 paper trades(每次 render 自動 evaluate_active_trades)
+    3. 已結算統計(WR / avg_return / max_loss_streak / 依策略拆分 / vs backtest)
+    """
+    from src import paper_trading as pt
+    from src.ui_format import format_change
+
+    st.header("🧪 實測追蹤")
+    st.caption(
+        "**Paper trading**(不是真實交易) — 驗證 Stage 2B v2 ML 過濾後的"
+        "勝率在實盤是否吻合 backtest 預測。每次打開頁面自動結算可結算的 trades。"
+    )
+    db.init_db()
+
+    # 進場前先 evaluate 一輪,讓 active 列表盡量是真的還沒結算的
+    n_evaluated = pt.evaluate_active_trades()
+    if n_evaluated > 0:
+        st.toast(f"✅ 結算 {n_evaluated} 筆 paper trades", icon="🧪")
+
+    # === Section 1: 今日 picks 一鍵加入 ===
+    st.subheader("① 今日 picks 一鍵加入")
+    eligible_sids = pure_stock_universe(min_history=20)
+    if not eligible_sids:
+        st.caption("📭 cache 內沒有任何個股累積 20 天歷史。請先 backfill。")
+    else:
+        target_date = _get_default_screen_date()
+        today_iso = target_date.isoformat()
+        loaded_key = "_paper_picks_loaded"
+        if not st.session_state.get(loaded_key):
+            st.button(
+                f"🔍 掃描今日 picks(~{len(eligible_sids)} 檔)",
+                on_click=_set_session_flag, args=(loaded_key,),
+                key="paper_load_btn", use_container_width=True,
+            )
+        else:
+            with st.spinner(f"掃描 {len(eligible_sids)} 檔..."):
+                try:
+                    agg = _run_all_strategies_cached(
+                        today_iso,
+                        tuple(eligible_sids),
+                        None,
+                        None,
+                    )
+                    df_full = _enrich_df_with_matched_strategies(
+                        _enrich_df_with_ml_prob(
+                            _enrich_df_with_win_rate(
+                                aggregated_to_dataframe(agg), agg,
+                            ),
+                            trade_date=today_iso,
+                            agg=agg,
+                        ),
+                        agg,
+                    )
+                    rows_full = df_full.to_dict("records")
+                    rows_filtered, total = _apply_confidence_filter(rows_full)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"❌ 掃描失敗:{type(e).__name__}: {e}")
+                    rows_filtered = []
+                    total = 0
+
+            high_confidence_on = st.session_state.get("high_confidence_mode", True)
+            mode_label = "高信心模式 ON" if high_confidence_on else "全部 picks"
+            st.caption(
+                f"📊 {mode_label} → 顯示 {len(rows_filtered)}/{total} 檔"
+                f"(交易日 {today_iso})"
+            )
+
+            if not rows_filtered:
+                st.info("📭 今日無符合條件的 picks。")
+            else:
+                # 表格 + 每行旁邊「加入追蹤」button
+                for r in rows_filtered:
+                    sid = str(r.get("stock_id", ""))
+                    name = str(r.get("name", "") or "")
+                    close = r.get("close")
+                    matched = r.get("matched_strategies") or []
+                    ml_prob = r.get("ml_prob")
+                    if not sid or not close or float(close) <= 0:
+                        continue
+
+                    cols = st.columns([1, 2, 1, 2, 1, 1])
+                    cols[0].markdown(f"**{sid}**")
+                    cols[1].markdown(name or "—")
+                    cols[2].markdown(f"{float(close):.2f}")
+                    matched_label = "・".join(
+                        STRATEGY_LABELS.get(s, s) for s in matched
+                    ) if matched else "—"
+                    cols[3].markdown(f"<small>{matched_label}</small>", unsafe_allow_html=True)
+                    if ml_prob is not None:
+                        cols[4].markdown(f"🤖 {float(ml_prob) * 100:.0f}%")
+                    else:
+                        cols[4].markdown("🤖 —")
+
+                    is_tracked = pt.already_tracked(sid, today_iso)
+                    if is_tracked:
+                        cols[5].button(
+                            "✅ 已加入", key=f"paper_add_{sid}_{today_iso}",
+                            disabled=True, use_container_width=True,
+                        )
+                    else:
+                        if cols[5].button(
+                            "🧪 加入追蹤", key=f"paper_add_{sid}_{today_iso}",
+                            type="primary", use_container_width=True,
+                        ):
+                            try:
+                                new_id = pt.add_paper_trade(
+                                    sid=sid, name=name,
+                                    entry_date=today_iso,
+                                    entry_price=float(close),
+                                    matched_strategies=matched,
+                                    ml_prob=float(ml_prob) if ml_prob is not None else None,
+                                )
+                                if new_id:
+                                    st.toast(
+                                        f"✅ #{new_id}: {sid} 加入追蹤 @ {float(close):.2f}",
+                                        icon="🧪",
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.warning(f"⚠ {sid} 同日已加入過,跳過")
+                            except ValueError as e:
+                                st.error(f"❌ {e}")
+
+    st.markdown("---")
+
+    # === Section 2: 進行中 picks ===
+    st.subheader("② 進行中 paper trades")
+    active_df = pt.list_active_trades()
+    if active_df.empty:
+        st.caption("📭 目前沒有進行中的 paper trades。從 ① 加入第一筆。")
+    else:
+        # 取每張 active trade 的最新收盤(跟 entry_date 之後的最新交易日)
+        with db.get_conn() as conn:
+            latest_prices: dict[str, tuple[str, float]] = {}
+            for sid_iter in active_df["sid"].unique():
+                row = conn.execute(
+                    "SELECT date, close FROM daily_prices "
+                    "WHERE stock_id=? ORDER BY date DESC LIMIT 1",
+                    (sid_iter,),
+                ).fetchone()
+                if row and row["close"]:
+                    latest_prices[sid_iter] = (row["date"], float(row["close"]))
+
+        st.caption(f"進行中 {len(active_df)} 筆 — 系統每次打開自動 evaluate")
+        for _, row in active_df.iterrows():
+            sid = row["sid"]
+            entry = float(row["entry_price"])
+            target = float(row["target_price"])
+            stop = float(row["stop_price"])
+            entry_date = row["entry_date"]
+            expected_exit = row.get("expected_exit_date") or "—"
+            matched = row.get("matched_strategies") or []
+            matched_label = "・".join(
+                STRATEGY_LABELS.get(s, s) for s in matched
+            ) if matched else "—"
+
+            cur_date, cur_price = latest_prices.get(sid, ("—", entry))
+            float_pct = (cur_price - entry) / entry * 100 if entry > 0 else 0.0
+
+            with st.container(border=True):
+                cols = st.columns([2, 2, 2, 2, 2])
+                cols[0].markdown(
+                    f"**{sid} {row.get('name') or ''}**<br>"
+                    f"<small>{matched_label}</small>",
+                    unsafe_allow_html=True,
+                )
+                cols[1].markdown(
+                    f"進場 {entry_date}<br>@ {entry:.2f}",
+                    unsafe_allow_html=True,
+                )
+                cols[2].markdown(
+                    f"當前 {cur_date}<br>@ {cur_price:.2f}",
+                    unsafe_allow_html=True,
+                )
+                cols[3].markdown(
+                    f"浮動<br>{format_change(float_pct)}",
+                    unsafe_allow_html=True,
+                )
+                cols[4].markdown(
+                    f"📅 到期 {expected_exit}<br>"
+                    f"<small>+{(target/entry-1)*100:.1f}% / "
+                    f"-{(1-stop/entry)*100:.1f}%</small>",
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
+
+    # === Section 3: 已結算統計 ===
+    st.subheader("③ 已結算統計 vs backtest")
+    settled_df = pt.list_settled_trades()
+    stats = pt.compute_stats(settled_df)
+
+    cols = st.columns(4)
+    cols[0].metric("總追蹤", len(active_df) + stats["n_settled"])
+    cols[1].metric("已結算", stats["n_settled"])
+    cols[2].metric("進行中", len(active_df))
+    cols[3].metric(
+        "勝率",
+        f"{stats['win_rate'] * 100:.1f}%" if stats["n_settled"] > 0 else "—",
+    )
+
+    if stats["n_settled"] > 0:
+        cols2 = st.columns(3)
+        cols2[0].metric("平均報酬", f"{stats['avg_return'] * 100:+.2f}%")
+        cols2[1].metric("最大連敗", stats["max_loss_streak"])
+        # 對比 backtest 預測(取 strategy_backtest 表全策略加權平均當基準)
+        try:
+            rates = db.load_latest_strategy_backtest()
+            if rates:
+                bt_avg = sum(rates.values()) / len(rates)
+                diff_pp = (stats["win_rate"] - bt_avg) * 100
+                cols2[2].metric(
+                    "vs backtest 預測",
+                    f"{bt_avg * 100:.1f}%",
+                    delta=f"{diff_pp:+.1f} pp",
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 依策略拆分 table
+        by_strategy = stats["by_strategy"]
+        if by_strategy:
+            st.markdown("**依策略拆分**")
+            rows_table = []
+            for s, st_stat in sorted(
+                by_strategy.items(), key=lambda kv: -kv[1]["n"],
+            ):
+                rows_table.append({
+                    "策略": STRATEGY_LABELS.get(s, s),
+                    "命中數": st_stat["n"],
+                    "勝": st_stat["wins"],
+                    "勝率": f"{st_stat['win_rate'] * 100:.1f}%",
+                    "平均報酬": f"{st_stat['avg_return'] * 100:+.2f}%",
+                })
+            st.dataframe(
+                pd.DataFrame(rows_table),
+                use_container_width=True, hide_index=True,
+            )
+    else:
+        st.info(
+            "📭 還沒任何結算紀錄。等 ① 加入 picks 後過 5 個交易日,系統自動結算。"
+        )
 
 
 def _page_system() -> None:

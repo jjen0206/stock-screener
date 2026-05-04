@@ -274,6 +274,35 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_sb_period "
     "ON strategy_backtest(period_end)",
+    # paper_trades:純 paper trading 紀錄,驗證 Stage 2B v2 ML 過濾在實盤是否
+    # 有效。每筆 (sid, entry_date) 唯一,UI page 「🧪 實測追蹤」加進。
+    # status active 在 evaluate_active_trades 時掃 daily_prices 滾動更新。
+    """
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        sid                 TEXT NOT NULL,
+        name                TEXT,
+        entry_date          TEXT NOT NULL,
+        entry_price         REAL NOT NULL CHECK(entry_price > 0),
+        matched_strategies  TEXT,
+        ml_prob             REAL,
+        target_price        REAL NOT NULL,
+        stop_price          REAL NOT NULL,
+        hold_days           INTEGER NOT NULL DEFAULT 5,
+        expected_exit_date  TEXT,
+        actual_exit_date    TEXT,
+        actual_exit_price   REAL,
+        status              TEXT NOT NULL CHECK(status IN
+                            ('active', 'win', 'lose', 'timeout_win', 'timeout_lose')),
+        return_pct          REAL,
+        notes               TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT,
+        UNIQUE(sid, entry_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_status "
+    "ON paper_trades(status, entry_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
