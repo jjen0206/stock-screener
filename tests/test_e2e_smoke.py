@@ -2095,6 +2095,127 @@ def test_pick_card_remove_watchlist_button_when_already_added(isolated_db):
     )
 
 
+def test_enrich_df_with_win_rate_avg_of_matched_strategies(isolated_db):
+    """每張 pick 的 win_rate 是該檔命中各 strategy win_rate 的算術平均。"""
+    import app as _app
+    import pandas as pd
+    from src import database as db
+
+    # 灌 strategy_backtest 兩個策略各自 win_rate
+    db.dump_strategy_backtest([
+        {
+            "strategy": "volume_kd", "period_end": "2026-05-04",
+            "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+            "hold_days": 5, "n_fires": 100, "n_wins": 60, "win_rate": 0.60,
+            "avg_return": 0.01,
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+        {
+            "strategy": "ma_alignment", "period_end": "2026-05-04",
+            "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+            "hold_days": 5, "n_fires": 80, "n_wins": 40, "win_rate": 0.50,
+            "avg_return": 0.01,
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+    ])
+
+    # agg dict — 2330 命中兩個策略,2317 命中一個
+    agg = {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {
+                "volume_kd": {"close": 600.0},
+                "ma_alignment": {"close": 600.0},
+            },
+        },
+        "2317": {
+            "name": "鴻海",
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {"close": 200.0}},
+        },
+    }
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0},
+        {"stock_id": "2317", "name": "鴻海", "close": 200.0},
+    ])
+
+    enriched = _app._enrich_df_with_win_rate(df, agg)
+    assert "win_rate" in enriched.columns
+    # 2330: avg(0.60, 0.50) = 0.55
+    win_2330 = enriched[enriched["stock_id"] == "2330"]["win_rate"].iloc[0]
+    assert win_2330 == pytest.approx(0.55)
+    # 2317: avg(0.60) = 0.60
+    win_2317 = enriched[enriched["stock_id"] == "2317"]["win_rate"].iloc[0]
+    assert win_2317 == pytest.approx(0.60)
+
+
+def test_enrich_df_with_win_rate_skips_strategies_without_backtest(
+    isolated_db,
+):
+    """部分 strategy 沒回測 → 從平均剔除,只算有資料的;全沒資料 → None。"""
+    import app as _app
+    import pandas as pd
+    from src import database as db
+
+    # 只灌 volume_kd 的 backtest(ma_alignment 沒)
+    db.dump_strategy_backtest([
+        {
+            "strategy": "volume_kd", "period_end": "2026-05-04",
+            "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+            "hold_days": 5, "n_fires": 100, "n_wins": 60, "win_rate": 0.60,
+            "avg_return": 0.01,
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+    ])
+
+    agg = {
+        # 命中 2 個 strategy 但只 volume_kd 有 backtest → win_rate = 0.60
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {
+                "volume_kd": {"close": 600.0},
+                "ma_alignment": {"close": 600.0},
+            },
+        },
+        # 完全沒 backtest 命中 → None
+        "1101": {
+            "name": "台泥",
+            "signals": ["多頭排列"],
+            "details": {"ma_alignment": {"close": 50.0}},
+        },
+    }
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0},
+        {"stock_id": "1101", "name": "台泥", "close": 50.0},
+    ])
+
+    enriched = _app._enrich_df_with_win_rate(df, agg)
+    assert enriched[enriched["stock_id"] == "2330"]["win_rate"].iloc[0] == 0.60
+    # 沒有資料時 win_rate is None / NaN
+    val_1101 = enriched[enriched["stock_id"] == "1101"]["win_rate"].iloc[0]
+    assert val_1101 is None or (val_1101 != val_1101)  # NaN check
+
+
+def test_enrich_df_with_win_rate_empty_backtest_returns_none(isolated_db):
+    """strategy_backtest 表空 → 全部 win_rate = None(不炸)。"""
+    import app as _app
+    import pandas as pd
+
+    agg = {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {"close": 600.0}},
+        },
+    }
+    df = pd.DataFrame([{"stock_id": "2330", "name": "台積電", "close": 600.0}])
+    enriched = _app._enrich_df_with_win_rate(df, agg)
+    val = enriched["win_rate"].iloc[0]
+    assert val is None or (val != val)
+
+
 def test_pick_card_win_rate_renders_when_present(isolated_db):
     """row.get('win_rate') 有值時,row 2 的勝率欄顯示百分比 + 顏色。
 

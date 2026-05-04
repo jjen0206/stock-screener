@@ -428,6 +428,33 @@ def _make_params_key(params: dict | None) -> tuple[tuple[str, object], ...] | No
     return tuple(sorted(params.items()))
 
 
+def _enrich_df_with_win_rate(
+    df: "pd.DataFrame", agg: dict[str, dict],
+) -> "pd.DataFrame":
+    """加 'win_rate' 欄到 agg DataFrame — 每張 pick 的 win_rate 是該檔命中
+    各 strategy 的 win_rate **算術平均**(不含 max,避免 cherry-pick 高分)。
+
+    Strategy → win_rate 從 db.load_latest_strategy_backtest 拿(每 strategy
+    取 MAX(period_end))。某 strategy 沒回測資料 → 從平均裡剔除;全 N 個
+    都沒資料 → win_rate = None(卡片渲染勝率欄會顯「—」)。
+
+    回傳 DataFrame copy(不就地改 input df)。
+    """
+    rates = db.load_latest_strategy_backtest()
+
+    def _avg_for_sid(sid: str):
+        info = agg.get(sid, {}) if agg else {}
+        strategy_keys = list((info.get("details") or {}).keys())
+        valid = [rates[s] for s in strategy_keys if s in rates]
+        if not valid:
+            return None
+        return sum(valid) / len(valid)
+
+    enriched = df.copy()
+    enriched["win_rate"] = enriched["stock_id"].map(_avg_for_sid)
+    return enriched
+
+
 def _set_session_flag(key: str) -> None:
     """on_click callback — 設 session_state flag(避免 lambda + late-binding)。"""
     st.session_state[key] = True
@@ -628,7 +655,9 @@ def _page_dashboard() -> None:
                         None,
                         None,
                     )
-                    df_picks = aggregated_to_dataframe(agg).head(3)
+                    df_picks = _enrich_df_with_win_rate(
+                        aggregated_to_dataframe(agg).head(3), agg,
+                    )
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"掃描失敗:{type(e).__name__}: {e}")
                     df_picks = pd.DataFrame()
@@ -1229,7 +1258,7 @@ def _page_short() -> None:
     )
 
     _tic("short_aggregated_to_df")
-    df = aggregated_to_dataframe(agg)
+    df = _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg)
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
 
@@ -1317,7 +1346,9 @@ def _page_short() -> None:
             if not sub_agg:
                 st.info(f"📭 此分類本日無入選。")
                 continue
-            sub_df = aggregated_to_dataframe(sub_agg)
+            sub_df = _enrich_df_with_win_rate(
+                aggregated_to_dataframe(sub_agg), sub_agg,
+            )
             render_picks_cards_paginated(
                 sub_df.to_dict("records"),
                 state_key=f"short_{cat}",
