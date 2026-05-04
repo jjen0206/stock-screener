@@ -45,34 +45,101 @@ DEFAULT_PARAMS_HASH = "default_v1"
 
 
 def _compute_ml_probs(
-    sids: list[str], trade_date: str,
+    sids: list[str],
+    trade_date: str,
+    agg: dict[str, dict] | None = None,
 ) -> dict[str, float | None]:
     """跑 ML batch 預測對每 sid 算 prob_up;model 缺 / 載 fail → 空 dict。
 
     Stage 1 Part 2:每天預跑時順便算,寫進 daily_picks.ml_prob 欄,雲端 App
     直接吃 cache 不用每次重算 ~50 picks × 50ms predict_proba。
+
+    Stage 2B:給 agg → 走 per-strategy model 路由(每 sid 用其最嚴格 threshold
+    對應的 model;沒就 fallback 通用)。沒給 agg → 全 sids 走通用 model
+    (Stage 1 行為)。
     """
     if not sids:
         return {}
-    from src.ml_predictor import load_model, predict_batch
-    model_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
-    if not model_path.exists():
+    from src.ml_predictor import (
+        load_model, predict_batch, predict_for_strategy, load_strategy_model,
+    )
+    from src.strategies import STRATEGY_ML_THRESHOLDS
+
+    general_model_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+    general_model = None
+    if general_model_path.exists():
+        try:
+            general_model = load_model(general_model_path)
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[PRECOMPUTE] general model load 失敗: {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+    if general_model is None and not agg:
+        # 沒通用 model + 沒 agg → 沒法路由,全 NULL
         print(
-            f"[PRECOMPUTE] model 檔不存在:{model_path} → ml_prob 全 NULL",
+            f"[PRECOMPUTE] general model 不可用 + 沒 agg → ml_prob 全 NULL",
             flush=True,
         )
         return {}
-    try:
-        model = load_model(model_path)
-        if model is None:
+
+    # 沒 agg → 退舊路徑,全 sids 走通用 model 一次
+    if agg is None:
+        try:
+            return predict_batch(general_model, sids, trade_date)
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[PRECOMPUTE] predict_batch (general) 失敗: {type(e).__name__}: {e}",
+                flush=True,
+            )
             return {}
-        return predict_batch(model, sids, trade_date)
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"[PRECOMPUTE] ML predict_batch 失敗: {type(e).__name__}: {e}",
-            flush=True,
-        )
-        return {}
+
+    # 有 agg → per-strategy 路由,sid → 最嚴格 threshold strategy_name(沒就 None)
+    def _routing_strategy(sid: str) -> str | None:
+        info = agg.get(sid, {}) or {}
+        matched = list((info.get("details") or {}).keys())
+        candidates = [
+            (s, STRATEGY_ML_THRESHOLDS[s])
+            for s in matched
+            if STRATEGY_ML_THRESHOLDS.get(s) is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda kv: kv[1])[0]
+
+    sid_to_chosen: dict[str, str | None] = {sid: _routing_strategy(sid) for sid in sids}
+
+    # GroupBy chosen → batch predict per group
+    groups: dict[str | None, list[str]] = {}
+    for sid, chosen in sid_to_chosen.items():
+        groups.setdefault(chosen, []).append(sid)
+
+    strategy_model_cache: dict[str, object] = {}
+    out: dict[str, float | None] = {}
+    for chosen, group_sids in groups.items():
+        if chosen is None:
+            sm = None
+        else:
+            if chosen not in strategy_model_cache:
+                strategy_model_cache[chosen] = load_strategy_model(chosen)
+            sm = strategy_model_cache[chosen]
+        try:
+            probs = predict_for_strategy(
+                strategy_name=chosen,
+                stock_ids=group_sids,
+                target_date=trade_date,
+                fallback_model=general_model,
+                strategy_model=sm,
+            )
+            out.update(probs)
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[PRECOMPUTE] predict_for_strategy({chosen}) 失敗: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+    return out
 
 
 def _with_etf_universe(min_history: int = 20) -> list[str]:
@@ -133,8 +200,10 @@ def precompute_for_date(trade_date: str) -> dict[str, int]:
         )
 
         # ML 機率(per-pick)— Stage 1 Part 2:預跑就算好寫進表,雲端 App 直接吃。
+        # Stage 2B:傳 agg → 走 per-strategy model 路由(對應 STRATEGY_ML_THRESHOLDS
+        # 內最嚴格 threshold 的策略 model;沒則 fallback 通用)。
         # 若 model 不存在 / load fail → ml_probs 是空 dict,daily_picks ml_prob 欄全 NULL。
-        ml_probs = _compute_ml_probs(list(agg.keys()), trade_date)
+        ml_probs = _compute_ml_probs(list(agg.keys()), trade_date, agg=agg)
         n_with_ml = sum(1 for v in ml_probs.values() if v is not None)
 
         inserted = db.dump_daily_picks(

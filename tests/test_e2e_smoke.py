@@ -2358,6 +2358,196 @@ def test_strategy_ml_thresholds_contains_ma_alignment():
         )
 
 
+def test_routing_strategy_for_pick_returns_strictest_threshold_strategy(isolated_db):
+    """_routing_strategy_for_pick 取 STRATEGY_ML_THRESHOLDS 內最嚴格 threshold 對應的 strategy_name。"""
+    import app as _app
+
+    # ma_alignment(0.60) 在 dict;macd_golden 不在 → 回 ma_alignment
+    assert _app._routing_strategy_for_pick(
+        ["ma_alignment", "macd_golden"]
+    ) == "ma_alignment"
+    # 全不在 dict → 回 None(caller 走 fallback 通用 model)
+    assert _app._routing_strategy_for_pick(
+        ["macd_golden", "gap_up"]
+    ) is None
+    # 空 → None
+    assert _app._routing_strategy_for_pick([]) is None
+
+
+def test_enrich_df_with_ml_prob_per_strategy_routes_to_strategy_model(
+    isolated_db, monkeypatch,
+):
+    """給 agg + pick 命中 ma_alignment(0.60 threshold)→ 用 per-strategy model
+    預測,不走通用 model。"""
+    import app as _app
+    import pandas as pd
+
+    class _GeneralModel:
+        classes_ = [0, 1]
+
+    class _StrategyModel:
+        classes_ = [0, 1]
+
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _GeneralModel())
+    monkeypatch.setattr(
+        _app, "_get_strategy_ml_model",
+        lambda name: _StrategyModel() if name == "ma_alignment" else None,
+    )
+
+    captured: list[dict] = []
+
+    def _fake_predict(strategy_name, stock_ids, target_date,
+                      fallback_model=None, db_path=None, strategy_model=None):
+        captured.append({
+            "strategy_name": strategy_name,
+            "stock_ids": list(stock_ids),
+            "strategy_model_type": type(strategy_model).__name__ if strategy_model else None,
+            "fallback_type": type(fallback_model).__name__ if fallback_model else None,
+        })
+        return {sid: 0.7 for sid in stock_ids}
+
+    from src import ml_predictor
+    monkeypatch.setattr(ml_predictor, "predict_for_strategy", _fake_predict)
+
+    agg = {
+        "2330": {
+            "name": "台積電",
+            "details": {"ma_alignment": {}, "volume_kd": {}},
+        },
+    }
+    df = pd.DataFrame([{"stock_id": "2330", "close": 600.0}])
+
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04", agg=agg)
+
+    assert "ml_prob" in enriched.columns
+    assert enriched["ml_prob"].iloc[0] == 0.7
+    # 應該被路由到 ma_alignment 的 per-strategy model
+    assert len(captured) == 1
+    assert captured[0]["strategy_name"] == "ma_alignment"
+    assert captured[0]["strategy_model_type"] == "_StrategyModel"
+
+
+def test_enrich_df_with_ml_prob_per_strategy_falls_back_to_general(
+    isolated_db, monkeypatch,
+):
+    """給 agg + pick 命中策略全不在 STRATEGY_ML_THRESHOLDS → 路由 strategy_name=None,
+    走通用 model fallback。"""
+    import app as _app
+    import pandas as pd
+
+    class _GeneralModel:
+        classes_ = [0, 1]
+
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _GeneralModel())
+    monkeypatch.setattr(_app, "_get_strategy_ml_model", lambda name: None)
+
+    captured: list[dict] = []
+
+    def _fake_predict(strategy_name, stock_ids, target_date,
+                      fallback_model=None, db_path=None, strategy_model=None):
+        captured.append({
+            "strategy_name": strategy_name,
+            "fallback_type": type(fallback_model).__name__ if fallback_model else None,
+        })
+        return {sid: 0.55 for sid in stock_ids}
+
+    from src import ml_predictor
+    monkeypatch.setattr(ml_predictor, "predict_for_strategy", _fake_predict)
+
+    agg = {
+        "2330": {
+            "name": "鴻海",
+            "details": {"macd_golden": {}, "gap_up": {}},  # 都不在 dict
+        },
+    }
+    df = pd.DataFrame([{"stock_id": "2330", "close": 200.0}])
+
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04", agg=agg)
+
+    assert enriched["ml_prob"].iloc[0] == 0.55
+    assert captured[0]["strategy_name"] is None
+    assert captured[0]["fallback_type"] == "_GeneralModel"
+
+
+def test_enrich_df_with_ml_prob_per_strategy_groupby_batches(
+    isolated_db, monkeypatch,
+):
+    """多 picks groupby chosen_strategy → 每 group 一次 predict_for_strategy。"""
+    import app as _app
+    import pandas as pd
+
+    class _GeneralModel:
+        classes_ = [0, 1]
+    class _MAModel:
+        classes_ = [0, 1]
+
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _GeneralModel())
+    monkeypatch.setattr(
+        _app, "_get_strategy_ml_model",
+        lambda name: _MAModel() if name == "ma_alignment" else None,
+    )
+
+    call_log: list[tuple[str | None, list[str]]] = []
+
+    def _fake_predict(strategy_name, stock_ids, target_date,
+                      fallback_model=None, db_path=None, strategy_model=None):
+        call_log.append((strategy_name, list(stock_ids)))
+        return {sid: 0.5 for sid in stock_ids}
+
+    from src import ml_predictor
+    monkeypatch.setattr(ml_predictor, "predict_for_strategy", _fake_predict)
+
+    agg = {
+        "2330": {"details": {"ma_alignment": {}}},  # → ma_alignment group
+        "2317": {"details": {"macd_golden": {}}},   # → None group
+        "1101": {"details": {"ma_alignment": {}}},  # → ma_alignment group
+    }
+    df = pd.DataFrame([
+        {"stock_id": "2330"},
+        {"stock_id": "2317"},
+        {"stock_id": "1101"},
+    ])
+
+    _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04", agg=agg)
+
+    # groupby 應該產生 2 個 group:ma_alignment 包含 2 sids,None 包含 1 sid
+    assert len(call_log) == 2
+    by_name = {name: sids for name, sids in call_log}
+    assert sorted(by_name["ma_alignment"]) == ["1101", "2330"]
+    assert by_name[None] == ["2317"]
+
+
+def test_enrich_df_with_ml_prob_no_agg_uses_general_model(
+    isolated_db, monkeypatch,
+):
+    """agg=None 走舊路徑 — 全 picks 一次 batch 用通用 model,不走 per-strategy。"""
+    import app as _app
+    import pandas as pd
+
+    class _FakeModel:
+        classes_ = [0, 1]
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _FakeModel())
+
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_batch",
+        lambda model, sids, target_date, db_path=None: {sid: 0.6 for sid in sids},
+    )
+
+    # predict_for_strategy 不該被叫到
+    monkeypatch.setattr(
+        ml_predictor, "predict_for_strategy",
+        lambda *a, **kw: pytest.fail("predict_for_strategy 不該被叫(agg=None)"),
+    )
+
+    df = pd.DataFrame([
+        {"stock_id": "2330", "close": 600.0},
+        {"stock_id": "2317", "close": 200.0},
+    ])
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04", agg=None)
+    assert enriched["ml_prob"].tolist() == [0.6, 0.6]
+
+
 def test_enrich_df_with_matched_strategies_adds_list_column(isolated_db):
     """_enrich_df_with_matched_strategies 從 agg.details.keys 展開成 list 欄。"""
     import app as _app

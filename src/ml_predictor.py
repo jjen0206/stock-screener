@@ -548,6 +548,62 @@ def load_model(path: str | Path):
         return None
 
 
+def per_strategy_model_path(strategy_name: str) -> Path:
+    """返回 models/per_strategy/<strategy>.pkl 絕對路徑(不檢查存不存在)。"""
+    from src import config
+    return Path(config.PROJECT_ROOT) / "models" / "per_strategy" / f"{strategy_name}.pkl"
+
+
+def load_strategy_model(strategy_name: str):
+    """載入 models/per_strategy/<strategy>.pkl;檔不存在 / load 失敗 → 回 None。
+
+    Stage 2B inference 路由用 — caller(predict_for_strategy)拿到 None 自動
+    fallback 到通用模型。
+
+    刻意不 cache(streamlit 端在 _get_strategy_ml_model 包 cache_resource;
+    backtest CLI 端則由 caller 自行 dict 暫存,避免每 strategy × 每 D 重
+    load)。joblib.load 一次約 50-100ms,可承受。
+    """
+    return load_model(per_strategy_model_path(strategy_name))
+
+
+def predict_for_strategy(
+    strategy_name: str | None,
+    stock_ids: list[str],
+    target_date: str,
+    fallback_model=None,
+    db_path: str | Path | None = None,
+    strategy_model=None,
+) -> dict[str, float | None]:
+    """Stage 2B per-strategy inference 路由 — 優先用 per-strategy model,沒就用
+    fallback(通用)model。
+
+    Args:
+        strategy_name: 主導 strategy name(用來 load .pkl);None 跳過 per-strategy
+            走 fallback。
+        stock_ids: 要預測的 sids list
+        target_date: 'YYYY-MM-DD'
+        fallback_model: 通用模型(找不到 per-strategy pkl 時用)。None 時兩個
+            都沒 → 全 None dict 回傳。
+        strategy_model: 已載入的 per-strategy model object(避免每 call 重 load
+            的 caller 優化路徑;傳 None 則內部走 load_strategy_model)。
+
+    Returns:
+        {sid: prob | None};沒任何 model + sids 非空 → {sid: None}
+    """
+    if not stock_ids:
+        return {}
+
+    if strategy_model is None and strategy_name:
+        strategy_model = load_strategy_model(strategy_name)
+
+    chosen = strategy_model if strategy_model is not None else fallback_model
+    if chosen is None:
+        return {sid: None for sid in stock_ids}
+
+    return predict_batch(chosen, stock_ids, target_date, db_path=db_path)
+
+
 __all__ = [
     "FEATURE_NAMES",
     "MIN_HISTORY_DAYS",
@@ -559,6 +615,9 @@ __all__ = [
     "predict_batch",
     "save_model",
     "load_model",
+    "load_strategy_model",
+    "predict_for_strategy",
+    "per_strategy_model_path",
     "dump_model_meta",
     "load_model_meta",
 ]

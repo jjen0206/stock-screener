@@ -113,6 +113,7 @@ def backtest_strategy(
     params: dict | None = None,
     ml_filter: float | None = None,
     ml_model=None,
+    strategy_model=None,
 ) -> dict:
     """跑單一 strategy 在過去 lookback_days 日的回測。
 
@@ -178,12 +179,20 @@ def backtest_strategy(
         if df is None or df.empty:
             continue
 
-        # ML 過濾(如果指定):對該 D 的所有 picks 一次 batch predict_proba
+        # ML 過濾(如果指定):對該 D 的所有 picks 一次 batch predict_proba。
+        # Stage 2B 起走 predict_for_strategy 路由 — 有 per-strategy model 就用
+        # 該 model,沒 (e.g. fallback strategies) 退回 ml_model 通用模型。
         ml_probs_for_d: dict[str, float | None] = {}
-        if ml_filter is not None and ml_model is not None:
-            from src.ml_predictor import predict_batch
+        if ml_filter is not None and (ml_model is not None or strategy_model is not None):
+            from src.ml_predictor import predict_for_strategy
             sids_for_pred = [str(r["stock_id"]) for _, r in df.iterrows()]
-            ml_probs_for_d = predict_batch(ml_model, sids_for_pred, D)
+            ml_probs_for_d = predict_for_strategy(
+                strategy_name=strategy_name,
+                stock_ids=sids_for_pred,
+                target_date=D,
+                fallback_model=ml_model,
+                strategy_model=strategy_model,
+            )
 
         for _, pick_row in df.iterrows():
             sid = str(pick_row["stock_id"])
@@ -276,18 +285,30 @@ def backtest_all_strategies(
         from src.strategies import STRATEGY_ML_THRESHOLDS
         per_strategy_thresholds = STRATEGY_ML_THRESHOLDS
 
+    # per_strategy 模式:預載每 strategy 的 .pkl(不存在 → None,backtest_strategy
+    # 內 fallback 走 ml_model 通用)。一次性 load 11 個 pkl 比每 D × 每 strategy
+    # 重 load 划算。
+    per_strategy_models: dict[str, object] = {}
+    if per_strategy_ml:
+        from src.ml_predictor import load_strategy_model
+        for name in keys:
+            per_strategy_models[name] = load_strategy_model(name)
+
     for name in keys:
         # 決定該 strategy 用哪個 threshold
         if per_strategy_ml:
             this_filter = per_strategy_thresholds.get(name)  # None 表示不過濾
+            this_strategy_model = per_strategy_models.get(name)
         else:
             this_filter = ml_filter
+            this_strategy_model = None
         stats = backtest_strategy(
             name, universe, period_end,
             lookback_days=lookback_days,
             target_pct=target_pct, stop_pct=stop_pct,
             hold_days=hold_days, params=params,
             ml_filter=this_filter, ml_model=ml_model,
+            strategy_model=this_strategy_model,
         )
         results.append({
             "strategy": name,

@@ -522,6 +522,48 @@ def _per_strategy_threshold_for_pick(matched: list[str]) -> float | None:
     return max(thresholds)
 
 
+def _routing_strategy_for_pick(matched: list[str]) -> str | None:
+    """Stage 2B inference 路由 — 取「最嚴格 threshold」的 strategy_name(用來
+    決定該 pick 的 ml_prob 走哪個 per-strategy model)。
+
+    沒任何 matched strategy 在 STRATEGY_ML_THRESHOLDS 內 → 回 None
+    (caller 走通用 model fallback)。跟 _per_strategy_threshold_for_pick
+    成對 — 一個回 threshold 值用來過濾,一個回 strategy_name 用來載 model,
+    確保 filter decision 跟 prob 來源同 model。
+    """
+    from src.strategies import STRATEGY_ML_THRESHOLDS
+    if not matched:
+        return None
+    candidates = [
+        (s, STRATEGY_ML_THRESHOLDS[s])
+        for s in matched
+        if STRATEGY_ML_THRESHOLDS.get(s) is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda kv: kv[1])[0]
+
+
+@st.cache_resource(show_spinner=False)
+def _get_strategy_ml_model(strategy_name: str):
+    """lazy + cache load per-strategy model — 跟 _get_ml_model_for_enrich 同 pattern。
+
+    每次 sticky-submit rerun 命中 streamlit cache,不重 joblib.load。檔不存在
+    或 load 失敗 → 回 None,caller 用 predict_for_strategy 自動 fallback 到
+    通用模型。
+    """
+    try:
+        from src.ml_predictor import load_strategy_model
+        return load_strategy_model(strategy_name)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/enrich] _get_strategy_ml_model({strategy_name}) exception:"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+        return None
+
+
 def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
     """套用「高信心模式」過濾到 row list — Stage 2A 改 per-strategy 模式。
 
@@ -571,12 +613,19 @@ def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
 
 
 def _enrich_df_with_ml_prob(
-    df: "pd.DataFrame", trade_date: str,
+    df: "pd.DataFrame",
+    trade_date: str,
+    agg: dict[str, dict] | None = None,
 ) -> "pd.DataFrame":
-    """加 'ml_prob' 欄到 agg DataFrame — 對全 picks 一次 batch 預測。
+    """加 'ml_prob' 欄到 agg DataFrame。
 
-    沒 model 載入 / 個別 pick 資料不足 → 該行 ml_prob = None。重複呼叫安全:
-    若 df 已經有 ml_prob 欄(可能來自 daily_picks 預跑),原欄保留不重算。
+    Stage 2B 起,若給 agg → 走 per-strategy model 路由(每 pick 用其最嚴格
+    threshold strategy 對應的 model;沒就 fallback 到通用)。沒給 agg →
+    沿用 Stage 1 全 picks 走通用 model 的舊路徑。
+
+    沒任何 model 載入 / 個別 pick 資料不足 → 該行 ml_prob = None。重複呼叫
+    安全:若 df 已經有 ml_prob 欄(可能來自 daily_picks 預跑),原欄保留
+    不重算。
     """
     if df is None or df.empty:
         return df
@@ -584,26 +633,65 @@ def _enrich_df_with_ml_prob(
     if "ml_prob" in df.columns and df["ml_prob"].notna().any():
         return df
 
-    model = _get_ml_model_for_enrich()
-    if model is None:
-        # 沒 model → 給 ml_prob=None 一欄,UI 顯「—」
+    general_model = _get_ml_model_for_enrich()
+
+    # 沒 agg → 退舊路徑:全 picks 走通用 model
+    if agg is None:
+        if general_model is None:
+            enriched = df.copy()
+            enriched["ml_prob"] = None
+            return enriched
+        from src.ml_predictor import predict_batch
+        sids = df["stock_id"].tolist()
+        try:
+            probs = predict_batch(general_model, sids, trade_date)
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[ML/enrich] predict_batch 失敗:{type(e).__name__}: {e}",
+                flush=True,
+            )
+            probs = {}
         enriched = df.copy()
-        enriched["ml_prob"] = None
+        enriched["ml_prob"] = enriched["stock_id"].map(probs)
         return enriched
 
-    from src.ml_predictor import predict_batch
-    sids = df["stock_id"].tolist()
-    try:
-        probs = predict_batch(model, sids, trade_date)
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"[ML/enrich] predict_batch 失敗:{type(e).__name__}: {e}",
-            flush=True,
-        )
-        probs = {}
-
+    # 有 agg → per-strategy 路由
     enriched = df.copy()
-    enriched["ml_prob"] = enriched["stock_id"].map(probs)
+    enriched["_chosen_strategy"] = enriched["stock_id"].map(
+        lambda sid: _routing_strategy_for_pick(_matched_strategies_for_sid(agg, sid))
+    )
+
+    from src.ml_predictor import predict_for_strategy
+    all_probs: dict[str, float | None] = {}
+    for chosen, group_df in enriched.groupby(
+        "_chosen_strategy", dropna=False, sort=False,
+    ):
+        sids = group_df["stock_id"].tolist()
+        if pd.isna(chosen) or chosen is None:
+            chosen_name = None
+            sm = None
+        else:
+            chosen_name = str(chosen)
+            sm = _get_strategy_ml_model(chosen_name)
+        try:
+            probs = predict_for_strategy(
+                strategy_name=chosen_name,
+                stock_ids=sids,
+                target_date=trade_date,
+                fallback_model=general_model,
+                strategy_model=sm,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[ML/enrich] predict_for_strategy({chosen_name}) 失敗:"
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+            probs = {sid: None for sid in sids}
+        all_probs.update(probs)
+
+    enriched["ml_prob"] = enriched["stock_id"].map(all_probs)
+    enriched = enriched.drop(columns=["_chosen_strategy"])
     return enriched
 
 
@@ -843,6 +931,7 @@ def _page_dashboard() -> None:
                                 aggregated_to_dataframe(agg), agg,
                             ),
                             trade_date=today_iso,
+                            agg=agg,
                         ),
                         agg,
                     )
@@ -1462,6 +1551,7 @@ def _page_short() -> None:
         _enrich_df_with_ml_prob(
             _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
             trade_date=today_iso,
+            agg=agg,
         ),
         agg,
     )
@@ -1562,6 +1652,7 @@ def _page_short() -> None:
                         aggregated_to_dataframe(sub_agg), sub_agg,
                     ),
                     trade_date=today_iso,
+                    agg=sub_agg,
                 ),
                 sub_agg,
             )

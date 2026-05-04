@@ -96,3 +96,122 @@ def test_predict_batch_handles_predict_proba_exception(monkeypatch):
 
     out = ml_predictor.predict_batch(_Boom(), ["2330", "2317"], "2026-05-04")
     assert out == {"2330": None, "2317": None}
+
+
+# === Stage 2B per-strategy 路由 ===
+
+def test_load_strategy_model_returns_none_when_pkl_missing(monkeypatch, tmp_path):
+    """models/per_strategy/<name>.pkl 不存在 → 回 None。"""
+    monkeypatch.setattr(
+        ml_predictor, "per_strategy_model_path",
+        lambda name: tmp_path / f"{name}.pkl",
+    )
+    assert ml_predictor.load_strategy_model("nonexistent_strategy") is None
+
+
+def test_load_strategy_model_loads_existing_pkl(monkeypatch, tmp_path):
+    """pkl 存在 → joblib load 出 model 物件(不為 None)。"""
+    import joblib
+
+    pkl_path = tmp_path / "fake_strat.pkl"
+    fake_obj = {"version": "v0", "classes_": [0, 1]}
+    joblib.dump(fake_obj, pkl_path)
+
+    monkeypatch.setattr(
+        ml_predictor, "per_strategy_model_path",
+        lambda name: tmp_path / f"{name}.pkl",
+    )
+    out = ml_predictor.load_strategy_model("fake_strat")
+    assert out == fake_obj
+
+
+def test_predict_for_strategy_uses_per_strategy_model_when_provided(monkeypatch):
+    """strategy_model 直接傳入 → 用該 model,不 load_strategy_model。"""
+    fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
+    monkeypatch.setattr(
+        ml_predictor, "extract_features",
+        lambda sid, td, db_path=None: dict(fake_features),
+    )
+    # load_strategy_model 不應被叫到 — strategy_model 已 inject
+    monkeypatch.setattr(
+        ml_predictor, "load_strategy_model",
+        lambda name: pytest.fail(f"load_strategy_model 不應被叫到 (got {name})"),
+    )
+    strategy_model = _FakeModel(classes=(0, 1), proba_per_row=[[0.2, 0.8]])
+    fallback = _FakeModel(classes=(0, 1), proba_per_row=[[0.5, 0.5]])
+
+    out = ml_predictor.predict_for_strategy(
+        strategy_name="ma_alignment",
+        stock_ids=["2330"],
+        target_date="2026-05-04",
+        fallback_model=fallback,
+        strategy_model=strategy_model,
+    )
+    assert out == {"2330": pytest.approx(0.8)}
+
+
+def test_predict_for_strategy_falls_back_to_general_when_no_per_strategy_model(
+    monkeypatch,
+):
+    """strategy_name 給但 .pkl 不存在 → fallback_model 用上。"""
+    fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
+    monkeypatch.setattr(
+        ml_predictor, "extract_features",
+        lambda sid, td, db_path=None: dict(fake_features),
+    )
+    monkeypatch.setattr(
+        ml_predictor, "load_strategy_model", lambda name: None,
+    )
+    fallback = _FakeModel(classes=(0, 1), proba_per_row=[[0.4, 0.6]])
+
+    out = ml_predictor.predict_for_strategy(
+        strategy_name="missing_strat",
+        stock_ids=["2330"],
+        target_date="2026-05-04",
+        fallback_model=fallback,
+    )
+    assert out == {"2330": pytest.approx(0.6)}
+
+
+def test_predict_for_strategy_returns_all_none_when_no_models_at_all(monkeypatch):
+    """strategy_name 給但 pkl 不存在 + fallback_model=None → 全 None。"""
+    monkeypatch.setattr(ml_predictor, "load_strategy_model", lambda name: None)
+
+    out = ml_predictor.predict_for_strategy(
+        strategy_name="missing_strat",
+        stock_ids=["2330", "2317"],
+        target_date="2026-05-04",
+        fallback_model=None,
+    )
+    assert out == {"2330": None, "2317": None}
+
+
+def test_predict_for_strategy_with_no_strategy_name_uses_fallback(monkeypatch):
+    """strategy_name=None → 跳過 per-strategy 直接用 fallback_model。"""
+    fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
+    monkeypatch.setattr(
+        ml_predictor, "extract_features",
+        lambda sid, td, db_path=None: dict(fake_features),
+    )
+    monkeypatch.setattr(
+        ml_predictor, "load_strategy_model",
+        lambda name: pytest.fail(f"不應 load_strategy_model (got {name})"),
+    )
+    fallback = _FakeModel(classes=(0, 1), proba_per_row=[[0.4, 0.6]])
+
+    out = ml_predictor.predict_for_strategy(
+        strategy_name=None,
+        stock_ids=["2330"],
+        target_date="2026-05-04",
+        fallback_model=fallback,
+    )
+    assert out == {"2330": pytest.approx(0.6)}
+
+
+def test_predict_for_strategy_empty_sids_returns_empty():
+    out = ml_predictor.predict_for_strategy(
+        strategy_name="ma_alignment",
+        stock_ids=[],
+        target_date="2026-05-04",
+    )
+    assert out == {}
