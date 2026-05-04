@@ -294,6 +294,40 @@ def test_backtest_strategy_insufficient_history_returns_zero(tmp_db, monkeypatch
     assert stats == {"n_fires": 0, "n_wins": 0, "win_rate": 0.0, "avg_return": 0.0}
 
 
+def test_dump_strategy_backtest_csv_writes_to_snapshot_dir(
+    tmp_db, tmp_path,
+):
+    """dump_strategy_backtest_csv 把 strategy_backtest 全表寫成 CSV。"""
+    from scripts import backtest_strategies as bs
+
+    db.dump_strategy_backtest([
+        _sample_backtest_row("volume_kd", "2026-05-04", 0.62),
+        _sample_backtest_row("ma_alignment", "2026-05-04", 0.55),
+    ])
+
+    snapshot_dir = tmp_path / "snap"
+    n = bs.dump_strategy_backtest_csv(snapshot_dir=snapshot_dir)
+    assert n == 2
+    csv_path = snapshot_dir / "strategy_backtest.csv"
+    assert csv_path.exists()
+
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    assert len(df) == 2
+    assert set(df["strategy"]) == {"volume_kd", "ma_alignment"}
+    # CSV sorted by win_rate desc
+    assert df.iloc[0]["strategy"] == "volume_kd"  # 0.62 > 0.55
+
+
+def test_dump_strategy_backtest_csv_skips_when_table_empty(tmp_db, tmp_path):
+    """空表 → 不寫 CSV(避免 commit 空檔)。"""
+    from scripts import backtest_strategies as bs
+    snapshot_dir = tmp_path / "snap"
+    n = bs.dump_strategy_backtest_csv(snapshot_dir=snapshot_dir)
+    assert n == 0
+    assert not (snapshot_dir / "strategy_backtest.csv").exists()
+
+
 def test_backtest_all_strategies_returns_rows_per_strategy(tmp_db, monkeypatch):
     """backtest_all_strategies 回 list[dict] 每個 strategy 一筆,schema 對齊
     db.dump_strategy_backtest 期望。"""
