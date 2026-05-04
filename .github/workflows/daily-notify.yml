@@ -88,6 +88,35 @@ jobs:
             git push
           fi
 
+      # 歷史回測勝率(只週一跑)— 跑 default params 全 11 strategies 過去 126
+      # 個交易日,寫進 strategy_backtest 表 + dump CSV。週二~五 skip 避免每天
+      # 浪費 CI 時間(回測本身比 precompute 慢很多,多檔 × 多日 × screener)。
+      # cron 14:13 UTC,週一在 UTC 也是週一(date -u +%w == "1")。
+      # continue-on-error:回測失敗不擋推播 step。
+      - name: Backtest strategies (Mondays only)
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          DOW=$(date -u +%w)
+          if [ "$DOW" = "1" ]; then
+            echo "Monday — running backtest (lookback 126 trading days)"
+            python scripts/backtest_strategies.py --lookback 126
+          else
+            echo "Skip backtest (DOW=$DOW, only runs on Monday=1)"
+          fi
+
+      - name: Commit backtest snapshot if changed
+        continue-on-error: true
+        run: |
+          git add data/twse_snapshot/strategy_backtest.csv 2>/dev/null || true
+          if git diff --quiet --staged; then
+            echo "No strategy_backtest snapshot changes to commit"
+          else
+            git commit -m "chore(backtest): weekly strategies backtest snapshot [skip ci]"
+            git push
+          fi
+
       - name: Run daily notify
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}

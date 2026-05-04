@@ -1004,6 +1004,39 @@ def preload_snapshots(
                 )
             counts["daily_picks"] = len(records)
 
+    # 9. strategy_backtest(週一 nightly 跑歷史回測結果)— App 端 enrich
+    # 卡片勝率欄用。只 dump 週一一次,週二-週五 CSV 不變。
+    sb_csv = snapshot_dir / "strategy_backtest.csv"
+    if sb_csv.exists():
+        df = pd.read_csv(sb_csv, dtype={"strategy": str, "period_end": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            with get_conn(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO strategy_backtest (
+                        strategy, period_end, lookback_days, target_pct, stop_pct,
+                        hold_days, n_fires, n_wins, win_rate, avg_return, computed_at
+                    ) VALUES (
+                        :strategy, :period_end, :lookback_days, :target_pct, :stop_pct,
+                        :hold_days, :n_fires, :n_wins, :win_rate, :avg_return, :computed_at
+                    )
+                    ON CONFLICT(strategy, period_end) DO UPDATE SET
+                        lookback_days=excluded.lookback_days,
+                        target_pct=excluded.target_pct, stop_pct=excluded.stop_pct,
+                        hold_days=excluded.hold_days,
+                        n_fires=excluded.n_fires, n_wins=excluded.n_wins,
+                        win_rate=excluded.win_rate, avg_return=excluded.avg_return,
+                        computed_at=excluded.computed_at
+                    """,
+                    records,
+                )
+            counts["strategy_backtest"] = len(records)
+
     return counts
 
 

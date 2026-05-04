@@ -328,6 +328,37 @@ def test_dump_strategy_backtest_csv_skips_when_table_empty(tmp_db, tmp_path):
     assert not (snapshot_dir / "strategy_backtest.csv").exists()
 
 
+def test_preload_snapshots_loads_strategy_backtest_csv(tmp_db, tmp_path):
+    """preload_snapshots 讀 strategy_backtest.csv 灌進 SQLite,
+    App 端 load_latest_strategy_backtest 拿到資料。"""
+    import pandas as pd
+
+    # 寫一份 CSV(模擬 nightly workflow 推進來)
+    csv_path = tmp_path / "strategy_backtest.csv"
+    pd.DataFrame([
+        {
+            "strategy": "volume_kd", "period_end": "2026-05-04",
+            "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+            "hold_days": 5, "n_fires": 100, "n_wins": 62, "win_rate": 0.62,
+            "avg_return": 0.012,
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+        {
+            "strategy": "ma_alignment", "period_end": "2026-05-04",
+            "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+            "hold_days": 5, "n_fires": 80, "n_wins": 44, "win_rate": 0.55,
+            "avg_return": 0.008,
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+    ]).to_csv(csv_path, index=False)
+
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("strategy_backtest") == 2
+
+    rates = db.load_latest_strategy_backtest()
+    assert rates == {"volume_kd": 0.62, "ma_alignment": 0.55}
+
+
 def test_backtest_all_strategies_returns_rows_per_strategy(tmp_db, monkeypatch):
     """backtest_all_strategies 回 list[dict] 每個 strategy 一筆,schema 對齊
     db.dump_strategy_backtest 期望。"""
