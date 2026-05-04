@@ -947,7 +947,12 @@ def test_backtest_passes_enabled_strategies_kwarg(isolated_db, monkeypatch):
 # ============================================================================
 
 def _seed_latest_trading_day(latest_iso: str) -> None:
-    """灌一筆 daily_prices 讓 MAX(date) = latest_iso(供 default date 取用)。"""
+    """灌一筆 daily_prices 讓 MAX(date) = latest_iso(供 default date 取用)。
+
+    Caller 應傳「未來日期」(e.g. 2099-01-15),確保 isolated_db preload
+    snapshot CSV 後 MAX(date) 仍是 latest_iso 而非 CSV 內的近期日期(否則
+    nightly auto-commit 漂移會讓 hardcoded 日期 assert fail)。
+    """
     from src import database as db
 
     db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
@@ -962,7 +967,8 @@ def test_short_default_date_uses_latest_trading_day(isolated_db):
     """短線頁「選股日期」default 不該是 date.today()(週末/假日 → 0 picks),
     而該是 daily_prices 內最新一筆日期。
     """
-    _seed_latest_trading_day("2026-04-30")
+    # 用未來日期確保 seed 後是 MAX,不被 isolated_db 預載 snapshot CSV 蓋過
+    _seed_latest_trading_day("2099-01-15")
 
     at = _new_at("🔥 短線")
     at.run()
@@ -972,15 +978,18 @@ def test_short_default_date_uses_latest_trading_day(isolated_db):
     assert di.label == "選股日期", (
         f"預期短線頁第一個 date_input label = 『選股日期』, got {di.label!r}"
     )
-    assert di.value == date(2026, 4, 30), (
-        f"短線『選股日期』default 應 = max(daily_prices.date) = 2026-04-30, "
+    assert di.value == date(2099, 1, 15), (
+        f"短線『選股日期』default 應 = max(daily_prices.date) = 2099-01-15, "
         f"實際 = {di.value}"
     )
 
 
 def test_backtest_default_dates_use_latest_trading_day(isolated_db):
     """回測頁自訂模式的「回測結束」default 應 = 最新交易日,「回測起始」應 = 最新 - 180 天。"""
-    _seed_latest_trading_day("2026-04-30")
+    from datetime import timedelta
+    seed_iso = "2099-01-15"
+    seed_date = date(2099, 1, 15)
+    _seed_latest_trading_day(seed_iso)
 
     at = _new_at("📈 回測")
     at.run()
@@ -992,12 +1001,13 @@ def test_backtest_default_dates_use_latest_trading_day(isolated_db):
 
     bt_start = at.date_input(key="bt_start")
     bt_end = at.date_input(key="bt_end")
-    assert bt_end.value == date(2026, 4, 30), (
-        f"『回測結束』default 應 = 2026-04-30, 實際 = {bt_end.value}"
+    assert bt_end.value == seed_date, (
+        f"『回測結束』default 應 = {seed_date}, 實際 = {bt_end.value}"
     )
-    # 起始 = 最新 - 180 天 = 2025-11-01
-    assert bt_start.value == date(2025, 11, 1), (
-        f"『回測起始』default 應 = latest - 180d = 2025-11-01, "
+    # 起始 = 最新 - 180 天(動態算,跟 app.py 內 timedelta(180) 同口徑)
+    expected_start = seed_date - timedelta(days=180)
+    assert bt_start.value == expected_start, (
+        f"『回測起始』default 應 = latest - 180d = {expected_start}, "
         f"實際 = {bt_start.value}"
     )
 

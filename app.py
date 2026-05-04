@@ -4166,6 +4166,48 @@ def _render_system_health() -> None:
         st.info("SQLite 還沒有任何 table。")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _evaluate_active_paper_trades_cached(cache_buster: int = 0) -> int:
+    """TTL 60s + buster — 避免每 rerun(尤其是 button click)都重跑 DB scan。
+
+    cache_buster 由 _add_paper_trade_callback 在加入新 trade 後 +1,讓下次
+    render 強制 cache miss 重 evaluate(因為 active list 變了)。
+    """
+    from src import paper_trading as pt
+    return pt.evaluate_active_trades()
+
+
+def _add_paper_trade_callback(
+    sid: str, name: str, entry_date: str, entry_price: float,
+    matched_strategies: list[str], ml_prob: float | None,
+) -> None:
+    """on_click callback — Streamlit 自動 rerun,不用 explicit st.rerun()。
+
+    callback 模式比 `if st.button():` 少一輪 rerun,點擊到結果回顯體感快很多。
+    錯誤經 toast 顯示。
+    """
+    from src import paper_trading as pt
+    try:
+        new_id = pt.add_paper_trade(
+            sid=sid, name=name, entry_date=entry_date,
+            entry_price=entry_price,
+            matched_strategies=matched_strategies, ml_prob=ml_prob,
+        )
+        if new_id:
+            st.toast(
+                f"✅ #{new_id}: {sid} 加入追蹤 @ {entry_price:.2f}",
+                icon="🧪",
+            )
+            # bump 讓下個 render evaluate cache miss
+            st.session_state["_paper_evaluate_buster"] = (
+                st.session_state.get("_paper_evaluate_buster", 0) + 1
+            )
+        else:
+            st.toast(f"⚠ {sid} 同日已加入過,跳過", icon="⚠️")
+    except ValueError as e:  # noqa: BLE001
+        st.toast(f"❌ {e}", icon="❌")
+
+
 def _page_paper_tracking() -> None:
     """🧪 實測追蹤 — paper trading 驗證 Stage 2B v2 ML 過濾在實盤是否吻合 backtest 預測。
 
@@ -4185,10 +4227,9 @@ def _page_paper_tracking() -> None:
     )
     db.init_db()
 
-    # 進場前先 evaluate 一輪,讓 active 列表盡量是真的還沒結算的
-    n_evaluated = pt.evaluate_active_trades()
-    if n_evaluated > 0:
-        st.toast(f"✅ 結算 {n_evaluated} 筆 paper trades", icon="🧪")
+    # evaluate cached(TTL 60s + add 後 buster bump)— 不每 rerun 都重跑 DB scan
+    cache_buster = st.session_state.get("_paper_evaluate_buster", 0)
+    _evaluate_active_paper_trades_cached(cache_buster)
 
     # === Section 1: 今日 picks 一鍵加入 ===
     st.subheader("① 今日 picks 一鍵加入")
@@ -4241,7 +4282,16 @@ def _page_paper_tracking() -> None:
             if not rows_filtered:
                 st.info("📭 今日無符合條件的 picks。")
             else:
-                # 表格 + 每行旁邊「加入追蹤」button
+                # 批量查 today 已追蹤的 sid 集合(避免 N×SQL,改 1 次 SQL + set lookup)
+                with db.get_conn() as conn:
+                    tracked_today = {
+                        r["sid"] for r in conn.execute(
+                            "SELECT sid FROM paper_trades WHERE entry_date=?",
+                            (today_iso,),
+                        ).fetchall()
+                    }
+
+                # 表格 + 每行旁邊「加入追蹤」button(on_click callback,不用 if-button 模式)
                 for r in rows_filtered:
                     sid = str(r.get("stock_id", ""))
                     name = str(r.get("name", "") or "")
@@ -4264,35 +4314,23 @@ def _page_paper_tracking() -> None:
                     else:
                         cols[4].markdown("🤖 —")
 
-                    is_tracked = pt.already_tracked(sid, today_iso)
-                    if is_tracked:
+                    if sid in tracked_today:
                         cols[5].button(
                             "✅ 已加入", key=f"paper_add_{sid}_{today_iso}",
                             disabled=True, use_container_width=True,
                         )
                     else:
-                        if cols[5].button(
-                            "🧪 加入追蹤", key=f"paper_add_{sid}_{today_iso}",
+                        ml_prob_val = (
+                            float(ml_prob) if ml_prob is not None else None
+                        )
+                        cols[5].button(
+                            "🧪 加入追蹤",
+                            key=f"paper_add_{sid}_{today_iso}",
+                            on_click=_add_paper_trade_callback,
+                            args=(sid, name, today_iso, float(close),
+                                  list(matched), ml_prob_val),
                             type="primary", use_container_width=True,
-                        ):
-                            try:
-                                new_id = pt.add_paper_trade(
-                                    sid=sid, name=name,
-                                    entry_date=today_iso,
-                                    entry_price=float(close),
-                                    matched_strategies=matched,
-                                    ml_prob=float(ml_prob) if ml_prob is not None else None,
-                                )
-                                if new_id:
-                                    st.toast(
-                                        f"✅ #{new_id}: {sid} 加入追蹤 @ {float(close):.2f}",
-                                        icon="🧪",
-                                    )
-                                    st.rerun()
-                                else:
-                                    st.warning(f"⚠ {sid} 同日已加入過,跳過")
-                            except ValueError as e:
-                                st.error(f"❌ {e}")
+                        )
 
     st.markdown("---")
 
