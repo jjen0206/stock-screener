@@ -171,7 +171,9 @@ def render_pick_card(
             _render_technical_summary(sid)
             _render_key_levels(sid)
             _render_action_suggestion(sid)
-            _render_company_info_compact(sid)
+            # button_key_prefix 帶進 helper — 5 tabs UI 同 sid 可能出現在
+            # 「全部」+ 「趨勢」兩個 tab,各自 prefix 區隔避免 key 撞
+            _render_company_info_compact(sid, key_prefix=button_key_prefix)
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:

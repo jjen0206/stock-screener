@@ -696,48 +696,72 @@ def format_pick_summary(sid: str, indent: str = "   ") -> str:
     return indent + " / ".join([tech_part, force_part, action_part, ai_part])
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _read_company_profile_cached(sid: str) -> dict | None:
-    """從 SQLite company_profiles 讀整筆資料(read-only,**不**呼叫 LLM)。
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_company_profile_cached(sid: str) -> dict:
+    """call `company_profile.get_company_profile`,memory cache 1 小時。
 
-    `@st.cache_data(ttl=300)` 避免一張清單 N 張卡片重複查同股(138 picks
-    一次展開 = 138 次 SELECT 是純浪費)。TTL 5 分鐘給 user 點「重新生成」
-    後一段時間能看到新值。
+    SQLite 已有自己的 cache(get_company_profile 本身就是 cache-first),
+    這層 `@st.cache_data` 是**記憶體 cache** 上方再加一層 — 同 streamlit
+    session 內 1 小時內同 sid 不會重打 SQLite + 不會重序列化 dict。
 
-    回 dict(同 company_profiles 欄位)或 None。
+    純讀 SQLite hit(已有 LLM 結果)時這層 cache 益處小;
+    cache miss 觸發 LLM 時 — 用戶若連點兩次 expand,memory cache 擋下第二次。
+
+    regenerate 流程不走這條(直接呼叫 module-level 函式)。
     """
-    try:
-        with db.get_conn() as conn:
-            row = conn.execute(
-                "SELECT industry, market, description, uniqueness, moat, "
-                "llm_updated_at FROM company_profiles WHERE stock_id=?",
-                (sid,),
-            ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    return dict(row) if row else None
+    from src import company_profile as cp
+    return cp.get_company_profile(sid, regenerate=False)
 
 
-def _render_company_info_compact(sid: str) -> None:
-    """卡片 expander 內的精簡公司資訊(read-only,純讀 SQLite cache)。
+def _render_company_info_compact(sid: str, key_prefix: str = "card") -> None:
+    """卡片 expander 內的公司資訊 — 跟個股頁同行為(展開即自動生成 LLM)。
 
-    設計:
-    - **不主動跑 LLM** — 138 picks 全展開會打爆 Gemini quota;想生成走個股頁
-    - **不放重新生成按鈕** — 同上
-    - facts 即時(industry / market 從 cache 一行帶出)
-    - LLM 3 段(description / uniqueness / moat)有就顯,沒就 placeholder
+    流程:
+    - 讀 SQLite cache:有完整 LLM 資料 → 直接顯
+    - cache miss(沒 description)→ **自動 call get_company_profile** 觸發 LLM
+      (內部 SQLite cache-first;首次打 Gemini ~2 秒,之後秒級)
+    - 「🔄 重新生成」按鈕:強制 regenerate=True 重打 LLM
+
+    Quota 防呆:
+    - SQLite 內 cache 永久(每股一次 LLM call;之後重啟也還在)
+    - `@st.cache_data(ttl=3600)` 同 streamlit session 1 小時內不重打
+    - expander 預設 collapsed → 用戶只展開的 pick 才 trigger
+    - LLM 失敗 → 顯 facts + 「LLM 暫時失敗」caption,不影響其他 sections
+
+    Args:
+        sid: 股號
+        key_prefix: button / session_state key 前綴。同一個 sid 可能在多個
+            頁面 / 多個 tab(全部 / 趨勢 / 反轉 ...)同時 render → 同一頁有
+            兩張卡片 = 兩個按鈕 — streamlit 會撞 key。caller 給不同 prefix
+            (e.g. button_key_prefix="short_趨勢")就解掉。
+
+    跟個股頁的差別:
+    - 同樣會自動跑 LLM、同樣有重新生成按鈕
+    - UI 較精簡(用 markdown 一行一段而非 metric grid)
     """
-    profile = _read_company_profile_cached(sid)
+    from src import company_profile as cp
+
     st.markdown("### 🏢 公司資訊")
 
-    if profile is None:
-        st.caption(
-            "🤖 公司資訊尚未生成 — 進「🔍 個股」頁查詢此股可自動生成"
-            "(LLM 描述會 cache,之後卡片就看得到)"
-        )
+    regen_key = f"{key_prefix}_company_regen_{sid}"
+    regenerate = st.session_state.pop(regen_key, False)
+
+    spinner_msg = (
+        "重新生成公司資訊..." if regenerate else "載入公司資訊..."
+    )
+    try:
+        with st.spinner(spinner_msg):
+            if regenerate:
+                # bypass memory cache + 強制重打 LLM
+                _get_company_profile_cached.clear()
+                profile = cp.get_company_profile(sid, regenerate=True)
+            else:
+                profile = _get_company_profile_cached(sid)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"⚠️ 無法載入公司資訊:{e}")
         return
 
-    # facts(industry / market)— 沒寫進 cache 用 — 佔位
+    # facts(industry / market)
     industry = profile.get("industry") or "—"
     market = profile.get("market") or "—"
     st.markdown(f"**產業**:{industry}　|　**市場**:{market}")
@@ -745,18 +769,37 @@ def _render_company_info_compact(sid: str) -> None:
     desc = profile.get("description")
     uniq = profile.get("uniqueness")
     moat = profile.get("moat")
-    if not (desc or uniq or moat):
-        st.caption(
-            "📝 LLM 描述尚未生成 — 進「🔍 個股」頁查詢此股可自動生成"
-        )
-        return
+    llm_error = profile.get("llm_error")
 
-    if desc:
-        st.markdown(f"**📝 業務**:{desc}")
-    if uniq:
-        st.markdown(f"**✨ 獨特性**:{uniq}")
-    if moat:
-        st.markdown(f"**🏰 護城河**:{moat}")
+    if llm_error and not (desc or uniq or moat):
+        # LLM 完全失敗(無歷史 cache 也沒新值)→ 顯錯,提示重試
+        st.caption(f"⚠️ {llm_error}")
+    else:
+        if llm_error:
+            # 有歷史 cache 但本次重試失敗 — 顯舊 LLM 內容 + 錯誤 caption
+            st.caption(f"⚠️ {llm_error}(顯示上次 cache)")
+        if desc:
+            st.markdown(f"**📝 業務**:{desc}")
+        if uniq:
+            st.markdown(f"**✨ 獨特性**:{uniq}")
+        if moat:
+            st.markdown(f"**🏰 護城河**:{moat}")
+        if not (desc or uniq or moat):
+            st.caption("📝 LLM 描述尚未生成,點下方按鈕重試")
+
+    # 重新生成按鈕 — key 帶 prefix + sid 避免同 sid 出現在多個 tab 時衝撞
+    if st.button(
+        "🔄 重新生成",
+        key=f"{key_prefix}_company_regen_btn_{sid}",
+        help="強制重打 Gemini API",
+    ):
+        st.session_state[regen_key] = True
+        st.rerun()
+
+    if profile.get("llm_updated_at"):
+        st.caption(
+            f"📅 LLM 更新:{profile['llm_updated_at'][:19].replace('T', ' ')} UTC"
+        )
 
 
 def _render_main_force_signal(sid: str) -> None:

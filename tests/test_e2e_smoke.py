@@ -2272,11 +2272,16 @@ def _seed_company_profile(
 
 
 def test_company_info_compact_shows_facts_and_llm_when_cached(isolated_db):
-    """SQLite 有完整 profile → markdown 含 industry / description / uniqueness / moat。"""
-    from src.individual_sections import _read_company_profile_cached
+    """SQLite 有完整 profile → markdown 含 industry / description / uniqueness / moat。
+
+    間接驗證「LLM 沒被呼叫」:由於沒設 GEMINI_API_KEY,如果走 LLM path 會
+    產生 error caption「GEMINI_API_KEY 未設定」。assert 沒看到該訊息 →
+    確認走 SQLite cache hit。
+    """
+    from src.individual_sections import _get_company_profile_cached
 
     _seed_company_profile("2330")
-    _read_company_profile_cached.clear()  # 避免上一個 test 殘留 cache
+    _get_company_profile_cached.clear()
 
     def _harness():
         from src.individual_sections import _render_company_info_compact
@@ -2287,86 +2292,138 @@ def test_company_info_compact_shows_facts_and_llm_when_cached(isolated_db):
     assert not at.exception, _exc_msgs(at)
 
     md_text = "\n".join(str(m.value) for m in at.markdown)
+    captions = "\n".join(str(c.value) for c in at.caption)
     assert "公司資訊" in md_text, f"缺標題: {md_text!r}"
     assert "半導體業" in md_text, f"缺 industry: {md_text!r}"
     assert "上市" in md_text, f"缺 market: {md_text!r}"
     assert "晶圓代工龍頭" in md_text, f"缺 description: {md_text!r}"
     assert "領先製程節點" in md_text, f"缺 uniqueness: {md_text!r}"
     assert "規模 + 客戶綁定" in md_text, f"缺 moat: {md_text!r}"
+    # 反向確認:SQLite cache hit 不該走 LLM error path
+    assert "GEMINI_API_KEY" not in captions, (
+        f"cache hit 走了 LLM path, captions: {captions}"
+    )
 
 
-def test_company_info_compact_fallback_when_no_cache(isolated_db):
-    """SQLite 沒這檔 → 顯 placeholder caption,**不**呼叫 LLM。"""
-    from src.individual_sections import _read_company_profile_cached
+def test_company_info_compact_auto_calls_get_profile_on_cache_miss(
+    isolated_db, monkeypatch,
+):
+    """SQLite cache miss → 自動 call get_company_profile(會觸發 LLM)。
 
-    _read_company_profile_cached.clear()
+    透過 monkeypatch get_company_profile 為 spy(這次不需用 mock 資料,直
+    接驗 spy 呼叫即可確認新行為)— spy 必須在 harness module 全域 patch,
+    AppTest 內 import 看得到。
+    """
+    from src import company_profile as cp
+    from src.individual_sections import _get_company_profile_cached
+
+    _get_company_profile_cached.clear()
+
+    # 直接在 cp module 上替換函式 — AppTest harness 內 from src import
+    # company_profile 拿到的是同一個 module 物件,此 attribute 可被 patch
+    spy_calls = []
+    def _spy(sid, regenerate=False):
+        spy_calls.append((sid, regenerate))
+        return {
+            "stock_id": sid, "name": "X",
+            "industry": "光電業", "market": "上市",
+            "listing_date": None, "foreign_limit": None,
+            "description": "做面板", "uniqueness": "技術領先",
+            "moat": "規模優勢",
+            "finmind_updated_at": None,
+            "llm_updated_at": "2026-05-04T00:00:00+00:00",
+            "llm_error": None,
+        }
+    monkeypatch.setattr(cp, "get_company_profile", _spy)
 
     def _harness():
         from src.individual_sections import _render_company_info_compact
-        _render_company_info_compact("9999")  # 不存在
+        _render_company_info_compact("3008")
 
-    at = AppTest.from_function(_harness, default_timeout=10)
+    at = AppTest.from_function(_harness, default_timeout=15)
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    captions = [str(c.value) for c in at.caption]
-    caption_text = "\n".join(captions)
-    assert "尚未生成" in caption_text, (
-        f"預期 fallback 提示『尚未生成』, 實際 captions: {captions}"
+    assert spy_calls == [("3008", False)], (
+        f"預期 get_company_profile 被叫一次 (3008, regenerate=False), "
+        f"實際: {spy_calls}"
     )
 
+    md_text = "\n".join(str(m.value) for m in at.markdown)
+    assert "光電業" in md_text
+    assert "做面板" in md_text
 
-def test_company_info_compact_facts_only_when_no_llm(isolated_db):
-    """有 facts 但 description=None → 顯 industry / market + 提示『LLM 描述尚未生成』。"""
-    from src.individual_sections import _read_company_profile_cached
 
-    _seed_company_profile(
-        "2317", industry="電腦及週邊設備業", market="上市",
-        description=None, uniqueness=None, moat=None,
+def test_company_info_compact_llm_failure_shows_error_caption(
+    isolated_db, monkeypatch,
+):
+    """LLM 失敗(get_company_profile 回 llm_error)→ 顯 error caption,
+    若也沒 description 則 caption 顯整個錯誤訊息。"""
+    from src import company_profile as cp
+    from src.individual_sections import _get_company_profile_cached
+
+    _get_company_profile_cached.clear()
+
+    monkeypatch.setattr(
+        cp, "get_company_profile",
+        lambda sid, regenerate=False: {
+            "stock_id": sid, "name": "X",
+            "industry": "光電業", "market": "上市",
+            "listing_date": None, "foreign_limit": None,
+            "description": None, "uniqueness": None, "moat": None,
+            "finmind_updated_at": "2026-05-04T00:00:00+00:00",
+            "llm_updated_at": None,
+            "llm_error": "LLM 暫時失敗:API quota exceeded",
+        },
     )
-    _read_company_profile_cached.clear()
 
     def _harness():
         from src.individual_sections import _render_company_info_compact
-        _render_company_info_compact("2317")
+        _render_company_info_compact("3008")
 
     at = AppTest.from_function(_harness, default_timeout=10)
     at.run()
     assert not at.exception, _exc_msgs(at)
 
     md_text = "\n".join(str(m.value) for m in at.markdown)
-    assert "電腦及週邊設備業" in md_text  # facts 在
+    assert "光電業" in md_text  # facts 仍顯
+
     captions = "\n".join(str(c.value) for c in at.caption)
-    assert "LLM 描述尚未生成" in captions, (
-        f"預期 caption 提示 LLM 尚未生成, 實際: {captions}"
+    assert "API quota exceeded" in captions, (
+        f"預期 caption 顯 LLM error, 實際: {captions}"
     )
 
 
-def test_company_info_compact_does_not_call_llm(isolated_db, monkeypatch):
-    """硬性確認 — render 流程不該觸發 generate_with_gemini(避免 138 picks
-    全展開打爆 quota)。"""
+def test_company_info_compact_has_regenerate_button(isolated_db, monkeypatch):
+    """expander 內必須有「重新生成」按鈕,key 帶 sid 區隔多卡片。"""
     from src import company_profile as cp
-    from src.individual_sections import _read_company_profile_cached
+    from src.individual_sections import _get_company_profile_cached
 
-    _read_company_profile_cached.clear()
-
-    llm_calls = []
+    _get_company_profile_cached.clear()
     monkeypatch.setattr(
-        cp, "generate_with_gemini",
-        lambda *a, **kw: (llm_calls.append(1) or {
-            "description": "X", "uniqueness": "Y", "moat": "Z",
-        }),
+        cp, "get_company_profile",
+        lambda sid, regenerate=False: {
+            "stock_id": sid, "name": "台積電",
+            "industry": "半導體業", "market": "上市",
+            "listing_date": None, "foreign_limit": None,
+            "description": "晶圓代工", "uniqueness": "領先製程",
+            "moat": "規模 + 客戶",
+            "finmind_updated_at": None, "llm_updated_at": None,
+            "llm_error": None,
+        },
     )
 
     def _harness():
         from src.individual_sections import _render_company_info_compact
-        # 不存在的 + 存在的 都跑一次 — 都不該觸發 LLM
-        _render_company_info_compact("9999")
+        _render_company_info_compact("2330")
 
     at = AppTest.from_function(_harness, default_timeout=10)
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    assert llm_calls == [], (
-        f"render 不該呼叫 LLM(會打爆 quota), 但被叫了 {len(llm_calls)} 次"
+    btn_keys = [b.key for b in at.button if b.key]
+    # default key_prefix="card"(_render_company_info_compact 預設值)
+    assert "card_company_regen_btn_2330" in btn_keys, (
+        f"預期『重新生成』按鈕 key=card_company_regen_btn_2330,"
+        f"實際 buttons: {btn_keys}"
     )
