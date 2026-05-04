@@ -95,11 +95,13 @@ def render_pick_card(
         with col2:
             close_str = _fmt_num(close, "{:.2f}")
             if show_change and change_pct is not None:
-                arrow = "▲" if change_pct >= 0 else "▼"
+                # 台股慣例:漲紅跌綠 — st.metric 用 inverse 反轉預設(預設正
+                # 是綠,跟台股顛倒)。format_change 統一箭頭 + 顏色字串
+                from src.ui_format import arrow_for
                 st.metric(
                     "收盤", close_str,
-                    delta=f"{arrow} {abs(change_pct):.2f}%",
-                    delta_color="normal" if change_pct >= 0 else "inverse",
+                    delta=f"{arrow_for(change_pct)} {abs(change_pct):.2f}%",
+                    delta_color="inverse",
                 )
             else:
                 st.metric("收盤", close_str)
@@ -118,9 +120,10 @@ def render_pick_card(
                     f"🛑 {_fmt_num(sl)}{rr_str}"
                 )
 
-        # P&L 行(if 該股在 trades 表有持倉)— 紅綠染色
+        # P&L 行(if 該股在 trades 表有持倉)— 漲紅跌綠(台股慣例,via ui_format)
         try:
             from src import database as _db
+            from src.ui_format import color_for, arrow_for
             _pos = _db.get_position(sid)
             if _pos["quantity"] > 0 and close is not None:
                 _close_f = float(close) if not isinstance(close, float) else close
@@ -128,14 +131,14 @@ def render_pick_card(
                 _qty = _pos["quantity"]
                 _unrealized = (_close_f - _avg) * _qty
                 _pct = (_close_f - _avg) / _avg * 100 if _avg > 0 else 0
-                _color = (
-                    "#d62728" if _unrealized > 0
-                    else "#2ca02c" if _unrealized < 0 else "#888"
-                )
+                _color = color_for(_unrealized)
+                _arrow = arrow_for(_unrealized)
+                _sign = "+" if _unrealized > 0 else ("-" if _unrealized < 0 else "")
+                _pct_sign = "+" if _pct > 0 else ("-" if _pct < 0 else "")
                 st.markdown(
                     f"<span style='color:{_color}'>📈 持有 {_qty} 張 @ "
-                    f"均價 {_avg:.2f} / 損益 {_unrealized:+,.0f} "
-                    f"({_pct:+.1f}%)</span>",
+                    f"均價 {_avg:.2f} / 損益 {_arrow} {_sign}{abs(_unrealized):,.0f} "
+                    f"({_pct_sign}{abs(_pct):.1f}%)</span>",
                     unsafe_allow_html=True,
                 )
         except Exception:  # noqa: BLE001

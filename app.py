@@ -581,11 +581,12 @@ def _page_dashboard() -> None:
         delta = last_close - prev_close
         delta_pct = delta / prev_close * 100 if prev_close else 0
         with st.container(border=True):
+            # 台股慣例 — 漲紅跌綠,用 inverse 反轉 streamlit 預設(預設正綠)
             st.metric(
                 f"加權指數 ({taiex_df['date'].iloc[-1]})",
                 f"{last_close:,.2f}",
                 f"{delta:+.2f} ({delta_pct:+.2f}%)",
-                delta_color="normal" if delta >= 0 else "inverse",
+                delta_color="inverse",
             )
 
     # === 2. 今日短線推薦 Top 3(lazy — 預設不自動跑全市場)===
@@ -1693,9 +1694,11 @@ def _render_summary(
     delta = (close - prev_close) if prev_close is not None else None
 
     cols = st.columns(4)
+    # 個股頁收盤的 delta — 台股慣例 inverse(漲紅跌綠)
     cols[0].metric(
         "收盤", f"{close:.2f}",
         f"{delta:+.2f}" if delta is not None else None,
+        delta_color="inverse",
     )
     cols[1].metric("K(9)", _fmt(kd_df["K"].iloc[-1]))
     cols[2].metric("D(9)", _fmt(kd_df["D"].iloc[-1]))
@@ -1719,15 +1722,18 @@ def _render_summary(
         stop_loss = close - STOP_LOSS_MULT * atr14
         st.markdown("### 🎯 目標價參考(ATR 統計,**非預測**)")
         cols = st.columns(4)
+        # 台股慣例:目標價往上(正)應顯紅、停損往下(負)應顯綠 — 都用 inverse
         cols[0].metric(
             "🎯 保守目標",
             f"{target_low:.2f}",
             f"+{(target_low - close) / close * 100:.1f}%",
+            delta_color="inverse",
         )
         cols[1].metric(
             "🚀 積極目標",
             f"{target_high:.2f}",
             f"+{(target_high - close) / close * 100:.1f}%",
+            delta_color="inverse",
         )
         cols[2].metric(
             "🛑 建議停損",
@@ -2785,11 +2791,12 @@ def _page_backtest() -> None:
                         f"賣 {float(t.get('sell_price', 0)):.2f}"
                     )
                 with col2:
-                    arrow = "▲" if ret >= 0 else "▼"
+                    # 台股慣例:正報酬紅 / 負報酬綠 — 一律 inverse
+                    from src.ui_format import arrow_for
                     st.metric(
                         "報酬", f"{ret:+.2f}%",
-                        delta=f"{arrow}",
-                        delta_color="normal" if ret >= 0 else "inverse",
+                        delta=arrow_for(ret),
+                        delta_color="inverse",
                     )
     else:
         st.dataframe(
@@ -3190,10 +3197,12 @@ def _page_market_sentiment() -> None:
         )
         delta = last_close - prev_close
         delta_pct = delta / prev_close * 100 if prev_close else 0
+        # 台股慣例 — 漲紅跌綠
         st.metric(
             f"當日收盤 {taiex_df['date'].iloc[-1]}",
             f"{last_close:,.2f}",
             f"{delta:+.2f} ({delta_pct:+.2f}%)",
+            delta_color="inverse",
         )
         # 算 MA + BB(reuse src.indicators)
         try:

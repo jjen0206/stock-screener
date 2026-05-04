@@ -1936,6 +1936,71 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
     )
 
 
+def test_pick_card_change_pct_uses_tw_convention_arrows(isolated_db):
+    """show_change=True 時 delta 字串含台股慣例箭頭(↑/↓)。
+
+    AppTest 無法 inspect delta_color CSS,但可以從 delta 字串看箭頭,arrow
+    是 ui_format.arrow_for 出來的,跟 delta_color='inverse' 在同一個 commit
+    成對改動 — 箭頭出現等於 ui_format 邏輯有用上,delta_color 在 source
+    code 裡(grep 可驗證)。
+    """
+    def _harness():
+        from src.ui_cards import render_pick_card
+        # 兩張卡 — 漲(+1.5%)和跌(-2.0%)
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 600.0, "change_pct": 1.5},
+            show_change=True, button_key_prefix="up",
+        )
+        render_pick_card(
+            {"stock_id": "2317", "name": "鴻海", "close": 200.0, "change_pct": -2.0},
+            show_change=True, button_key_prefix="down",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    metrics = [m for m in at.metric if m.label == "收盤"]
+    assert len(metrics) >= 2, f"預期 ≥2 個收盤 metric, 實際 {len(metrics)}"
+
+    deltas = "\n".join(m.delta or "" for m in metrics)
+    assert "↑" in deltas, f"漲應有 ↑(台股慣例 + ui_format.arrow_for), 實際: {deltas}"
+    assert "↓" in deltas, f"跌應有 ↓, 實際: {deltas}"
+    # 不該再用舊 ▲/▼(台股慣例改用 ↑/↓)
+    assert "▲" not in deltas, "舊三角形箭頭應已換成 ↑"
+    assert "▼" not in deltas, "舊三角形箭頭應已換成 ↓"
+
+
+def test_pick_card_pnl_row_uses_tw_color_when_position_exists(isolated_db):
+    """有持倉的卡片,P&L 行的顏色走 ui_format(漲紅跌綠)— assert HTML 含
+    正確 hex 色 + 箭頭。"""
+    from src import database as db
+
+    # 買 1 張 @ 100;close=120 → 浮動 +20(漲)
+    db.add_trade("2330", "buy", 100.0, 1, "2026-04-01")
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 120.0},
+            show_add_button=False,
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 紅色(漲)+ ↑ 箭頭
+    assert "#d62728" in md_text, f"P&L 漲應紅色, 實際 markdown: {md_text[:300]}"
+    assert "↑" in md_text, f"P&L 漲應 ↑ 箭頭, 實際: {md_text[:300]}"
+    # 不該含負號(用 ↑ 箭頭表示方向,絕對值顯示)
+    # 「 - 」不能出現(正號 + 號允許)
+    assert "損益 ↑ +20" in md_text or "損益 ↑ +20" in md_text, (
+        f"預期『損益 ↑ +20』, 實際: {md_text[:500]}"
+    )
+
+
 def test_pick_card_shows_pnl_row_when_position_exists(isolated_db):
     """該股 trades 表有持倉 → 卡片渲染 P&L 行(持有/均價/損益)。"""
     from src import database as db
