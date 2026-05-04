@@ -1086,6 +1086,19 @@ STRATEGY_LABELS: dict[str, str] = {
 }
 
 
+# === Per-strategy ML 過濾門檻(Stage 2A 校準後落地) ===
+# 來源:scripts/audit/calibrate_ml_thresholds.py 60-day grid search 結果。
+# 只有 ma_alignment 真正受益於通用 ML 模型過濾(60d baseline 55.6% → 0.60
+# 門檻 68.5%,+12.9 pp;30d baseline 75% → 0.60 門檻 86.7%,+11.7 pp)。
+# 其餘策略加 ML filter 反而傷害 alpha 或沒幫助 — 不在 dict 內預設 None。
+#
+# Stage 2B(per-strategy 重訓 ML)之後此 dict 會大幅擴充,目前先保守落地一個。
+STRATEGY_ML_THRESHOLDS: dict[str, float] = {
+    "ma_alignment": 0.60,
+    # 其他 10 個策略不在此 dict 中(用 .get(strategy) 拿 None 表示不過濾)
+}
+
+
 def run_all_strategies(
     date: str,
     enabled: list[str] | None = None,
@@ -1188,6 +1201,7 @@ __all__ = [
     "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
+    "STRATEGY_ML_THRESHOLDS",
     "DEFAULT_MA_PARAMS",
     "DEFAULT_MACD_PARAMS",
     "DEFAULT_SQUEEZE_PARAMS",

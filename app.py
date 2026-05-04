@@ -452,57 +452,110 @@ def _get_ml_model_for_enrich():
 
 
 def _render_high_confidence_sidebar() -> None:
-    """sidebar 「🎯 高信心模式」toggle + ML 機率門檻 slider。
+    """sidebar 「🎯 高信心模式」toggle — Stage 2A per-strategy 模式。
 
-    跨頁面 session_state 共用 — dashboard / 短線 / watchlist 都讀同一個 key,
-    切頁不會 reset。預設**開**(value=True)— 用戶體感重點是「ML 過濾後勝率
-    拉升」,需要從一開始就生效。
+    每個策略各自校準 ML 門檻(來自 60-day backtest grid search),不再用全
+    域 slider。當前生效:**ma_alignment ≥ 0.60**(其餘策略不過濾,實測加
+    過濾反而傷 alpha 或沒幫助)。
+
+    跨頁面 session_state 共用,預設開。
     """
     st.sidebar.markdown("---")
     st.sidebar.markdown("**🎯 信心過濾**")
-    high_conf = st.sidebar.toggle(
-        "高信心模式",
+    st.sidebar.toggle(
+        "高信心模式 (per-strategy)",
         value=True,
-        help="只顯示 ML 預測機率 ≥ 門檻的 picks。關閉看全部。",
+        help="每策略各自校準 ML 門檻過濾;關閉看全部 picks。",
         key="high_confidence_mode",
     )
-    st.sidebar.slider(
-        "ML 機率門檻",
-        min_value=0.50,
-        max_value=0.80,
-        value=0.60,
-        step=0.05,
-        disabled=not high_conf,
-        help="≥ 此機率的 picks 才顯示。0.60 約過濾掉一半,0.70+ 更嚴格但 picks 少。",
-        key="ml_threshold",
+    st.sidebar.caption(
+        "📊 per-strategy 模式自動套用:\n"
+        "・**多頭排列** ≥ 0.60(基於 60-day backtest +12.9 pp WR)\n"
+        "・其他 10 套策略不過濾(實測 ML filter 沒幫助)"
     )
+
+
+def _matched_strategies_for_sid(agg: dict[str, dict], sid: str) -> list[str]:
+    """從 agg dict 拿某 sid 命中的全部 strategy_keys(英文 key,非中文 label)。
+
+    agg[sid]["details"] 是 {strategy_key: row_dict};.keys() 即 list of keys。
+    sid 不在 agg 內 / details 為空 → 回 []。
+    """
+    if not agg or sid not in agg:
+        return []
+    details = agg[sid].get("details") or {}
+    return list(details.keys())
+
+
+def _enrich_df_with_matched_strategies(
+    df: "pd.DataFrame", agg: dict[str, dict],
+) -> "pd.DataFrame":
+    """把 agg 的 details 鍵(strategy_keys)展開成 df 的 'matched_strategies'
+    list 欄。給 _apply_confidence_filter 的 per-strategy 模式查 threshold 用。
+    """
+    if df is None or df.empty:
+        return df
+    enriched = df.copy()
+    enriched["matched_strategies"] = enriched["stock_id"].map(
+        lambda sid: _matched_strategies_for_sid(agg, sid)
+    )
+    return enriched
+
+
+def _per_strategy_threshold_for_pick(matched: list[str]) -> float | None:
+    """從 STRATEGY_ML_THRESHOLDS 找該 pick 適用的最嚴格(最高)門檻。
+
+    一張 pick 同時命中多個策略時,取**最高的** threshold(最嚴格)— 避免
+    pick 因為命中其他寬鬆策略就被放過。命中策略全部不在 dict → 回 None
+    (該 pick 不過濾)。
+    """
+    from src.strategies import STRATEGY_ML_THRESHOLDS
+    if not matched:
+        return None
+    thresholds = [
+        STRATEGY_ML_THRESHOLDS[s]
+        for s in matched
+        if STRATEGY_ML_THRESHOLDS.get(s) is not None
+    ]
+    if not thresholds:
+        return None
+    return max(thresholds)
 
 
 def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
-    """套用「高信心模式」過濾到 row list — 用 session_state 讀 toggle / threshold。
+    """套用「高信心模式」過濾到 row list — Stage 2A 改 per-strategy 模式。
 
     Args:
-        rows: list of pick dicts(必有 ml_prob 鍵,可為 None / float)
+        rows: list of pick dicts(必有 ml_prob;若 toggle on 則需 matched_strategies)
 
     Returns:
         (filtered_rows, total_before): tuple
         - filtered_rows:過濾後 list(toggle off 時 = rows 原樣)
-        - total_before:原 rows 長度(供 caller 顯「N/M 檔」caption)
+        - total_before:原 rows 長度(caller 顯「N/M 檔」caption)
 
-    過濾規則:
+    過濾規則(per-strategy mode):
     - toggle off → 全保留
     - toggle on:
-      * ml_prob 為 None / NaN → **過濾掉**(沒資料不算高信心)
-      * ml_prob >= threshold → 保留
+      * 該 pick 命中策略對應的 STRATEGY_ML_THRESHOLDS 取最嚴格 threshold
+      * 該策略不在 dict(threshold None)→ 該 pick 不過濾(直接保留)
+      * threshold 存在但 ml_prob 為 None / NaN → 過濾掉(沒 ML 資料不算高信心)
+      * threshold 存在 + ml_prob >= threshold → 保留
+      * threshold 存在 + ml_prob < threshold → 過濾掉
     """
     total = len(rows)
     if not rows:
         return [], 0
     if not st.session_state.get("high_confidence_mode", True):
         return rows, total
-    threshold = float(st.session_state.get("ml_threshold", 0.60))
+
     filtered: list[dict] = []
     for r in rows:
+        matched = r.get("matched_strategies") or []
+        thr = _per_strategy_threshold_for_pick(matched)
+        if thr is None:
+            # 該 pick 命中策略全 None(無 threshold)→ 不過濾
+            filtered.append(r)
+            continue
         prob = r.get("ml_prob")
         if prob is None:
             continue
@@ -512,7 +565,7 @@ def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
                 continue
         except (TypeError, ValueError):
             continue
-        if p >= threshold:
+        if p >= thr:
             filtered.append(r)
     return filtered, total
 
@@ -784,11 +837,14 @@ def _page_dashboard() -> None:
                         None,
                     )
                     # 先 enrich 全部(不限 head 3),才能對 ML 過濾後再取 Top 3
-                    df_full = _enrich_df_with_ml_prob(
-                        _enrich_df_with_win_rate(
-                            aggregated_to_dataframe(agg), agg,
+                    df_full = _enrich_df_with_matched_strategies(
+                        _enrich_df_with_ml_prob(
+                            _enrich_df_with_win_rate(
+                                aggregated_to_dataframe(agg), agg,
+                            ),
+                            trade_date=today_iso,
                         ),
-                        trade_date=today_iso,
+                        agg,
                     )
                     rows_full = df_full.to_dict("records")
                     rows_filtered, total = _apply_confidence_filter(rows_full)
@@ -1402,9 +1458,12 @@ def _page_short() -> None:
     )
 
     _tic("short_aggregated_to_df")
-    df = _enrich_df_with_ml_prob(
-        _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
-        trade_date=today_iso,
+    df = _enrich_df_with_matched_strategies(
+        _enrich_df_with_ml_prob(
+            _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
+            trade_date=today_iso,
+        ),
+        agg,
     )
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
@@ -1497,11 +1556,14 @@ def _page_short() -> None:
             if not sub_agg:
                 st.info(f"📭 此分類本日無入選。")
                 continue
-            sub_df = _enrich_df_with_ml_prob(
-                _enrich_df_with_win_rate(
-                    aggregated_to_dataframe(sub_agg), sub_agg,
+            sub_df = _enrich_df_with_matched_strategies(
+                _enrich_df_with_ml_prob(
+                    _enrich_df_with_win_rate(
+                        aggregated_to_dataframe(sub_agg), sub_agg,
+                    ),
+                    trade_date=today_iso,
                 ),
-                trade_date=today_iso,
+                sub_agg,
             )
             sub_rows = sub_df.to_dict("records")
             filtered_sub, total_sub = _apply_confidence_filter(sub_rows)

@@ -2201,79 +2201,190 @@ def test_enrich_df_with_ml_prob_no_model_fills_none(isolated_db, monkeypatch):
     assert enriched["ml_prob"].isna().all()
 
 
-def test_apply_confidence_filter_removes_below_threshold(isolated_db):
-    """toggle on + threshold=0.60 → 過濾掉 ml_prob < 0.60 + None 的 picks。"""
-    import streamlit as st
-    import app as _app
-
-    st.session_state["high_confidence_mode"] = True
-    st.session_state["ml_threshold"] = 0.60
-
-    rows = [
-        {"stock_id": "2330", "ml_prob": 0.72},
-        {"stock_id": "2317", "ml_prob": 0.45},
-        {"stock_id": "1101", "ml_prob": 0.60},  # 邊界值,>= 60 → 留
-        {"stock_id": "9999", "ml_prob": None},  # 沒資料 → 過濾
-    ]
-    filtered, total = _app._apply_confidence_filter(rows)
-    assert total == 4
-    sids = [r["stock_id"] for r in filtered]
-    assert "2330" in sids and "1101" in sids
-    assert "2317" not in sids
-    assert "9999" not in sids
-
-
 def test_apply_confidence_filter_off_shows_all(isolated_db):
-    """toggle off → 全保留(包括 None 的)。"""
+    """toggle off → 全保留(包括 None 的)。Stage 2A per-strategy 模式
+    跟 Stage 1 全域模式都該 toggle-off 走同條 path。"""
     import streamlit as st
     import app as _app
 
-    # isolated_db fixture 預設 False(全多數 e2e),這 test 顯示確認此 path
     st.session_state["high_confidence_mode"] = False
 
     rows = [
-        {"stock_id": "2330", "ml_prob": 0.72},
-        {"stock_id": "2317", "ml_prob": 0.45},
-        {"stock_id": "9999", "ml_prob": None},
+        {"stock_id": "2330", "ml_prob": 0.72,
+         "matched_strategies": ["ma_alignment"]},
+        {"stock_id": "2317", "ml_prob": 0.45,
+         "matched_strategies": ["macd_golden"]},
+        {"stock_id": "9999", "ml_prob": None,
+         "matched_strategies": []},
     ]
     filtered, total = _app._apply_confidence_filter(rows)
     assert total == 3
     assert len(filtered) == 3
 
 
-def test_apply_confidence_filter_excludes_none_ml_prob(isolated_db):
-    """toggle on 時,ml_prob=None 一律過濾(不算高信心)。"""
-    import streamlit as st
-    import app as _app
-
-    st.session_state["high_confidence_mode"] = True
-    st.session_state["ml_threshold"] = 0.50
-
-    rows = [{"stock_id": "X", "ml_prob": None}]
-    filtered, _ = _app._apply_confidence_filter(rows)
-    assert filtered == []
-
-
-def test_apply_confidence_filter_excludes_nan_ml_prob(isolated_db):
-    """ml_prob=NaN(來自 pd.read_csv 等)一樣過濾。"""
-    import math
-    import streamlit as st
-    import app as _app
-
-    st.session_state["high_confidence_mode"] = True
-    st.session_state["ml_threshold"] = 0.50
-
-    rows = [{"stock_id": "X", "ml_prob": float("nan")}]
-    filtered, _ = _app._apply_confidence_filter(rows)
-    assert filtered == []
-
-
 def test_apply_confidence_filter_empty_input(isolated_db):
-    """空 list → 空 list + total=0,不炸。"""
+    """空 list → 空 list + total=0,不炸(per-strategy 模式同樣保證)。"""
     import app as _app
 
     filtered, total = _app._apply_confidence_filter([])
     assert filtered == [] and total == 0
+
+
+# === Stage 2A: per-strategy ML filter ===
+
+def test_apply_per_strategy_ml_filter_ma_alignment_threshold(isolated_db):
+    """ma_alignment 在 STRATEGY_ML_THRESHOLDS 中設 0.60。
+    pick 命中 ma_alignment + ml_prob 0.55 → 過濾;ml_prob 0.65 → 保留。
+    """
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+
+    # 模擬 row dict + matched_strategies
+    rows = [
+        {
+            "stock_id": "2330", "ml_prob": 0.55,
+            "matched_strategies": ["ma_alignment"],
+        },
+        {
+            "stock_id": "2317", "ml_prob": 0.65,
+            "matched_strategies": ["ma_alignment"],
+        },
+        {
+            "stock_id": "9999", "ml_prob": None,
+            "matched_strategies": ["ma_alignment"],
+        },
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 3
+    sids = [r["stock_id"] for r in filtered]
+    assert "2317" in sids       # 0.65 ≥ 0.60 → 留
+    assert "2330" not in sids   # 0.55 < 0.60 → 過濾
+    assert "9999" not in sids   # ml_prob None + threshold 存在 → 過濾
+
+
+def test_apply_per_strategy_ml_filter_no_threshold_strategies_unchanged(
+    isolated_db,
+):
+    """命中策略全部不在 STRATEGY_ML_THRESHOLDS 內 → 不過濾(包括 ml_prob=None)。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+
+    rows = [
+        {  # macd_golden 不在 dict → 不過濾,即使 ml_prob 低
+            "stock_id": "2330", "ml_prob": 0.30,
+            "matched_strategies": ["macd_golden"],
+        },
+        {  # gap_up 不在 dict
+            "stock_id": "2317", "ml_prob": None,
+            "matched_strategies": ["gap_up"],
+        },
+        {  # 多策略全不在 dict
+            "stock_id": "1101", "ml_prob": 0.20,
+            "matched_strategies": ["bb_lower_rebound", "rsi_recovery"],
+        },
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 3 and len(filtered) == 3, (
+        f"無 threshold 策略應全留, 實際: {filtered}"
+    )
+
+
+def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
+    """pick 同時命中 ma_alignment(0.60)+ macd_golden(無 threshold)→
+    取最嚴格 0.60 套用。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+
+    rows = [
+        {  # 兩個策略中 ma_alignment 設 0.60 → 0.65 > 0.60,留
+            "stock_id": "2330", "ml_prob": 0.65,
+            "matched_strategies": ["ma_alignment", "macd_golden"],
+        },
+        {  # 0.55 < 0.60,過濾(雖然 macd_golden 沒 threshold)
+            "stock_id": "2317", "ml_prob": 0.55,
+            "matched_strategies": ["ma_alignment", "macd_golden"],
+        },
+    ]
+    filtered, _ = _app._apply_confidence_filter(rows)
+    sids = [r["stock_id"] for r in filtered]
+    assert sids == ["2330"]
+
+
+def test_apply_per_strategy_filter_off_shows_all(isolated_db):
+    """toggle off → 全保留(per-strategy 模式不生效)。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = False
+
+    rows = [
+        {"stock_id": "X", "ml_prob": 0.20, "matched_strategies": ["ma_alignment"]},
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 1 and len(filtered) == 1
+
+
+def test_per_strategy_threshold_for_pick_helper(isolated_db):
+    """_per_strategy_threshold_for_pick 取最嚴格門檻。"""
+    import app as _app
+
+    # ma_alignment 0.60 + macd_golden None → 0.60
+    assert _app._per_strategy_threshold_for_pick(
+        ["ma_alignment", "macd_golden"]
+    ) == 0.60
+    # 全 None → None
+    assert _app._per_strategy_threshold_for_pick(
+        ["macd_golden", "gap_up"]
+    ) is None
+    # 空 → None
+    assert _app._per_strategy_threshold_for_pick([]) is None
+
+
+def test_strategy_ml_thresholds_contains_ma_alignment():
+    """STRATEGY_ML_THRESHOLDS dict 必含 ma_alignment 0.60(Stage 2A 主要落地)。"""
+    from src.strategies import STRATEGY_ML_THRESHOLDS
+    assert STRATEGY_ML_THRESHOLDS.get("ma_alignment") == 0.60
+    # 其他策略 audit 結果都 None — 不該在 dict 內(get 回 None)
+    for s in ("bias_convergence", "macd_golden", "bb_lower_rebound",
+              "rsi_recovery", "volume_breakout", "gap_up"):
+        assert STRATEGY_ML_THRESHOLDS.get(s) is None, (
+            f"{s} 不該有 threshold(audit 顯示過濾無效)"
+        )
+
+
+def test_enrich_df_with_matched_strategies_adds_list_column(isolated_db):
+    """_enrich_df_with_matched_strategies 從 agg.details.keys 展開成 list 欄。"""
+    import app as _app
+    import pandas as pd
+
+    agg = {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {"volume_kd": {}, "ma_alignment": {}},
+        },
+        "2317": {
+            "name": "鴻海",
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {}},
+        },
+    }
+    df = pd.DataFrame([
+        {"stock_id": "2330"},
+        {"stock_id": "2317"},
+    ])
+    enriched = _app._enrich_df_with_matched_strategies(df, agg)
+    assert "matched_strategies" in enriched.columns
+    val_2330 = enriched[enriched["stock_id"] == "2330"]["matched_strategies"].iloc[0]
+    assert sorted(val_2330) == ["ma_alignment", "volume_kd"]
+    val_2317 = enriched[enriched["stock_id"] == "2317"]["matched_strategies"].iloc[0]
+    assert val_2317 == ["volume_kd"]
 
 
 def test_pick_card_displays_ml_prob_when_present(isolated_db):

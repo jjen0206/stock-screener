@@ -238,6 +238,7 @@ def backtest_all_strategies(
     params: dict | None = None,
     strategies: Iterable[str] | None = None,
     ml_filter: float | None = None,
+    per_strategy_ml: bool = False,
 ) -> list[dict]:
     """跑全部(或指定子集)strategies — 回 list[dict] 餵 db.dump_strategy_backtest。
 
@@ -246,14 +247,19 @@ def backtest_all_strategies(
         ml_filter: 若 != None,只 count 那些 ML prob >= 該值的 picks 進 fires
             (給 with-ML 對比 baseline 驗證用)。Model 在 caller 之前載入並傳
             給每 strategy(避免每 strategy 重 load 一次)。
+        per_strategy_ml: True → 用 STRATEGY_ML_THRESHOLDS 的 per-strategy 門
+            檻過濾(Stage 2A),strategy 不在 dict → 不過濾。跟 ml_filter 互斥。
     """
+    if ml_filter is not None and per_strategy_ml:
+        raise ValueError("ml_filter 跟 per_strategy_ml 互斥")
+
     keys = list(strategies) if strategies else list(ALL_STRATEGIES.keys())
     computed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     results: list[dict] = []
 
-    # 如果要 ML filter,先 load model 一次(後面每 strategy 共用)
+    # 任一 ML 模式都需要 load model 一次(後面每 strategy 共用)
     ml_model = None
-    if ml_filter is not None:
+    if ml_filter is not None or per_strategy_ml:
         try:
             from src import config as _config
             from src.ml_predictor import load_model
@@ -264,13 +270,24 @@ def backtest_all_strategies(
         except Exception as e:  # noqa: BLE001
             logger.warning("[BACKTEST] ML model load 失敗: %s", e)
 
+    # per_strategy 模式:每 strategy 查 STRATEGY_ML_THRESHOLDS dict
+    per_strategy_thresholds: dict[str, float] = {}
+    if per_strategy_ml:
+        from src.strategies import STRATEGY_ML_THRESHOLDS
+        per_strategy_thresholds = STRATEGY_ML_THRESHOLDS
+
     for name in keys:
+        # 決定該 strategy 用哪個 threshold
+        if per_strategy_ml:
+            this_filter = per_strategy_thresholds.get(name)  # None 表示不過濾
+        else:
+            this_filter = ml_filter
         stats = backtest_strategy(
             name, universe, period_end,
             lookback_days=lookback_days,
             target_pct=target_pct, stop_pct=stop_pct,
             hold_days=hold_days, params=params,
-            ml_filter=ml_filter, ml_model=ml_model,
+            ml_filter=this_filter, ml_model=ml_model,
         )
         results.append({
             "strategy": name,

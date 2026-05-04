@@ -135,7 +135,18 @@ def main() -> int:
         help="只回測 ML prob >= 此值的 picks(0.50-0.80;留空 = 不過濾,跟 "
              "Stage 1 之前一致)。給 with-ML vs without-ML 對比驗證用。",
     )
+    p.add_argument(
+        "--per-strategy-ml", action="store_true",
+        help="使用 STRATEGY_ML_THRESHOLDS 的 per-strategy 門檻過濾(Stage 2A)。"
+             "跟 --ml-filter 互斥。",
+    )
     args = p.parse_args()
+    if args.ml_filter is not None and args.per_strategy_ml:
+        print(
+            "[BACKTEST] --ml-filter 跟 --per-strategy-ml 互斥,只能擇一",
+            flush=True,
+        )
+        return 1
 
     db.init_db()
     # Fresh container preload(workflow runner 走這條)
@@ -176,9 +187,12 @@ def main() -> int:
     else:
         strategies = list(ALL_STRATEGIES.keys())
 
-    ml_note = (
-        f"  ML filter ≥ {args.ml_filter:.2f}" if args.ml_filter is not None else ""
-    )
+    if args.per_strategy_ml:
+        ml_note = "  per-strategy ML thresholds (Stage 2A)"
+    elif args.ml_filter is not None:
+        ml_note = f"  ML filter ≥ {args.ml_filter:.2f}"
+    else:
+        ml_note = ""
     print(
         f"[BACKTEST] 跑 {len(strategies)} strategies × {len(universe)} sids "
         f"× {args.lookback} 日 lookback × hold {args.hold} 天 "
@@ -196,24 +210,26 @@ def main() -> int:
         hold_days=args.hold,
         strategies=strategies,
         ml_filter=args.ml_filter,
+        per_strategy_ml=args.per_strategy_ml,
     )
 
-    # ML filter 模式不寫進 strategy_backtest 表(避免覆蓋 nightly 的 baseline)
-    if args.ml_filter is None:
+    # ML filter / per-strategy 模式不寫進 strategy_backtest 表(避免覆蓋 baseline)
+    is_ad_hoc = args.ml_filter is not None or args.per_strategy_ml
+    if not is_ad_hoc:
         n_inserted = db.dump_strategy_backtest(rows)
         print(f"[BACKTEST] 寫入 strategy_backtest {n_inserted} 筆", flush=True)
     else:
         n_inserted = len(rows)
         print(
-            f"[BACKTEST] --ml-filter mode: 不寫 strategy_backtest 表"
-            f"(只印 summary 給 ad-hoc 對比)",
+            f"[BACKTEST] ad-hoc mode (ML filter): 不寫 strategy_backtest 表"
+            f"(只印 summary 給對比)",
             flush=True,
         )
 
     _print_summary_table(rows)
 
-    # --ml-filter 模式不 dump CSV(也不寫表),純 ad-hoc 對比
-    if args.ml_filter is None and not args.no_csv and n_inserted > 0:
+    # ad-hoc 模式不 dump CSV(也不寫表),純對比
+    if not is_ad_hoc and not args.no_csv and n_inserted > 0:
         dump_strategy_backtest_csv()
 
     return 0 if n_inserted > 0 else 1
