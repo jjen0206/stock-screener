@@ -1118,6 +1118,45 @@ STRATEGY_ML_THRESHOLDS: dict[str, float] = {
 }
 
 
+# === Per-strategy R:R 參數(Plan G Part 1 期望值優化校準) ===
+# 來源:scripts/optimize_strategy_rr.py 60-day grid search 結果。
+# Format:(target_pct, stop_pct, hold_days)。對 ML threshold 過濾後的 picks
+# 跑 64 combos sweep,取 fires ≥ 10 中 EV(avg_return)最高者當 winner。
+#
+# Winner 結果(60-day, fires ≥ 10):
+#   ma_alignment       (0.15, 0.03, 10) → EV +4.28% / WR 71.4% / 21 fires
+#   bias_convergence   (0.15, 0.04,  5) → EV +5.90% / WR 92.7% / 41 fires
+#   macd_golden        (0.10, 0.02, 10) → EV +6.62% / WR 75.0% / 16 fires
+#   inst_consensus     (0.10, 0.03, 10) → EV +1.89% / WR 62.1% / 29 fires
+#   bb_lower_rebound   (0.15, 0.04,  3) → EV +6.26% / WR 87.5% / 16 fires
+#   rsi_recovery       (0.15, 0.03, 10) → EV -0.00% / WR 24.7% / 154 fires ⚠ EV ~0
+#   inst_silent_accum  (0.15, 0.05, 10) → EV +1.22% / WR 65.2% / 46 fires
+#   volume_breakout    (0.15, 0.04,  3) → EV +8.42% / WR 100.0% / 13 fires
+#   gap_up             (0.15, 0.03,  5) → EV +6.80% / WR 65.5% / 29 fires
+#
+# 沒過 min_fires 的策略走 DEFAULT_RR_PARAMS(picks 太少不調):
+#   volume_kd(2 picks),ma_squeeze_breakout(1 pick)
+#
+# rsi_recovery EV ≈ 0 caveat — 雖然技術上「winner」(fires ≥ 10 中最高 EV),但
+# 該 EV 0.00% 表示就算照此 R:R 跑也賺不到錢。Plan G Part 4 對比驗證會
+# 顯示出來,如要拿掉就改回 DEFAULT_RR_PARAMS 即可。
+STRATEGY_RR_PARAMS: dict[str, tuple[float, float, int]] = {
+    "ma_alignment": (0.15, 0.03, 10),
+    "bias_convergence": (0.15, 0.04, 5),
+    "macd_golden": (0.10, 0.02, 10),
+    "inst_consensus": (0.10, 0.03, 10),
+    "bb_lower_rebound": (0.15, 0.04, 3),
+    "rsi_recovery": (0.15, 0.03, 10),
+    "inst_silent_accum": (0.15, 0.05, 10),
+    "volume_breakout": (0.15, 0.04, 3),
+    "gap_up": (0.15, 0.03, 5),
+}
+
+# Default 給沒在 STRATEGY_RR_PARAMS 內的策略用(volume_kd / ma_squeeze_breakout
+# 60-day picks 太少,沒法可信地校準)。
+DEFAULT_RR_PARAMS: tuple[float, float, int] = (0.05, 0.03, 5)
+
+
 def run_all_strategies(
     date: str,
     enabled: list[str] | None = None,
@@ -1221,6 +1260,8 @@ __all__ = [
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
     "STRATEGY_ML_THRESHOLDS",
+    "STRATEGY_RR_PARAMS",
+    "DEFAULT_RR_PARAMS",
     "DEFAULT_MA_PARAMS",
     "DEFAULT_MACD_PARAMS",
     "DEFAULT_SQUEEZE_PARAMS",
