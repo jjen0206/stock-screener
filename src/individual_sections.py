@@ -715,66 +715,72 @@ def format_pick_summary(sid: str, indent: str = "   ") -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _get_company_profile_cached(sid: str) -> dict:
-    """call `company_profile.get_company_profile`,memory cache 1 小時。
+def _get_company_profile_cache_only(sid: str) -> dict:
+    """call `company_profile.get_company_profile(llm_call=False)` — **絕不打 LLM**。
 
-    SQLite 已有自己的 cache(get_company_profile 本身就是 cache-first),
-    這層 `@st.cache_data` 是**記憶體 cache** 上方再加一層 — 同 streamlit
-    session 內 1 小時內同 sid 不會重打 SQLite + 不會重序列化 dict。
+    純 SQLite cache lookup。@st.cache_data 額外 1 小時記憶體 cache 避免同
+    session 內重複 SQL 查詢(138 picks 同 sid 重複展開時)。
 
-    純讀 SQLite hit(已有 LLM 結果)時這層 cache 益處小;
-    cache miss 觸發 LLM 時 — 用戶若連點兩次 expand,memory cache 擋下第二次。
-
-    regenerate 流程不走這條(直接呼叫 module-level 函式)。
+    LLM-觸發 path(load button / regenerate)走另一條:直接呼叫 module
+    function,跑完清掉這層 cache 讓下次 cache lookup 看到新值。
     """
     from src import company_profile as cp
-    return cp.get_company_profile(sid, regenerate=False)
+    return cp.get_company_profile(sid, llm_call=False, regenerate=False)
+
+
+def _set_session_flag(key: str) -> None:
+    """on_click callback — 設 session_state flag(避免 lambda + late-binding 坑)。"""
+    st.session_state[key] = True
 
 
 def _render_company_info_compact(sid: str, key_prefix: str = "card") -> None:
-    """卡片 expander 內的公司資訊 — 跟個股頁同行為(展開即自動生成 LLM)。
+    """卡片 expander 內的公司資訊 — **手動觸發 LLM** 防燒 quota。
 
-    流程:
-    - 讀 SQLite cache:有完整 LLM 資料 → 直接顯
-    - cache miss(沒 description)→ **自動 call get_company_profile** 觸發 LLM
-      (內部 SQLite cache-first;首次打 Gemini ~2 秒,之後秒級)
-    - 「🔄 重新生成」按鈕:強制 regenerate=True 重打 LLM
+    新行為(改自「展開即自動生成」):
+    - **永遠 cache-only 起手**:讀 SQLite,有 narrative → 直接顯;沒 → 顯
+      「🤖 載入 AI 解讀」按鈕,user 主動點才打 LLM
+    - 138 張 picks 全展開不會自動觸發任何 LLM call(原本是燒 quota 元凶)
+    - SDK / API key 缺失 → caption 友善提示,不顯按鈕
+    - 已有 cache narrative → 顯 + 「🔄 重新生成」按鈕(會用 1 次 quota)
 
-    Quota 防呆:
-    - SQLite 內 cache 永久(每股一次 LLM call;之後重啟也還在)
-    - `@st.cache_data(ttl=3600)` 同 streamlit session 1 小時內不重打
-    - expander 預設 collapsed → 用戶只展開的 pick 才 trigger
-    - LLM 失敗 → 顯 facts + 「LLM 暫時失敗」caption,不影響其他 sections
+    Quota 防呆(雙層):
+    - 純 cache lookup 不走 LLM,138 picks expand 都 0 LLM call
+    - 點 load / regenerate 才呼叫 LLM,session_state flag 控制(one-shot,
+      pop 後失效)
+    - 失敗(429 / 其他)走既有 graceful path,不 dump raw error
 
     Args:
         sid: 股號
         key_prefix: button / session_state key 前綴。同一個 sid 可能在多個
-            頁面 / 多個 tab(全部 / 趨勢 / 反轉 ...)同時 render → 同一頁有
-            兩張卡片 = 兩個按鈕 — streamlit 會撞 key。caller 給不同 prefix
-            (e.g. button_key_prefix="short_趨勢")就解掉。
-
-    跟個股頁的差別:
-    - 同樣會自動跑 LLM、同樣有重新生成按鈕
-    - UI 較精簡(用 markdown 一行一段而非 metric grid)
+            頁面 / tab 同時 render → 同一頁兩個按鈕 — streamlit 會撞 key。
+            caller 給不同 prefix(e.g. "short_趨勢")就解掉。
     """
     from src import company_profile as cp
 
     st.markdown("### 🏢 公司資訊")
 
+    # session_state flags(都是 one-shot,render 時 pop 消費)
+    load_key = f"{key_prefix}_llm_load_{sid}"
     regen_key = f"{key_prefix}_company_regen_{sid}"
-    regenerate = st.session_state.pop(regen_key, False)
+    should_load = st.session_state.pop(load_key, False)
+    should_regen = st.session_state.pop(regen_key, False)
 
-    spinner_msg = (
-        "重新生成公司資訊..." if regenerate else "載入公司資訊..."
-    )
     try:
-        with st.spinner(spinner_msg):
-            if regenerate:
-                # bypass memory cache + 強制重打 LLM
-                _get_company_profile_cached.clear()
-                profile = cp.get_company_profile(sid, regenerate=True)
-            else:
-                profile = _get_company_profile_cached(sid)
+        if should_regen:
+            with st.spinner("重新生成公司資訊..."):
+                _get_company_profile_cache_only.clear()
+                profile = cp.get_company_profile(
+                    sid, llm_call=True, regenerate=True,
+                )
+        elif should_load:
+            with st.spinner("AI 分析中..."):
+                _get_company_profile_cache_only.clear()
+                profile = cp.get_company_profile(
+                    sid, llm_call=True, regenerate=False,
+                )
+        else:
+            # cache-only — 0 LLM call
+            profile = _get_company_profile_cache_only(sid)
     except Exception as e:  # noqa: BLE001
         st.warning(f"⚠️ 無法載入公司資訊:{e}")
         return
@@ -787,59 +793,67 @@ def _render_company_info_compact(sid: str, key_prefix: str = "card") -> None:
     desc = profile.get("description")
     uniq = profile.get("uniqueness")
     moat = profile.get("moat")
-    status = profile.get("narrative_status", "empty")
+    status = profile.get("narrative_status", "not_loaded")
     llm_error = profile.get("llm_error")
+    has_narrative = bool(desc or uniq or moat)
 
-    # narrative_status 分流(取代舊版直接 dump llm_error 字串):
-    # - "ok":顯示 narrative(cache 或新生成)
-    # - "quota_exceeded":友善提示「今日額度用完」+ facts only
-    # - "not_configured":提示 GEMINI_API_KEY
-    # - "failed":generic「暫時無法呼叫」
-    # - "empty":首次未生成
-    # 有 cache narrative + 新狀態錯誤 → 顯舊 narrative + 短 caption
-    if status == "ok":
+    if has_narrative:
+        # 有 narrative(cache 或新生成)→ 直接顯
         if desc:
             st.markdown(f"**📝 業務**:{desc}")
         if uniq:
             st.markdown(f"**✨ 獨特性**:{uniq}")
         if moat:
             st.markdown(f"**🏰 護城河**:{moat}")
-    elif status == "quota_exceeded":
-        if desc or uniq or moat:
-            # 有歷史 cache + 本次失敗 → 顯舊 + 提示
-            st.caption("ℹ️ 今日 LLM 額度已用完,顯示上次 cache(明天恢復)")
-            if desc:
-                st.markdown(f"**📝 業務**:{desc}")
-            if uniq:
-                st.markdown(f"**✨ 獨特性**:{uniq}")
-            if moat:
-                st.markdown(f"**🏰 護城河**:{moat}")
-        else:
-            st.caption("ℹ️ 今日 Gemini 免費額度已用完,只顯示基本資料(明天恢復)")
-    elif status == "not_configured":
-        st.caption("ℹ️ LLM 未設定,只顯示基本資料(設 GEMINI_API_KEY 開啟生成)")
-    elif status == "failed":
-        if desc or uniq or moat:
+        # 本次重打失敗但有舊 cache → 顯舊 + 短 caption
+        if status == "quota_exceeded":
             st.caption(f"⚠️ {llm_error}(顯示上次 cache)")
-            if desc:
-                st.markdown(f"**📝 業務**:{desc}")
-            if uniq:
-                st.markdown(f"**✨ 獨特性**:{uniq}")
-            if moat:
-                st.markdown(f"**🏰 護城河**:{moat}")
-        else:
+        elif status == "failed":
+            st.caption(f"⚠️ {llm_error}(顯示上次 cache)")
+        # 重新生成按鈕(已有 cache 才顯,畢竟想重新拿到新版描述)
+        st.button(
+            "🔄 重新生成",
+            key=f"{key_prefix}_company_regen_btn_{sid}",
+            on_click=_set_session_flag,
+            args=(regen_key,),
+            help="強制重打 Gemini(會用今日 1 次免費額度)",
+        )
+    else:
+        # 沒 narrative — 看 status 決定
+        if status == "not_loaded":
+            st.caption(
+                "🤖 點下方按鈕載入 AI 解讀(每日 ~20 次免費額度,點選才會用)"
+            )
+            st.button(
+                "🤖 載入 AI 解讀",
+                key=f"{key_prefix}_llm_load_btn_{sid}",
+                on_click=_set_session_flag,
+                args=(load_key,),
+                use_container_width=True,
+            )
+        elif status == "quota_exceeded":
+            st.caption(
+                "ℹ️ 今日 Gemini 免費額度已用完,只顯示基本資料(明天恢復)"
+            )
+        elif status == "not_configured":
+            st.caption(
+                "ℹ️ LLM 未設定,只顯示基本資料(設 GEMINI_API_KEY 開啟生成)"
+            )
+        elif status == "failed":
             st.caption(f"⚠️ {llm_error or 'LLM 暫時無法呼叫'}")
-    else:  # "empty"
-        st.caption("📝 LLM 描述尚未生成,點下方按鈕重試")
-
-    # 重新生成按鈕 — key 帶 prefix + sid 避免同 sid 出現在多個 tab 時衝撞
-    if st.button(
-        "🔄 重新生成",
-        key=f"{key_prefix}_company_regen_btn_{sid}",
-        help="強制重打 Gemini API",
-    ):
-        st.session_state[regen_key] = True
-        st.rerun()
+            st.button(
+                "🔄 重試",
+                key=f"{key_prefix}_llm_retry_btn_{sid}",
+                on_click=_set_session_flag,
+                args=(load_key,),
+            )
+        else:  # "empty" 邊角
+            st.button(
+                "🤖 載入 AI 解讀",
+                key=f"{key_prefix}_llm_load_btn_{sid}",
+                on_click=_set_session_flag,
+                args=(load_key,),
+            )
 
     if profile.get("llm_updated_at"):
         st.caption(

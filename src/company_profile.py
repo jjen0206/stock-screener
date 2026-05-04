@@ -277,7 +277,9 @@ def _upsert_profile(stock_id: str, fields: dict[str, Any]) -> None:
 # === 公開入口 ===
 
 def get_company_profile(
-    stock_id: str, regenerate: bool = False,
+    stock_id: str,
+    regenerate: bool = False,
+    llm_call: bool = True,
 ) -> dict[str, Any]:
     """個股公司資訊查詢 — cache-first,需要才補 FinMind facts + LLM 生成。
 
@@ -285,19 +287,23 @@ def get_company_profile(
         stock_id: 股號(e.g. "2330")
         regenerate: True = 強制重打 Gemini 重生 description/uniqueness/moat
             (即使當輪已 quota_exceeded,仍嘗試 — 讓 user 手動重試)
+        llm_call: False = **純 SQLite cache lookup 模式**,絕不打 LLM。
+            cache miss 回 narrative_status='not_loaded',user 主動點按鈕
+            才走 llm_call=True path。預設 True 維持 backward compat。
+            regenerate=True 一律強制 LLM call(忽略 llm_call 設定)。
 
     回 dict:
         stock_id, name, industry, market, listing_date, foreign_limit,
         description, uniqueness, moat,
         finmind_updated_at, llm_updated_at,
         llm_error: str | None       — user-facing 短訊(< 100 字,不含 raw API dump)
-        narrative_status: str       — "ok" | "quota_exceeded" | "not_configured"
-                                      | "failed" | "empty"
+        narrative_status: str       — 6 種狀態:
             * "ok"             = description 有值(cache 或新生成)
+            * "not_loaded"     = cache miss + llm_call=False(尚未請求 LLM)
             * "quota_exceeded" = 今日 Gemini 配額用完(或被旗標跳過)
             * "not_configured" = 缺 GEMINI_API_KEY 或 SDK 沒裝
             * "failed"         = 其他 LLM 錯誤(網路 / parse 失敗等)
-            * "empty"          = 還沒嘗試過(理論上幾乎不會)
+            * "empty"          = 邊角情況(LLM 回空字串等)
 
     Quota 防呆:打到 429 後設 session_state 旗標,當輪後續同/異 sid 直接跳
     過 LLM(不浪費 RTT)。regenerate=True 仍會再試。
@@ -312,9 +318,14 @@ def get_company_profile(
 
     # 決定是否跑 LLM:
     # - cache 有 narrative + 沒 regenerate → 不跑
+    # - llm_call=False + 沒 regenerate → 不跑(cache-only mode,等 user 主動點)
     # - 當輪今日已 quota_exceeded + 沒 regenerate → 不跑
     # - 否則跑
     needs_llm = regenerate or not has_cached_narrative
+    skipped_due_to_no_call = False
+    if needs_llm and not regenerate and not llm_call:
+        needs_llm = False
+        skipped_due_to_no_call = True
     quota_was_exceeded = _is_quota_flag_set_today()
     skipped_due_to_quota = False
     if needs_llm and quota_was_exceeded and not regenerate:
@@ -383,6 +394,9 @@ def get_company_profile(
     elif skipped_due_to_quota:
         failure_status = "quota_exceeded"
         llm_error = "今日 Gemini 免費額度已用完(明天重置)"
+    elif skipped_due_to_no_call:
+        # cache miss + llm_call=False → user 還沒按按鈕,不算錯誤
+        failure_status = "not_loaded"
 
     if profile_to_write:
         _upsert_profile(sid, profile_to_write)

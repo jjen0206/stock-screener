@@ -289,6 +289,66 @@ def test_get_company_profile_quota_flag_skips_subsequent_llm_calls(
     )
 
 
+def test_get_company_profile_llm_call_false_skips_llm_on_cache_miss(
+    tmp_db, monkeypatch,
+):
+    """llm_call=False 模式 — cache miss 不打 LLM,回 narrative_status='not_loaded'。
+
+    這是 user-button-gated 流程的核心:138 picks 全展開只走 cache-only path,
+    0 LLM call。實際打 LLM 的 path 走 llm_call=True(user 點按鈕)。
+    """
+    _seed_finmind_mock(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
+
+    llm_call_count = [0]
+    def _llm_spy(*a, **kw):
+        llm_call_count[0] += 1
+        return {"description": "X", "uniqueness": "Y", "moat": "Z"}
+    monkeypatch.setattr(cp, "generate_with_gemini", _llm_spy)
+
+    profile = cp.get_company_profile("2330", llm_call=False)
+
+    # facts 仍補(FinMind 是免費快路徑,不算 LLM)
+    assert profile["industry"] == "半導體業"
+    assert profile["market"] == "上市"
+    # description 沒生成
+    assert profile["description"] is None
+    assert profile["narrative_status"] == "not_loaded"
+    # **核心 assert**:LLM 完全沒被呼叫
+    assert llm_call_count[0] == 0, (
+        f"llm_call=False 模式下不該打 LLM, 實際打了 {llm_call_count[0]} 次"
+    )
+
+
+def test_get_company_profile_llm_call_false_returns_cached_narrative(
+    tmp_db, monkeypatch,
+):
+    """cache hit + llm_call=False → 直接回 cache 內 narrative,不打 LLM。"""
+    _seed_finmind_mock(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
+    monkeypatch.setattr(
+        cp, "generate_with_gemini",
+        lambda *a, **kw: {
+            "description": "晶圓代工", "uniqueness": "領先製程", "moat": "規模",
+        },
+    )
+
+    # 先用 llm_call=True 寫進 cache
+    p1 = cp.get_company_profile("2330", llm_call=True)
+    assert p1["description"] == "晶圓代工"
+
+    # 改 mock 讓「萬一被叫」就拋錯,守門 — 但 llm_call=False 應跳過
+    def _fail(*a, **kw):
+        raise AssertionError("llm_call=False 不該叫 LLM,但被叫了")
+    monkeypatch.setattr(cp, "generate_with_gemini", _fail)
+
+    p2 = cp.get_company_profile("2330", llm_call=False)
+    assert p2["narrative_status"] == "ok"
+    assert p2["description"] == "晶圓代工"
+
+
 def test_get_company_profile_no_gemini_key_returns_facts_only(
     tmp_db, monkeypatch,
 ):

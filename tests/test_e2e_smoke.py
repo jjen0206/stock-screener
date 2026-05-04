@@ -2512,10 +2512,10 @@ def test_company_info_compact_shows_facts_and_llm_when_cached(isolated_db):
     產生 error caption「GEMINI_API_KEY 未設定」。assert 沒看到該訊息 →
     確認走 SQLite cache hit。
     """
-    from src.individual_sections import _get_company_profile_cached
+    from src.individual_sections import _get_company_profile_cache_only
 
     _seed_company_profile("2330")
-    _get_company_profile_cached.clear()
+    _get_company_profile_cache_only.clear()
 
     def _harness():
         from src.individual_sections import _render_company_info_compact
@@ -2539,35 +2539,36 @@ def test_company_info_compact_shows_facts_and_llm_when_cached(isolated_db):
     )
 
 
-def test_company_info_compact_auto_calls_get_profile_on_cache_miss(
+def test_company_info_no_auto_llm_call_on_cache_miss(
     isolated_db, monkeypatch,
 ):
-    """SQLite cache miss → 自動 call get_company_profile(會觸發 LLM)。
+    """**Critical regression** — cache miss 時不該自動觸發 LLM call。
 
-    透過 monkeypatch get_company_profile 為 spy(這次不需用 mock 資料,直
-    接驗 spy 呼叫即可確認新行為)— spy 必須在 harness module 全域 patch,
-    AppTest 內 import 看得到。
+    新行為(改自「展開即自動生成」):cache miss → 顯「載入 AI 解讀」
+    按鈕,user 主動點才打 LLM。138 picks 全展開不會燒 quota。
+
+    Spy assert get_company_profile 只被 llm_call=False(cache-only)模式呼叫。
     """
     from src import company_profile as cp
-    from src.individual_sections import _get_company_profile_cached
+    from src.individual_sections import _get_company_profile_cache_only
 
-    _get_company_profile_cached.clear()
+    _get_company_profile_cache_only.clear()
 
-    # 直接在 cp module 上替換函式 — AppTest harness 內 from src import
-    # company_profile 拿到的是同一個 module 物件,此 attribute 可被 patch
     spy_calls = []
-    def _spy(sid, regenerate=False):
-        spy_calls.append((sid, regenerate))
+    def _spy(sid, regenerate=False, llm_call=True):
+        spy_calls.append({
+            "sid": sid, "regenerate": regenerate, "llm_call": llm_call,
+        })
+        # cache miss + llm_call=False → status="not_loaded", no narrative
         return {
-            "stock_id": sid, "name": "X",
+            "stock_id": sid, "name": "面板X",
             "industry": "光電業", "market": "上市",
             "listing_date": None, "foreign_limit": None,
-            "description": "做面板", "uniqueness": "技術領先",
-            "moat": "規模優勢",
-            "finmind_updated_at": None,
-            "llm_updated_at": "2026-05-04T00:00:00+00:00",
+            "description": None, "uniqueness": None, "moat": None,
+            "finmind_updated_at": "2026-05-04T00:00:00+00:00",
+            "llm_updated_at": None,
             "llm_error": None,
-            "narrative_status": "ok",
+            "narrative_status": "not_loaded",
         }
     monkeypatch.setattr(cp, "get_company_profile", _spy)
 
@@ -2575,18 +2576,87 @@ def test_company_info_compact_auto_calls_get_profile_on_cache_miss(
         from src.individual_sections import _render_company_info_compact
         _render_company_info_compact("3008")
 
-    at = AppTest.from_function(_harness, default_timeout=15)
+    at = AppTest.from_function(_harness, default_timeout=10)
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    assert spy_calls == [("3008", False)], (
-        f"預期 get_company_profile 被叫一次 (3008, regenerate=False), "
-        f"實際: {spy_calls}"
+    # 必須只被 cache-only 模式呼叫一次,**不可** llm_call=True
+    assert len(spy_calls) == 1, f"預期被叫 1 次, 實際: {spy_calls}"
+    assert spy_calls[0]["llm_call"] is False, (
+        f"cache miss 時不該自動 llm_call=True, spy={spy_calls}"
     )
+    assert spy_calls[0]["regenerate"] is False
 
+    # facts 仍顯
     md_text = "\n".join(str(m.value) for m in at.markdown)
     assert "光電業" in md_text
-    assert "做面板" in md_text
+
+    # 必須有「載入 AI 解讀」按鈕
+    btn_labels = [b.label for b in at.button]
+    assert any("載入 AI 解讀" in (lbl or "") for lbl in btn_labels), (
+        f"應有「載入 AI 解讀」按鈕, 實際: {btn_labels}"
+    )
+
+
+def test_company_info_button_triggers_llm_call(isolated_db, monkeypatch):
+    """點「🤖 載入 AI 解讀」按鈕 → spy 被叫第二次,且 llm_call=True。"""
+    from src import company_profile as cp
+    from src.individual_sections import _get_company_profile_cache_only
+
+    _get_company_profile_cache_only.clear()
+
+    spy_calls = []
+    def _spy(sid, regenerate=False, llm_call=True):
+        spy_calls.append({"sid": sid, "regenerate": regenerate, "llm_call": llm_call})
+        if llm_call:
+            # 第二次叫(button click 後)→ 模擬 LLM 成功
+            return {
+                "stock_id": sid, "name": "X",
+                "industry": "光電業", "market": "上市",
+                "listing_date": None, "foreign_limit": None,
+                "description": "做面板", "uniqueness": "規模優勢",
+                "moat": "供應鏈整合",
+                "finmind_updated_at": None,
+                "llm_updated_at": "2026-05-04T00:00:00+00:00",
+                "llm_error": None, "narrative_status": "ok",
+            }
+        # cache-only 第一次 → not_loaded
+        return {
+            "stock_id": sid, "name": "X",
+            "industry": "光電業", "market": "上市",
+            "listing_date": None, "foreign_limit": None,
+            "description": None, "uniqueness": None, "moat": None,
+            "finmind_updated_at": None, "llm_updated_at": None,
+            "llm_error": None, "narrative_status": "not_loaded",
+        }
+    monkeypatch.setattr(cp, "get_company_profile", _spy)
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        _render_company_info_compact("3008")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+    # 第一次只該是 cache-only
+    assert spy_calls[0]["llm_call"] is False
+
+    # 點按鈕(觸發 callback,設 session_state flag)
+    load_btn = next(
+        b for b in at.button if "載入 AI 解讀" in (b.label or "")
+    )
+    load_btn.click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 第二次必有 llm_call=True
+    llm_true_calls = [c for c in spy_calls if c["llm_call"] is True]
+    assert len(llm_true_calls) >= 1, (
+        f"button click 後必須有 llm_call=True 的呼叫, 實際: {spy_calls}"
+    )
+
+    # 載入後 narrative 顯出來
+    md_text = "\n".join(str(m.value) for m in at.markdown)
+    assert "做面板" in md_text, f"按鈕後應顯 narrative, md_text:\n{md_text}"
 
 
 def test_company_info_compact_quota_exceeded_shows_friendly_caption(
@@ -2599,13 +2669,13 @@ def test_company_info_compact_quota_exceeded_shows_friendly_caption(
     看(429 + quota_metric + billing... ),改 graceful degradation。
     """
     from src import company_profile as cp
-    from src.individual_sections import _get_company_profile_cached
+    from src.individual_sections import _get_company_profile_cache_only
 
-    _get_company_profile_cached.clear()
+    _get_company_profile_cache_only.clear()
 
     monkeypatch.setattr(
         cp, "get_company_profile",
-        lambda sid, regenerate=False: {
+        lambda sid, regenerate=False, llm_call=True: {
             "stock_id": sid, "name": "X",
             "industry": "光電業", "market": "上市",
             "listing_date": None, "foreign_limit": None,
@@ -2644,13 +2714,13 @@ def test_company_info_compact_failed_status_shows_generic_caption(
     """narrative_status='failed' → 顯 generic 訊息(不 dump raw exception),
     facts 仍顯。"""
     from src import company_profile as cp
-    from src.individual_sections import _get_company_profile_cached
+    from src.individual_sections import _get_company_profile_cache_only
 
-    _get_company_profile_cached.clear()
+    _get_company_profile_cache_only.clear()
 
     monkeypatch.setattr(
         cp, "get_company_profile",
-        lambda sid, regenerate=False: {
+        lambda sid, regenerate=False, llm_call=True: {
             "stock_id": sid, "name": "X",
             "industry": "光電業", "market": "上市",
             "listing_date": None, "foreign_limit": None,
@@ -2682,12 +2752,12 @@ def test_company_info_compact_failed_status_shows_generic_caption(
 def test_company_info_compact_has_regenerate_button(isolated_db, monkeypatch):
     """expander 內必須有「重新生成」按鈕,key 帶 sid 區隔多卡片。"""
     from src import company_profile as cp
-    from src.individual_sections import _get_company_profile_cached
+    from src.individual_sections import _get_company_profile_cache_only
 
-    _get_company_profile_cached.clear()
+    _get_company_profile_cache_only.clear()
     monkeypatch.setattr(
         cp, "get_company_profile",
-        lambda sid, regenerate=False: {
+        lambda sid, regenerate=False, llm_call=True: {
             "stock_id": sid, "name": "台積電",
             "industry": "半導體業", "market": "上市",
             "listing_date": None, "foreign_limit": None,
