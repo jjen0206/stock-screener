@@ -44,6 +44,37 @@ from src.universe import (  # noqa: E402
 DEFAULT_PARAMS_HASH = "default_v1"
 
 
+def _compute_ml_probs(
+    sids: list[str], trade_date: str,
+) -> dict[str, float | None]:
+    """跑 ML batch 預測對每 sid 算 prob_up;model 缺 / 載 fail → 空 dict。
+
+    Stage 1 Part 2:每天預跑時順便算,寫進 daily_picks.ml_prob 欄,雲端 App
+    直接吃 cache 不用每次重算 ~50 picks × 50ms predict_proba。
+    """
+    if not sids:
+        return {}
+    from src.ml_predictor import load_model, predict_batch
+    model_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+    if not model_path.exists():
+        print(
+            f"[PRECOMPUTE] model 檔不存在:{model_path} → ml_prob 全 NULL",
+            flush=True,
+        )
+        return {}
+    try:
+        model = load_model(model_path)
+        if model is None:
+            return {}
+        return predict_batch(model, sids, trade_date)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[PRECOMPUTE] ML predict_batch 失敗: {type(e).__name__}: {e}",
+            flush=True,
+        )
+        return {}
+
+
 def _with_etf_universe(min_history: int = 20) -> list[str]:
     """20+ 天歷史所有股(含 ETF / 債券)。對應 App 短線頁「📊 含 ETF」選項。"""
     sids_with_history = set(db.stocks_with_min_history(min_history))
@@ -101,8 +132,14 @@ def precompute_for_date(trade_date: str) -> dict[str, int]:
             len((info or {}).get("details", {})) for info in agg.values()
         )
 
+        # ML 機率(per-pick)— Stage 1 Part 2:預跑就算好寫進表,雲端 App 直接吃。
+        # 若 model 不存在 / load fail → ml_probs 是空 dict,daily_picks ml_prob 欄全 NULL。
+        ml_probs = _compute_ml_probs(list(agg.keys()), trade_date)
+        n_with_ml = sum(1 for v in ml_probs.values() if v is not None)
+
         inserted = db.dump_daily_picks(
             trade_date, u_key, agg, params_hash=DEFAULT_PARAMS_HASH,
+            ml_probs=ml_probs,
         )
         results[u_key] = inserted
 
@@ -115,7 +152,8 @@ def precompute_for_date(trade_date: str) -> dict[str, int]:
         print(
             f"[PRECOMPUTE] {u_key:<12s} "
             f"sids={len(sids):<4d} picks={n_picks:<3d} "
-            f"signals={n_signal_rows:<4d} elapsed={elapsed:5.1f}s | "
+            f"signals={n_signal_rows:<4d} ml_prob={n_with_ml}/{n_picks} "
+            f"elapsed={elapsed:5.1f}s | "
             + ", ".join(f"{k}={v}" for k, v in sorted(per_strategy.items())),
             flush=True,
         )
@@ -141,7 +179,7 @@ def dump_daily_picks_csv(snapshot_dir: Path | None = None) -> int:
     with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT trade_date, universe, strategy, sid, score, rank, "
-            "params_hash, payload, computed_at FROM daily_picks "
+            "params_hash, payload, ml_prob, computed_at FROM daily_picks "
             "ORDER BY trade_date DESC, universe, strategy, sid"
         ).fetchall()
 

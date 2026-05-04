@@ -444,7 +444,9 @@ def test_daily_picks_schema_exists(tmp_db):
         }
         assert cols == {
             "trade_date", "universe", "strategy", "sid",
-            "score", "rank", "params_hash", "payload", "computed_at",
+            "score", "rank", "params_hash", "payload",
+            "ml_prob",  # Stage 1 Part 2 加
+            "computed_at",
         }
 
         # 查詢 index 存在
@@ -536,3 +538,44 @@ def test_dump_daily_picks_separates_universes(tmp_db):
     top50 = db.load_daily_picks("2026-05-04", "top_50")
     assert sorted(pure.keys()) == ["2317", "2330"]   # pure_stock 兩檔
     assert list(top50.keys()) == ["2330"]            # top_50 只有 2330
+
+
+def test_daily_picks_roundtrip_with_ml_prob(tmp_db):
+    """ml_probs 傳進 dump → load_daily_picks 還原時 agg[sid]['ml_prob'] 對。"""
+    db.dump_daily_picks(
+        "2026-05-04", "pure_stock", _fake_agg_2sids(),
+        ml_probs={"2330": 0.72, "2317": 0.45},
+    )
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock")
+    assert loaded["2330"]["ml_prob"] == pytest.approx(0.72)
+    assert loaded["2317"]["ml_prob"] == pytest.approx(0.45)
+
+
+def test_daily_picks_roundtrip_without_ml_prob_returns_none(tmp_db):
+    """不傳 ml_probs(舊版 caller 路徑)→ load 回傳 ml_prob=None,不炸。"""
+    db.dump_daily_picks("2026-05-04", "pure_stock", _fake_agg_2sids())
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock")
+    assert loaded["2330"]["ml_prob"] is None
+    assert loaded["2317"]["ml_prob"] is None
+
+
+def test_preload_daily_picks_csv_without_ml_prob_column(tmp_db, tmp_path):
+    """舊 daily_picks.csv 沒 ml_prob 欄(Stage 1 之前的 commit) → preload 不
+    噴錯,DB 內 ml_prob 補 NULL。給雲端 git pull 拿到舊 CSV 但 schema 已更
+    新的 backward-compat 守門。"""
+    import pandas as pd
+    csv_path = tmp_path / "daily_picks.csv"
+    pd.DataFrame([
+        {
+            "trade_date": "2026-05-04", "universe": "pure_stock",
+            "strategy": "volume_kd", "sid": "2330",
+            "score": None, "rank": None, "params_hash": "default_v1",
+            "payload": '{"close": 600.0, "name": "台積電"}',
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+    ]).to_csv(csv_path, index=False)
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("daily_picks") == 1
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock")
+    assert loaded is not None
+    assert loaded["2330"]["ml_prob"] is None  # 舊 CSV 補 NULL

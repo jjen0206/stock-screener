@@ -246,6 +246,7 @@ SCHEMA: list[str] = [
         rank        INTEGER,
         params_hash TEXT NOT NULL,
         payload     TEXT,
+        ml_prob     REAL,
         computed_at TEXT NOT NULL,
         PRIMARY KEY (trade_date, universe, strategy, sid, params_hash)
     )
@@ -292,6 +293,23 @@ def init_db(db_path: str | Path | None = None) -> None:
     with get_conn(db_path) as conn:
         for stmt in SCHEMA:
             conn.execute(stmt)
+        _migrate_daily_picks_add_ml_prob(conn)
+
+
+def _migrate_daily_picks_add_ml_prob(conn) -> None:
+    """Stage 1 Part 2 schema migration:加 ml_prob REAL 欄位到既有 daily_picks。
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS,改用 PRAGMA 檢查再加。
+    冪等(已存在 → no-op)。雲端容器 git pull 帶到既有 .db 時自動補欄,
+    舊 daily_picks.csv preload(沒 ml_prob 欄)走 fallback 寫 NULL。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(daily_picks)"
+        ).fetchall()
+    }
+    if "ml_prob" not in cols:
+        conn.execute("ALTER TABLE daily_picks ADD COLUMN ml_prob REAL")
 
 
 def _now_iso() -> str:
@@ -979,6 +997,9 @@ def preload_snapshots(
     picks_csv = snapshot_dir / "daily_picks.csv"
     if picks_csv.exists():
         df = pd.read_csv(picks_csv, dtype={"sid": str, "trade_date": str})
+        # backward-compat:舊 CSV 沒 ml_prob 欄,補欄填 NULL
+        if "ml_prob" not in df.columns:
+            df["ml_prob"] = None
         records = df.to_dict("records")
         for r in records:
             for k, v in list(r.items()):
@@ -990,15 +1011,17 @@ def preload_snapshots(
                     """
                     INSERT INTO daily_picks (
                         trade_date, universe, strategy, sid, score, rank,
-                        params_hash, payload, computed_at
+                        params_hash, payload, ml_prob, computed_at
                     ) VALUES (
                         :trade_date, :universe, :strategy, :sid, :score, :rank,
-                        :params_hash, :payload, :computed_at
+                        :params_hash, :payload, :ml_prob, :computed_at
                     )
                     ON CONFLICT(trade_date, universe, strategy, sid, params_hash)
                     DO UPDATE SET
                         score=excluded.score, rank=excluded.rank,
-                        payload=excluded.payload, computed_at=excluded.computed_at
+                        payload=excluded.payload,
+                        ml_prob=excluded.ml_prob,
+                        computed_at=excluded.computed_at
                     """,
                     records,
                 )
@@ -1085,6 +1108,7 @@ def dump_daily_picks(
     agg: dict[str, dict],
     params_hash: str = "default_v1",
     db_path: str | Path | None = None,
+    ml_probs: dict[str, float | None] | None = None,
 ) -> int:
     """把 run_all_strategies 結果 bulk insert 進 daily_picks。
 
@@ -1094,6 +1118,9 @@ def dump_daily_picks(
         agg: run_all_strategies 回傳的 dict[sid, {name, signals, details}]
         params_hash: 'default_v1' 表示 default params(預跑路徑)
         db_path: 預設用 config.DATABASE_PATH
+        ml_probs: optional {sid: prob | None} — 同 sid 的所有 strategy 行
+            會寫同一個 ml_prob(per-sid 不 per-strategy)。None 不寫(stage 1
+            Part 2 之前的呼叫者 backward compat)。
 
     一個 (sid, strategy) 變一行;score/rank 留 None(目前不用,留欄位給未
     來擴充);payload = 該策略 row dict 的 JSON(name + close + 各 indicator)。
@@ -1110,6 +1137,7 @@ def dump_daily_picks(
     now = _now_iso()
     rows: list[dict] = []
     for sid, info in agg.items():
+        prob = (ml_probs or {}).get(sid) if ml_probs else None
         for strategy_key, row_dict in (info.get("details") or {}).items():
             # row_dict 內可能含 numpy/pandas 類型,json.dumps 用 default=str
             payload = _json.dumps(row_dict, ensure_ascii=False, default=str)
@@ -1122,6 +1150,7 @@ def dump_daily_picks(
                 "rank": None,
                 "params_hash": params_hash,
                 "payload": payload,
+                "ml_prob": prob,
                 "computed_at": now,
             })
 
@@ -1133,15 +1162,17 @@ def dump_daily_picks(
             """
             INSERT INTO daily_picks (
                 trade_date, universe, strategy, sid, score, rank,
-                params_hash, payload, computed_at
+                params_hash, payload, ml_prob, computed_at
             ) VALUES (
                 :trade_date, :universe, :strategy, :sid, :score, :rank,
-                :params_hash, :payload, :computed_at
+                :params_hash, :payload, :ml_prob, :computed_at
             )
             ON CONFLICT(trade_date, universe, strategy, sid, params_hash)
             DO UPDATE SET
                 score=excluded.score, rank=excluded.rank,
-                payload=excluded.payload, computed_at=excluded.computed_at
+                payload=excluded.payload,
+                ml_prob=excluded.ml_prob,
+                computed_at=excluded.computed_at
             """,
             rows,
         )
@@ -1168,7 +1199,7 @@ def load_daily_picks(
     with get_conn(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT strategy, sid, payload FROM daily_picks
+            SELECT strategy, sid, payload, ml_prob FROM daily_picks
             WHERE trade_date=? AND universe=? AND params_hash=?
             """,
             (trade_date, universe_key, params_hash),
@@ -1193,6 +1224,8 @@ def load_daily_picks(
                 "name": payload.get("name", ""),
                 "signals": [],
                 "details": {},
+                # ml_prob per-sid(同 sid 多策略 row 共用同一值,取第一個 row 就行)
+                "ml_prob": r["ml_prob"],
             }
         # 用 STRATEGY_LABELS 拿中文標籤;未知 strategy key 退回原 key
         agg[sid]["signals"].append(STRATEGY_LABELS.get(strategy, strategy))
