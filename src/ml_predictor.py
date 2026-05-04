@@ -578,24 +578,25 @@ def predict_for_strategy(
     """Stage 2B per-strategy inference 路由 — 優先用 per-strategy model,沒就用
     fallback(通用)model。
 
+    **Caller 要自己預載 per-strategy model(直接傳 strategy_model;若 None 則
+    本函式 fallback 直接用 fallback_model,不再 disk load)** — 這樣 backtest
+    每 D × 每 strategy 不會反覆 read pkl(N×N 次 IO)。strategy_name 仍保留
+    當 metadata,讓 log 看得出哪個策略在預測。
+
     Args:
-        strategy_name: 主導 strategy name(用來 load .pkl);None 跳過 per-strategy
-            走 fallback。
+        strategy_name: 紀錄用 strategy name(可以 None);**已不再觸發 disk
+            load**。caller 想路由 per-strategy 必須自己傳 strategy_model。
         stock_ids: 要預測的 sids list
         target_date: 'YYYY-MM-DD'
-        fallback_model: 通用模型(找不到 per-strategy pkl 時用)。None 時兩個
-            都沒 → 全 None dict 回傳。
-        strategy_model: 已載入的 per-strategy model object(避免每 call 重 load
-            的 caller 優化路徑;傳 None 則內部走 load_strategy_model)。
+        fallback_model: 通用模型;strategy_model 沒給時用。None 時兩個都沒
+            → 全 None dict 回傳。
+        strategy_model: 已載入的 per-strategy model;優先於 fallback。
 
     Returns:
         {sid: prob | None};沒任何 model + sids 非空 → {sid: None}
     """
     if not stock_ids:
         return {}
-
-    if strategy_model is None and strategy_name:
-        strategy_model = load_strategy_model(strategy_name)
 
     chosen = strategy_model if strategy_model is not None else fallback_model
     if chosen is None:

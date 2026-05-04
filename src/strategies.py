@@ -1086,16 +1086,33 @@ STRATEGY_LABELS: dict[str, str] = {
 }
 
 
-# === Per-strategy ML 過濾門檻(Stage 2A 校準後落地) ===
-# 來源:scripts/audit/calibrate_ml_thresholds.py 60-day grid search 結果。
-# 只有 ma_alignment 真正受益於通用 ML 模型過濾(60d baseline 55.6% → 0.60
-# 門檻 68.5%,+12.9 pp;30d baseline 75% → 0.60 門檻 86.7%,+11.7 pp)。
-# 其餘策略加 ML filter 反而傷害 alpha 或沒幫助 — 不在 dict 內預設 None。
+# === Per-strategy ML 過濾門檻(Stage 2B 校準後落地) ===
+# 來源:scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models 跑
+# 30-day grid search 結果(Stage 2B 6 個 trained per-strategy models)。
 #
-# Stage 2B(per-strategy 重訓 ML)之後此 dict 會大幅擴充,目前先保守落地一個。
+# Stage 2A(通用 ML model)只有 ma_alignment 過 winner 條件;Stage 2B(per-
+# strategy retrain)後 5 個 strategies 額外過 winner — 通用模型跟其他策略 alpha
+# 信號重疊的問題確認被 per-strategy 重訓化解。
+#
+# Threshold 對照(per-strategy 校準 30d):
+#   bias_convergence    0.65 → 100% WR (97 fires)
+#   macd_golden         0.60 → 100% WR (30 fires)
+#   bb_lower_rebound    0.50 → 75.8% WR (33 fires)
+#   volume_breakout     0.65 → 100% WR (74 fires)
+#   gap_up              0.60 → 100% WR (108 fires)
+#   ma_alignment        保留 0.60(Stage 2A 60d 確認;30d sample 太小 (<30 fires)
+#                       calibrator 退 baseline,但 60d 已驗證有效)
+#
+# 沒過 winner / 沒跑(sample 太小)的策略不放 dict 內(.get → None,不過濾):
+#   rsi_recovery / volume_kd / ma_squeeze_breakout / inst_consensus /
+#   inst_silent_accum
 STRATEGY_ML_THRESHOLDS: dict[str, float] = {
     "ma_alignment": 0.60,
-    # 其他 10 個策略不在此 dict 中(用 .get(strategy) 拿 None 表示不過濾)
+    "bias_convergence": 0.65,
+    "macd_golden": 0.60,
+    "bb_lower_rebound": 0.50,
+    "volume_breakout": 0.65,
+    "gap_up": 0.60,
 }
 
 

@@ -1,17 +1,24 @@
 """ad-hoc:對每個策略獨立 grid search,找最佳 ML 過濾門檻。
 
-**One-shot script — 2026-05-04 由 Stage 1 baseline disappointing 結果觸發。**
+**Originally one-shot — 2026-05-04 Stage 2A 校準觸發。Stage 2B 加
+`--use-per-strategy-models` flag 後變 reusable**(每次 retrain 後可重跑)。
 
 跑法:
+    # Stage 2A:用通用 short_pick.pkl 校準
     python scripts/audit/calibrate_ml_thresholds.py
 
-對 11 個策略 × 8 個門檻(None / 0.50-0.80 step 0.05)做 grid search,跑兩個
-lookback(60 / 126 日)做穩定性對比,印 winner threshold。
+    # Stage 2B:用新 per-strategy models 校準
+    python scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models
+
+    # 自訂 lookback
+    python scripts/audit/calibrate_ml_thresholds.py --lookback 60
+
+對 11 個策略 × 8 個門檻(None / 0.50-0.80 step 0.05)做 grid search,印
+winner threshold + 建議的 STRATEGY_ML_THRESHOLDS dict 內容。
 
 Winner 條件:
 - win_rate >= 0.55 (高過拋硬幣 + 緩衝)
 - n_fires >= 30 (避免樣本太小不穩)
-- 60 vs 126 day 結果一致(若不一致 → 視為不穩 → 設 None)
 
 優化:每策略 one-pass(跑一次 screener + predict + simulate),所有門檻在
 記憶體 sweep。比 naive 8x backtest 快約 8 倍。
@@ -28,10 +35,14 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import argparse  # noqa: E402
+
 from src import config, database as db  # noqa: E402
 from src._bulk_load import bulk_load_prices  # noqa: E402
 from src.backtest import _list_trading_dates, simulate_outcome  # noqa: E402
-from src.ml_predictor import load_model, predict_batch  # noqa: E402
+from src.ml_predictor import (  # noqa: E402
+    load_model, load_strategy_model, predict_batch, predict_for_strategy,
+)
 from src.strategies import ALL_STRATEGIES  # noqa: E402
 from src.universe import pure_stock_universe  # noqa: E402
 
@@ -62,10 +73,15 @@ def _collect_strategy_picks(
     stop_pct: float,
     hold_days: int,
     ml_model,
+    strategy_model=None,
 ) -> list[dict]:
     """跑一次 strategy backtest,collect 每張 pick 的 (sid, D, ml_prob, outcome, ret)。
 
     後續 sweep threshold 都在記憶體 filter,不重跑。回 list[dict]。
+
+    strategy_model:給 Stage 2B 用 — 預載的 per-strategy model。傳就走
+    predict_for_strategy 路由(strategy_model → fallback ml_model);沒就
+    退舊路徑 predict_batch(ml_model, ...)。
     """
     screen_fn = ALL_STRATEGIES[strategy_name]
     all_dates = _list_trading_dates(period_end, lookback_days)
@@ -91,7 +107,21 @@ def _collect_strategy_picks(
 
         # 一次 batch ML predict 整個 D 的 picks
         sids_today = [str(r["stock_id"]) for _, r in df.iterrows()]
-        ml_probs = predict_batch(ml_model, sids_today, D) if ml_model else {}
+        if strategy_model is not None or ml_model is not None:
+            if strategy_model is not None:
+                # Stage 2B 路徑:per-strategy model 優先,沒 → fallback ml_model
+                ml_probs = predict_for_strategy(
+                    strategy_name=strategy_name,
+                    stock_ids=sids_today,
+                    target_date=D,
+                    fallback_model=ml_model,
+                    strategy_model=strategy_model,
+                )
+            else:
+                # Stage 2A:通用 model
+                ml_probs = predict_batch(ml_model, sids_today, D)
+        else:
+            ml_probs = {}
 
         for _, pick_row in df.iterrows():
             sid = str(pick_row["stock_id"])
@@ -184,17 +214,33 @@ def _run_calibration(
     lookback_days: int,
     ml_model,
     strategies: list[str] | None = None,
+    use_per_strategy_models: bool = False,
 ) -> dict[str, dict]:
     """對(全 11 或指定子集)strategies 跑 grid search,
-    回 {strategy: {sweeps, winner_t, winner_stats}}。"""
+    回 {strategy: {sweeps, winner_t, winner_stats}}。
+
+    use_per_strategy_models=True → 每 strategy 預載自己的 .pkl;沒 .pkl 走
+    通用 model fallback。
+    """
     out: dict[str, dict] = {}
     keys = strategies if strategies else list(ALL_STRATEGIES.keys())
+
+    # Stage 2B:預載 per-strategy models 一次
+    per_strategy_models: dict[str, object] = {}
+    if use_per_strategy_models:
+        for sname in keys:
+            sm = load_strategy_model(sname)
+            per_strategy_models[sname] = sm
+            tag = "trained" if sm is not None else "fallback→general"
+            print(f"  [PRELOAD] {sname}: {tag}", flush=True)
+
     for sname in keys:
         t0 = time.perf_counter()
+        sm = per_strategy_models.get(sname) if use_per_strategy_models else None
         records = _collect_strategy_picks(
             sname, universe, period_end, lookback_days,
             target_pct=0.05, stop_pct=0.03, hold_days=5,
-            ml_model=ml_model,
+            ml_model=ml_model, strategy_model=sm,
         )
         elapsed = time.perf_counter() - t0
         sweeps = {t: _sweep_threshold(records, t) for t in THRESHOLDS}
@@ -218,6 +264,21 @@ def _run_calibration(
 
 
 def main() -> int:
+    p = argparse.ArgumentParser(description="ML threshold calibration grid search")
+    p.add_argument(
+        "--use-per-strategy-models", action="store_true",
+        help="Stage 2B:每 strategy 用其 .pkl 替通用 model(找不到 → fallback 通用)。",
+    )
+    p.add_argument(
+        "--lookback", type=int, default=30,
+        help="lookback 交易日(default 30,輕量版)",
+    )
+    p.add_argument(
+        "--strategies",
+        help="逗號分隔 strategy keys(default 7 個 sample ≥ 50 的)",
+    )
+    args = p.parse_args()
+
     db.init_db()
     preload = db.preload_snapshots()
     if preload:
@@ -242,20 +303,27 @@ def main() -> int:
         print("[CALIBRATE] model load fail", flush=True)
         return 1
 
-    # 輕量版:30-day only,7 個 sample ≥ 50 的策略(commit message 詳細解釋)
+    if args.strategies:
+        strategies_to_run = [s.strip() for s in args.strategies.split(",")]
+    else:
+        strategies_to_run = LIGHTWEIGHT_STRATEGIES
+
+    mode_tag = "Stage 2B (per-strategy models)" if args.use_per_strategy_models \
+        else "Stage 2A (general model)"
     print(
-        f"[CALIBRATE] period_end={period_end}, universe={len(universe)} 檔, "
-        f"target +5% / stop -3% / hold 5 天 / lookback 30 天 / "
-        f"{len(LIGHTWEIGHT_STRATEGIES)} strategies",
+        f"[CALIBRATE] {mode_tag} | period_end={period_end}, "
+        f"universe={len(universe)} 檔, target +5% / stop -3% / hold 5 天 / "
+        f"lookback {args.lookback} 天 / {len(strategies_to_run)} strategies",
         flush=True,
     )
 
     print("\n" + "=" * 70, flush=True)
-    print("30-day lookback grid search(輕量版)", flush=True)
+    print(f"{args.lookback}-day lookback grid search ({mode_tag})", flush=True)
     print("=" * 70, flush=True)
     results_30 = _run_calibration(
-        universe, period_end, 30, ml_model,
-        strategies=LIGHTWEIGHT_STRATEGIES,
+        universe, period_end, args.lookback, ml_model,
+        strategies=strategies_to_run,
+        use_per_strategy_models=args.use_per_strategy_models,
     )
 
     # Recommend STRATEGY_ML_THRESHOLDS(只用 30-day winner;穩定性 check
@@ -270,7 +338,7 @@ def main() -> int:
     print("-" * 60, flush=True)
 
     final_thresholds: dict[str, float | None] = {}
-    for sname in LIGHTWEIGHT_STRATEGIES:
+    for sname in strategies_to_run:
         r = results_30.get(sname, {})
         t = r.get("winner_t")
         wr = r.get("winner_stats", {}).get("win_rate", 0.0)
@@ -285,16 +353,19 @@ def main() -> int:
     print("\nRecommended STRATEGY_ML_THRESHOLDS:", flush=True)
     print("STRATEGY_ML_THRESHOLDS = {", flush=True)
     for sname, t in final_thresholds.items():
-        if t is None:
-            print(f'    "{sname}": None,', flush=True)
-        else:
+        if t is not None:
             print(f'    "{sname}": {t:.2f},', flush=True)
-    # 樣本太小(volume_kd / ma_squeeze_breakout / inst_consensus /
-    # inst_silent_accum)→ 預設 None(不過濾)
-    print("    # 以下 4 策略 sample 太小,預設不過濾", flush=True)
-    for sname in ALL_STRATEGIES.keys():
-        if sname not in LIGHTWEIGHT_STRATEGIES:
-            print(f'    "{sname}": None,', flush=True)
+    # 沒過 winner 條件的策略不在 dict 內(等同 None,unfiltered)
+    skipped = [s for s, t in final_thresholds.items() if t is None]
+    if skipped:
+        print(
+            f"    # 沒過 winner 條件:{', '.join(skipped)}",
+            flush=True,
+        )
+    # 沒在 strategies_to_run 內的(常 sample 太小)
+    not_run = [s for s in ALL_STRATEGIES.keys() if s not in strategies_to_run]
+    if not_run:
+        print(f"    # 沒跑(sample 太小):{', '.join(not_run)}", flush=True)
     print("}", flush=True)
     return 0
 

@@ -248,6 +248,7 @@ def backtest_all_strategies(
     strategies: Iterable[str] | None = None,
     ml_filter: float | None = None,
     per_strategy_ml: bool = False,
+    disable_per_strategy_models: bool = False,
 ) -> list[dict]:
     """跑全部(或指定子集)strategies — 回 list[dict] 餵 db.dump_strategy_backtest。
 
@@ -258,6 +259,9 @@ def backtest_all_strategies(
             給每 strategy(避免每 strategy 重 load 一次)。
         per_strategy_ml: True → 用 STRATEGY_ML_THRESHOLDS 的 per-strategy 門
             檻過濾(Stage 2A),strategy 不在 dict → 不過濾。跟 ml_filter 互斥。
+        disable_per_strategy_models: per_strategy_ml=True 時若也設 True,每
+            strategy 強制用通用 model(不 load .pkl),但仍套用 STRATEGY_ML_THRESHOLDS
+            dict 當 threshold。給 audit 對比 Stage 2A vs Stage 2B 用。
     """
     if ml_filter is not None and per_strategy_ml:
         raise ValueError("ml_filter 跟 per_strategy_ml 互斥")
@@ -289,7 +293,7 @@ def backtest_all_strategies(
     # 內 fallback 走 ml_model 通用)。一次性 load 11 個 pkl 比每 D × 每 strategy
     # 重 load 划算。
     per_strategy_models: dict[str, object] = {}
-    if per_strategy_ml:
+    if per_strategy_ml and not disable_per_strategy_models:
         from src.ml_predictor import load_strategy_model
         for name in keys:
             per_strategy_models[name] = load_strategy_model(name)
@@ -298,7 +302,13 @@ def backtest_all_strategies(
         # 決定該 strategy 用哪個 threshold
         if per_strategy_ml:
             this_filter = per_strategy_thresholds.get(name)  # None 表示不過濾
-            this_strategy_model = per_strategy_models.get(name)
+            if disable_per_strategy_models:
+                # 強制通用 model:把 ml_model 當 strategy_model 傳;
+                # predict_for_strategy 內 chosen=strategy_model 命中 → 不會
+                # 再 load_strategy_model 從 disk 載 .pkl
+                this_strategy_model = ml_model
+            else:
+                this_strategy_model = per_strategy_models.get(name)
         else:
             this_filter = ml_filter
             this_strategy_model = None

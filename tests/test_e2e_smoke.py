@@ -2267,24 +2267,28 @@ def test_apply_per_strategy_ml_filter_ma_alignment_threshold(isolated_db):
 def test_apply_per_strategy_ml_filter_no_threshold_strategies_unchanged(
     isolated_db,
 ):
-    """命中策略全部不在 STRATEGY_ML_THRESHOLDS 內 → 不過濾(包括 ml_prob=None)。"""
+    """命中策略全部不在 STRATEGY_ML_THRESHOLDS 內 → 不過濾(包括 ml_prob=None)。
+
+    Stage 2B 後 dict 內含 6 個 strategies,沒在 dict 的剩 5 個:volume_kd /
+    ma_squeeze_breakout / inst_consensus / rsi_recovery / inst_silent_accum。
+    """
     import streamlit as st
     import app as _app
 
     st.session_state["high_confidence_mode"] = True
 
     rows = [
-        {  # macd_golden 不在 dict → 不過濾,即使 ml_prob 低
+        {  # volume_kd 不在 dict → 不過濾,即使 ml_prob 低
             "stock_id": "2330", "ml_prob": 0.30,
-            "matched_strategies": ["macd_golden"],
+            "matched_strategies": ["volume_kd"],
         },
-        {  # gap_up 不在 dict
+        {  # rsi_recovery 不在 dict
             "stock_id": "2317", "ml_prob": None,
-            "matched_strategies": ["gap_up"],
+            "matched_strategies": ["rsi_recovery"],
         },
         {  # 多策略全不在 dict
             "stock_id": "1101", "ml_prob": 0.20,
-            "matched_strategies": ["bb_lower_rebound", "rsi_recovery"],
+            "matched_strategies": ["inst_consensus", "inst_silent_accum"],
         },
     ]
     filtered, total = _app._apply_confidence_filter(rows)
@@ -2294,21 +2298,20 @@ def test_apply_per_strategy_ml_filter_no_threshold_strategies_unchanged(
 
 
 def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
-    """pick 同時命中 ma_alignment(0.60)+ macd_golden(無 threshold)→
-    取最嚴格 0.60 套用。"""
+    """pick 同時命中 bias_convergence(0.65)+ ma_alignment(0.60)→ 取最嚴格 0.65 套用。"""
     import streamlit as st
     import app as _app
 
     st.session_state["high_confidence_mode"] = True
 
     rows = [
-        {  # 兩個策略中 ma_alignment 設 0.60 → 0.65 > 0.60,留
-            "stock_id": "2330", "ml_prob": 0.65,
-            "matched_strategies": ["ma_alignment", "macd_golden"],
+        {  # 0.70 ≥ 0.65(strictest) → 留
+            "stock_id": "2330", "ml_prob": 0.70,
+            "matched_strategies": ["bias_convergence", "ma_alignment"],
         },
-        {  # 0.55 < 0.60,過濾(雖然 macd_golden 沒 threshold)
-            "stock_id": "2317", "ml_prob": 0.55,
-            "matched_strategies": ["ma_alignment", "macd_golden"],
+        {  # 0.62 < 0.65 → 過濾(雖然 0.62 ≥ 0.60 ma_alignment threshold)
+            "stock_id": "2317", "ml_prob": 0.62,
+            "matched_strategies": ["bias_convergence", "ma_alignment"],
         },
     ]
     filtered, _ = _app._apply_confidence_filter(rows)
@@ -2334,27 +2337,42 @@ def test_per_strategy_threshold_for_pick_helper(isolated_db):
     """_per_strategy_threshold_for_pick 取最嚴格門檻。"""
     import app as _app
 
-    # ma_alignment 0.60 + macd_golden None → 0.60
+    # bias_convergence 0.65 + ma_alignment 0.60 → 0.65(strictest)
     assert _app._per_strategy_threshold_for_pick(
-        ["ma_alignment", "macd_golden"]
+        ["bias_convergence", "ma_alignment"]
+    ) == 0.65
+    # ma_alignment 0.60 + volume_kd(無 threshold)→ 0.60
+    assert _app._per_strategy_threshold_for_pick(
+        ["ma_alignment", "volume_kd"]
     ) == 0.60
-    # 全 None → None
+    # 全無 threshold → None(rsi_recovery / volume_kd 都不在 dict)
     assert _app._per_strategy_threshold_for_pick(
-        ["macd_golden", "gap_up"]
+        ["rsi_recovery", "volume_kd"]
     ) is None
     # 空 → None
     assert _app._per_strategy_threshold_for_pick([]) is None
 
 
-def test_strategy_ml_thresholds_contains_ma_alignment():
-    """STRATEGY_ML_THRESHOLDS dict 必含 ma_alignment 0.60(Stage 2A 主要落地)。"""
+def test_strategy_ml_thresholds_contains_calibrated_keys():
+    """STRATEGY_ML_THRESHOLDS dict 必含 Stage 2B 校準後的 6 個 thresholds。"""
     from src.strategies import STRATEGY_ML_THRESHOLDS
-    assert STRATEGY_ML_THRESHOLDS.get("ma_alignment") == 0.60
-    # 其他策略 audit 結果都 None — 不該在 dict 內(get 回 None)
-    for s in ("bias_convergence", "macd_golden", "bb_lower_rebound",
-              "rsi_recovery", "volume_breakout", "gap_up"):
+    expected = {
+        "ma_alignment": 0.60,
+        "bias_convergence": 0.65,
+        "macd_golden": 0.60,
+        "bb_lower_rebound": 0.50,
+        "volume_breakout": 0.65,
+        "gap_up": 0.60,
+    }
+    for k, v in expected.items():
+        assert STRATEGY_ML_THRESHOLDS.get(k) == v, (
+            f"{k} threshold 應為 {v},實際 {STRATEGY_ML_THRESHOLDS.get(k)}"
+        )
+    # 沒過 winner / 沒跑的策略不該有 threshold
+    for s in ("rsi_recovery", "volume_kd", "ma_squeeze_breakout",
+              "inst_consensus", "inst_silent_accum"):
         assert STRATEGY_ML_THRESHOLDS.get(s) is None, (
-            f"{s} 不該有 threshold(audit 顯示過濾無效)"
+            f"{s} 不該有 threshold(沒過 winner / sample 太小)"
         )
 
 
@@ -2362,13 +2380,17 @@ def test_routing_strategy_for_pick_returns_strictest_threshold_strategy(isolated
     """_routing_strategy_for_pick 取 STRATEGY_ML_THRESHOLDS 內最嚴格 threshold 對應的 strategy_name。"""
     import app as _app
 
-    # ma_alignment(0.60) 在 dict;macd_golden 不在 → 回 ma_alignment
+    # bias_convergence(0.65) + ma_alignment(0.60) → 回 bias_convergence(strictest)
     assert _app._routing_strategy_for_pick(
-        ["ma_alignment", "macd_golden"]
+        ["bias_convergence", "ma_alignment"]
+    ) == "bias_convergence"
+    # ma_alignment(0.60) + volume_kd(無)→ 回 ma_alignment
+    assert _app._routing_strategy_for_pick(
+        ["ma_alignment", "volume_kd"]
     ) == "ma_alignment"
     # 全不在 dict → 回 None(caller 走 fallback 通用 model)
     assert _app._routing_strategy_for_pick(
-        ["macd_golden", "gap_up"]
+        ["rsi_recovery", "volume_kd"]
     ) is None
     # 空 → None
     assert _app._routing_strategy_for_pick([]) is None
@@ -2457,7 +2479,7 @@ def test_enrich_df_with_ml_prob_per_strategy_falls_back_to_general(
     agg = {
         "2330": {
             "name": "鴻海",
-            "details": {"macd_golden": {}, "gap_up": {}},  # 都不在 dict
+            "details": {"volume_kd": {}, "rsi_recovery": {}},  # 都不在 dict
         },
     }
     df = pd.DataFrame([{"stock_id": "2330", "close": 200.0}])
@@ -2498,9 +2520,9 @@ def test_enrich_df_with_ml_prob_per_strategy_groupby_batches(
     monkeypatch.setattr(ml_predictor, "predict_for_strategy", _fake_predict)
 
     agg = {
-        "2330": {"details": {"ma_alignment": {}}},  # → ma_alignment group
-        "2317": {"details": {"macd_golden": {}}},   # → None group
-        "1101": {"details": {"ma_alignment": {}}},  # → ma_alignment group
+        "2330": {"details": {"ma_alignment": {}}},   # → ma_alignment group
+        "2317": {"details": {"volume_kd": {}}},      # → None group(volume_kd 沒 threshold)
+        "1101": {"details": {"ma_alignment": {}}},   # → ma_alignment group
     }
     df = pd.DataFrame([
         {"stock_id": "2330"},

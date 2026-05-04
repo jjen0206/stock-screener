@@ -126,13 +126,13 @@ def test_load_strategy_model_loads_existing_pkl(monkeypatch, tmp_path):
 
 
 def test_predict_for_strategy_uses_per_strategy_model_when_provided(monkeypatch):
-    """strategy_model 直接傳入 → 用該 model,不 load_strategy_model。"""
+    """strategy_model 直接傳入 → 用該 model 預測,不 load disk pkl。"""
     fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
     monkeypatch.setattr(
         ml_predictor, "extract_features",
         lambda sid, td, db_path=None: dict(fake_features),
     )
-    # load_strategy_model 不應被叫到 — strategy_model 已 inject
+    # load_strategy_model 不該被叫到 — caller 已預載並傳 strategy_model
     monkeypatch.setattr(
         ml_predictor, "load_strategy_model",
         lambda name: pytest.fail(f"load_strategy_model 不應被叫到 (got {name})"),
@@ -150,17 +150,17 @@ def test_predict_for_strategy_uses_per_strategy_model_when_provided(monkeypatch)
     assert out == {"2330": pytest.approx(0.8)}
 
 
-def test_predict_for_strategy_falls_back_to_general_when_no_per_strategy_model(
-    monkeypatch,
-):
-    """strategy_name 給但 .pkl 不存在 → fallback_model 用上。"""
+def test_predict_for_strategy_uses_fallback_when_no_strategy_model(monkeypatch):
+    """strategy_model=None → 直接用 fallback_model(不 disk load,不再 auto-load
+    避免 N×N 次 IO)。"""
     fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
     monkeypatch.setattr(
         ml_predictor, "extract_features",
         lambda sid, td, db_path=None: dict(fake_features),
     )
     monkeypatch.setattr(
-        ml_predictor, "load_strategy_model", lambda name: None,
+        ml_predictor, "load_strategy_model",
+        lambda name: pytest.fail(f"strategy_model=None 時不該觸發 disk load (got {name})"),
     )
     fallback = _FakeModel(classes=(0, 1), proba_per_row=[[0.4, 0.6]])
 
@@ -173,10 +173,8 @@ def test_predict_for_strategy_falls_back_to_general_when_no_per_strategy_model(
     assert out == {"2330": pytest.approx(0.6)}
 
 
-def test_predict_for_strategy_returns_all_none_when_no_models_at_all(monkeypatch):
-    """strategy_name 給但 pkl 不存在 + fallback_model=None → 全 None。"""
-    monkeypatch.setattr(ml_predictor, "load_strategy_model", lambda name: None)
-
+def test_predict_for_strategy_returns_all_none_when_no_models_at_all():
+    """strategy_model=None + fallback_model=None → 全 None(不 raise)。"""
     out = ml_predictor.predict_for_strategy(
         strategy_name="missing_strat",
         stock_ids=["2330", "2317"],
@@ -187,15 +185,11 @@ def test_predict_for_strategy_returns_all_none_when_no_models_at_all(monkeypatch
 
 
 def test_predict_for_strategy_with_no_strategy_name_uses_fallback(monkeypatch):
-    """strategy_name=None → 跳過 per-strategy 直接用 fallback_model。"""
+    """strategy_name=None → 直接 fallback_model。"""
     fake_features = {f: 0.0 for f in ml_predictor.FEATURE_NAMES}
     monkeypatch.setattr(
         ml_predictor, "extract_features",
         lambda sid, td, db_path=None: dict(fake_features),
-    )
-    monkeypatch.setattr(
-        ml_predictor, "load_strategy_model",
-        lambda name: pytest.fail(f"不應 load_strategy_model (got {name})"),
     )
     fallback = _FakeModel(classes=(0, 1), proba_per_row=[[0.4, 0.6]])
 
