@@ -252,6 +252,27 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_daily_picks_lookup "
     "ON daily_picks(trade_date, universe, params_hash)",
+    # strategy_backtest:每週一 nightly 跑 N=126 日歷史回測,對每個 strategy
+    # 統計命中數 / 勝率 / 平均報酬。App 端用 load_latest_strategy_backtest
+    # 拿 {strategy: win_rate},算每張 pick 命中策略的算術平均 → 卡片勝率欄。
+    """
+    CREATE TABLE IF NOT EXISTS strategy_backtest (
+        strategy       TEXT NOT NULL,
+        period_end     DATE NOT NULL,
+        lookback_days  INTEGER NOT NULL,
+        target_pct     REAL NOT NULL,
+        stop_pct       REAL NOT NULL,
+        hold_days      INTEGER NOT NULL,
+        n_fires        INTEGER NOT NULL,
+        n_wins         INTEGER NOT NULL,
+        win_rate       REAL NOT NULL,
+        avg_return     REAL,
+        computed_at    TEXT NOT NULL,
+        PRIMARY KEY (strategy, period_end)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sb_period "
+    "ON strategy_backtest(period_end)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -1161,6 +1182,86 @@ def clear_daily_picks_for_date(
         return cur.rowcount
 
 
+# === strategy_backtest:歷史回測勝率(週一 nightly 跑) ===
+
+def dump_strategy_backtest(
+    rows: list[dict],
+    db_path: str | Path | None = None,
+) -> int:
+    """bulk insert strategy_backtest 結果,ON CONFLICT REPLACE。
+
+    rows 每筆需含:strategy, period_end, lookback_days, target_pct, stop_pct,
+    hold_days, n_fires, n_wins, win_rate, avg_return(可 None),computed_at。
+
+    回 inserted row count。
+    """
+    if not rows:
+        return 0
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO strategy_backtest (
+                strategy, period_end, lookback_days, target_pct, stop_pct,
+                hold_days, n_fires, n_wins, win_rate, avg_return, computed_at
+            ) VALUES (
+                :strategy, :period_end, :lookback_days, :target_pct, :stop_pct,
+                :hold_days, :n_fires, :n_wins, :win_rate, :avg_return, :computed_at
+            )
+            ON CONFLICT(strategy, period_end) DO UPDATE SET
+                lookback_days=excluded.lookback_days,
+                target_pct=excluded.target_pct, stop_pct=excluded.stop_pct,
+                hold_days=excluded.hold_days,
+                n_fires=excluded.n_fires, n_wins=excluded.n_wins,
+                win_rate=excluded.win_rate, avg_return=excluded.avg_return,
+                computed_at=excluded.computed_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def load_latest_strategy_backtest(
+    db_path: str | Path | None = None,
+) -> dict[str, float]:
+    """回 {strategy_name: win_rate},每個 strategy 取最新 period_end 的 win_rate。
+
+    給 App 端 _enrich_with_win_rate 用 — 不論 backtest 跑過多少次,只看最新。
+    無資料 → 空 dict。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT strategy, win_rate FROM strategy_backtest
+            WHERE (strategy, period_end) IN (
+                SELECT strategy, MAX(period_end) FROM strategy_backtest
+                GROUP BY strategy
+            )
+            """
+        ).fetchall()
+    return {r["strategy"]: float(r["win_rate"]) for r in rows}
+
+
+def load_strategy_backtest_for_period(
+    period_end: str,
+    db_path: str | Path | None = None,
+):
+    """撈某個 period_end 的全部 strategy 結果,回 pd.DataFrame(空表回空 DataFrame)。"""
+    import pandas as _pd
+
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM strategy_backtest WHERE period_end=? "
+            "ORDER BY win_rate DESC",
+            (period_end,),
+        ).fetchall()
+    if not rows:
+        return _pd.DataFrame()
+    return _pd.DataFrame([dict(r) for r in rows])
+
+
 # === Trades / P&L tracking ===
 
 def add_trade(
@@ -1328,5 +1429,8 @@ __all__ = [
     "dump_daily_picks",
     "load_daily_picks",
     "clear_daily_picks_for_date",
+    "dump_strategy_backtest",
+    "load_latest_strategy_backtest",
+    "load_strategy_backtest_for_period",
     "SCHEMA",
 ]
