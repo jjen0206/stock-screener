@@ -154,32 +154,103 @@ def render_pick_card(
                 args=(sid,),
             )
 
-        # 詳細分析 expander(無條件顯示 — 推薦卡 / watchlist 卡都有)
-        # 預設收合,點開才執行 5 個 helper → 不影響清單初次渲染速度。
-        # 4 個技術 section 跟個股頁同一份 helper,展開後數值跟個股頁一致。
-        # 第 5 個 section(公司資訊)是 cache-only,不主動跑 LLM(避免 138
-        # picks 全展開時打爆 Gemini quota)。想生成走個股頁。
-        with st.expander("📊 詳細分析", expanded=False):
-            from src.individual_sections import (
-                _render_action_suggestion,
-                _render_company_info_compact,
-                _render_key_levels,
-                _render_main_force_signal,
-                _render_technical_summary,
-            )
-            _render_main_force_signal(sid)
-            _render_technical_summary(sid)
-            _render_key_levels(sid)
-            _render_action_suggestion(sid)
-            # button_key_prefix 帶進 helper — 5 tabs UI 同 sid 可能出現在
-            # 「全部」+ 「趨勢」兩個 tab,各自 prefix 區隔避免 key 撞
-            _render_company_info_compact(sid, key_prefix=button_key_prefix)
+        # 詳細分析(真 lazy — 點按鈕才 render 5 helper)
+        #
+        # 為什麼不用 st.expander(expanded=False):streamlit 的 expander
+        # body **永遠執行**(只是 CSS 收起 UI),138 picks × 8 SQL =
+        # ~1100 queries 打 SQLite,cold load 8-15 秒。
+        # 改用 session_state flag + 條件 render — 收起時完全不跑 helper。
+        _render_lazy_detail_section(sid, button_key_prefix)
+
+
+def _render_lazy_detail_section(sid: str, button_key_prefix: str) -> None:
+    """卡片底部「詳細分析」區塊 — 真 lazy(session_state flag + 條件 render)。
+
+    收起狀態:只渲染「📊 展開詳細分析」按鈕(0 SQL)
+    展開狀態:渲染 5 個 helper section + 「🔼 收起」按鈕
+
+    flag key 帶 button_key_prefix + sid → 5 tabs UI 同 sid 可在
+    「全部」/「趨勢」分別開合,互不干擾。
+    """
+    flag_key = f"card_exp_{button_key_prefix}_{sid}"
+    is_expanded = st.session_state.get(flag_key, False)
+
+    if not is_expanded:
+        if st.button(
+            "📊 展開詳細分析",
+            key=f"open_{flag_key}",
+            use_container_width=True,
+            help="點開才會跑技術分析 / 主力燈號 / 公司資訊(避免清單 cold load 慢)",
+        ):
+            st.session_state[flag_key] = True
+            st.rerun()
+        return
+
+    # 展開:render 5 sections
+    from src.individual_sections import (
+        _render_action_suggestion,
+        _render_company_info_compact,
+        _render_key_levels,
+        _render_main_force_signal,
+        _render_technical_summary,
+    )
+    with st.container(border=True):
+        _render_main_force_signal(sid)
+        _render_technical_summary(sid)
+        _render_key_levels(sid)
+        _render_action_suggestion(sid)
+        # button_key_prefix 帶進 helper — 5 tabs UI 同 sid 可能出現在
+        # 「全部」+ 「趨勢」兩個 tab,各自 prefix 區隔避免 key 撞
+        _render_company_info_compact(sid, key_prefix=button_key_prefix)
+        if st.button(
+            "🔼 收起",
+            key=f"close_{flag_key}",
+            use_container_width=True,
+        ):
+            st.session_state[flag_key] = False
+            st.rerun()
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
     """批次渲染多張卡片。"""
     for row in rows:
         render_pick_card(row, **kwargs)
+
+
+def render_picks_cards_paginated(
+    rows: list[dict],
+    state_key: str,
+    page_size: int = 10,
+    **kwargs: Any,
+) -> None:
+    """分頁版:預設只 render 前 page_size 張,「載入更多」按鈕 +page_size。
+
+    cold load 不跑滿 — 短線 138 picks 只 render 10 張,user 想看更多自己點。
+    state_key 必須跨 caller 唯一(e.g. "short_全部" / "watchlist" / "long")
+    避免 5 tabs / 多頁面 session_state 撞。
+
+    其他 kwargs 直接傳給 render_pick_card。
+    """
+    if not rows:
+        return
+    total = len(rows)
+    shown_key = f"{state_key}_shown"
+    shown = st.session_state.get(shown_key, page_size)
+    shown = min(shown, total)
+
+    for row in rows[:shown]:
+        render_pick_card(row, **kwargs)
+
+    if shown < total:
+        if st.button(
+            f"📜 載入更多({total - shown} 檔未顯示)",
+            key=f"{state_key}_load_more",
+            use_container_width=True,
+        ):
+            st.session_state[shown_key] = shown + page_size
+            st.rerun()
+    else:
+        st.caption(f"✅ 已顯示全部 {total} 檔")
 
 
 def add_to_watchlist_inline_button(stock_id: str, key: str) -> None:
@@ -213,5 +284,6 @@ def view_mode_toggle(
 __all__ = [
     "render_pick_card",
     "render_picks_cards",
+    "render_picks_cards_paginated",
     "view_mode_toggle",
 ]

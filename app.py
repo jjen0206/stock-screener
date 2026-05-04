@@ -46,7 +46,9 @@ from src.market_sentiment import (
 )
 from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS
-from src.ui_cards import render_picks_cards, view_mode_toggle
+from src.ui_cards import (
+    render_picks_cards, render_picks_cards_paginated, view_mode_toggle,
+)
 from src.strategies import (
     DEFAULT_BIAS_PARAMS,
     DEFAULT_BB_REBOUND_PARAMS,
@@ -992,8 +994,10 @@ def _page_short() -> None:
         view_mode = view_mode_toggle("short_view_mode")
 
         if view_mode == "🃏 卡片":
-            render_picks_cards(
+            render_picks_cards_paginated(
                 df.to_dict("records"),
+                state_key="short_全部",
+                page_size=10,
                 show_add_button=True, button_key_prefix="short",
             )
         else:
@@ -1050,8 +1054,10 @@ def _page_short() -> None:
                 st.info(f"📭 此分類本日無入選。")
                 continue
             sub_df = aggregated_to_dataframe(sub_agg)
-            render_picks_cards(
+            render_picks_cards_paginated(
                 sub_df.to_dict("records"),
+                state_key=f"short_{cat}",
+                page_size=10,
                 show_add_button=True,
                 button_key_prefix=f"short_{cat}",
             )
@@ -2840,8 +2846,9 @@ def _page_watchlist() -> None:
                     "risk_reward": tp.get("risk_reward"),
                 })
             cards.append(card)
-        render_picks_cards(
-            cards, show_signal=False, show_targets=True, show_change=True,
+        render_picks_cards_paginated(
+            cards, state_key="watchlist", page_size=10,
+            show_signal=False, show_targets=True, show_change=True,
         )
     else:
         selection = st.dataframe(

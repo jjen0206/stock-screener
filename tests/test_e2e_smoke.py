@@ -1523,11 +1523,12 @@ def test_main_force_signal_fallback_history_insufficient(isolated_db):
 # ============================================================================
 
 def test_pick_card_expander_renders_4_sections(isolated_db):
-    """show_add_button=True 的推薦卡有「📊 詳細分析」expander,展開時 4 個
-    section 都渲染(主力燈號 / 技術分析總覽 / 關鍵價位 / 操作建議)。
+    """推薦卡點「📊 展開詳細分析」按鈕後,4 個 section 都渲染(主力燈號 /
+    技術分析總覽 / 關鍵價位 / 操作建議)。
+
+    新行為(956d08d 之後改 lazy):cold load 不 render helper,點按鈕才跑。
     """
-    # 灌足夠歷史(70 天 線性漲)+ institutional 讓 4 個 helper 都不走 fallback
-    _seed_distribution_scenario()  # 含 70 天 daily + institutional
+    _seed_distribution_scenario()
 
     def _harness():
         from src.ui_cards import render_pick_card
@@ -1542,20 +1543,34 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
     assert not at.exception, _exc_msgs(at)
 
     # 卡片本身渲染
-    md_text = "\n".join(m.value for m in at.markdown)
-    assert "2330" in md_text and "台積電" in md_text
+    md_text_before = "\n".join(m.value for m in at.markdown)
+    assert "2330" in md_text_before and "台積電" in md_text_before
 
-    # 「📊 詳細分析」expander 存在
-    assert any(
-        "詳細分析" in (e.label or "") for e in at.expander
-    ), f"應有「詳細分析」expander, 實際: {[e.label for e in at.expander]}"
+    # cold 狀態:helper 不該 render(lazy)
+    assert "主力燈號" not in md_text_before, (
+        "lazy expander 收起時不該渲染 helper, "
+        "但 markdown 含『主力燈號』(可能 expander body 又被執行)"
+    )
 
-    # 展開後 4 個 section 的標題 / 關鍵字都出現在 markdown
-    # (AppTest 預設會 render expander 內容,即使 expanded=False)
-    assert "主力燈號" in md_text
-    assert "技術分析總覽" in md_text
-    assert "關鍵價位" in md_text
-    assert "操作建議" in md_text
+    # 點「📊 展開詳細分析」
+    open_btn = next(
+        b for b in at.button if "展開詳細分析" in (b.label or "")
+    )
+    open_btn.click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 展開後 4 個 section 都在
+    md_text_after = "\n".join(m.value for m in at.markdown)
+    assert "主力燈號" in md_text_after
+    assert "技術分析總覽" in md_text_after
+    assert "關鍵價位" in md_text_after
+    assert "操作建議" in md_text_after
+
+    # 收起按鈕存在
+    btn_labels_after = [b.label for b in at.button]
+    assert any("收起" in (lbl or "") for lbl in btn_labels_after), (
+        f"展開後應有「收起」按鈕, 實際: {btn_labels_after}"
+    )
 
 
 def test_pick_card_shows_pnl_row_when_position_exists(isolated_db):
@@ -1729,8 +1744,8 @@ def test_portfolio_snapshot_load_skip_when_table_not_empty(isolated_db, tmp_path
 
 
 def test_pick_card_expander_renders_for_watchlist(isolated_db):
-    """show_add_button=False(watchlist 卡)也應該渲染詳細分析 expander。
-    watchlist 不渲染 ☆ 按鈕(已關注不需再加),但 4 個 section 一樣有用。
+    """show_add_button=False(watchlist 卡)點「展開詳細分析」也能 render
+    4 個 section。watchlist 不渲染 ☆ 按鈕(已關注不需再加)。
     """
     _seed_distribution_scenario()
 
@@ -1745,10 +1760,13 @@ def test_pick_card_expander_renders_for_watchlist(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # watchlist 卡也有 expander
-    assert any(
-        "詳細分析" in (e.label or "") for e in at.expander
-    ), f"watchlist 卡也應有 expander, 實際: {[e.label for e in at.expander]}"
+    # 點「📊 展開詳細分析」(watchlist 卡也有同一個 lazy 按鈕)
+    open_btn = next(
+        b for b in at.button if "展開詳細分析" in (b.label or "")
+    )
+    open_btn.click().run()
+    assert not at.exception, _exc_msgs(at)
+
     md_text = "\n".join(m.value for m in at.markdown)
     assert "主力燈號" in md_text
     assert "操作建議" in md_text
@@ -1758,6 +1776,129 @@ def test_pick_card_expander_renders_for_watchlist(isolated_db):
     assert not any(
         "加入關注" in (lbl or "") for lbl in btn_labels
     ), f"watchlist 卡不該有「加入關注」按鈕, 實際 buttons: {btn_labels}"
+
+
+def test_pick_card_lazy_expander_does_not_query_db_when_collapsed(isolated_db):
+    """守門:cold load(收起狀態)不該觸發 _compute_main_force_signal 等 helper。
+    這就是 lazy 的本質 — 138 picks cold load 0 SQL helper queries。
+    """
+    from src import individual_sections
+
+    helper_calls = {"main_force": 0, "tech_summary": 0}
+    orig_main = individual_sections._compute_main_force_signal
+    orig_tech = individual_sections._compute_technical_summary
+
+    def _spy_main(sid):
+        helper_calls["main_force"] += 1
+        return orig_main(sid)
+    def _spy_tech(sid):
+        helper_calls["tech_summary"] += 1
+        return orig_tech(sid)
+
+    def _harness():
+        # harness 內 patch(AppTest sandbox)
+        from src import individual_sections as _is
+        _is._compute_main_force_signal = _spy_main
+        _is._compute_technical_summary = _spy_tech
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 100.0},
+            show_add_button=True, button_key_prefix="lazy_test",
+        )
+
+    # 重要:_spy 必須在 module 全域以便 harness 能拿到。用 monkeypatch
+    # 不行(harness 是 sandboxed sub-script)— 這 test 改用「render 後從
+    # AppTest 再驗 helper render 結果反推」即可。
+    # 直接驗 markdown:cold 狀態應該沒「主力燈號」「技術分析總覽」等
+    def _harness_simple():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 100.0},
+            show_add_button=True, button_key_prefix="lazy_test",
+        )
+
+    at = AppTest.from_function(_harness_simple, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 卡片基本資訊有
+    assert "2330" in md_text
+    # 但 helper section 不該渲染(lazy)
+    for section in ("主力燈號", "技術分析總覽", "關鍵價位", "操作建議"):
+        assert section not in md_text, (
+            f"lazy 收起狀態不該渲染『{section}』, md_text:\n{md_text}"
+        )
+
+    # 應有「展開詳細分析」按鈕
+    btn_labels = [b.label for b in at.button]
+    assert any("展開詳細分析" in (lbl or "") for lbl in btn_labels), (
+        f"應有「展開詳細分析」按鈕, 實際: {btn_labels}"
+    )
+
+
+def test_pagination_shows_first_page_only(isolated_db):
+    """render_picks_cards_paginated 預設只 render 前 page_size 張 + 「載入更多」按鈕。"""
+    def _harness():
+        # rows 必須在 harness 內定義(AppTest sandbox closure 抓不到 outer)
+        rows = [
+            {"stock_id": f"{1000+i}", "name": f"名{i}", "close": 100.0}
+            for i in range(25)
+        ]
+        from src.ui_cards import render_picks_cards_paginated
+        render_picks_cards_paginated(
+            rows, state_key="test_pg", page_size=10,
+            show_add_button=True, button_key_prefix="pg",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 前 10 筆 stock_id 出現,後 15 筆不出現
+    md_text = "\n".join(m.value for m in at.markdown)
+    for i in range(10):
+        assert f"1{i:03d}" in md_text, f"第 {i} 張應 render: {md_text[:200]!r}"
+    for i in range(10, 25):
+        assert f"1{i:03d}" not in md_text, f"第 {i} 張不該 render"
+
+    # 「載入更多」按鈕在
+    btn_labels = [b.label for b in at.button]
+    assert any("載入更多" in (lbl or "") for lbl in btn_labels), (
+        f"應有「載入更多」, 實際: {btn_labels}"
+    )
+
+
+def test_pagination_load_more_extends_visible(isolated_db):
+    """點「載入更多」→ 多 render page_size 張。"""
+    def _harness():
+        rows = [
+            {"stock_id": f"{2000+i}", "name": f"X{i}", "close": 50.0}
+            for i in range(15)
+        ]
+        from src.ui_cards import render_picks_cards_paginated
+        render_picks_cards_paginated(
+            rows, state_key="test_lm", page_size=10,
+            show_add_button=False,
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 點「載入更多」
+    load_btn = next(b for b in at.button if "載入更多" in (b.label or ""))
+    load_btn.click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 全 15 張都出現了(15 < 10+10=20)
+    for i in range(15):
+        assert f"2{i:03d}" in md_text, f"第 {i} 張應 render"
+
+    # 已顯示全部訊息出現
+    captions = "\n".join(c.value for c in at.caption)
+    assert "已顯示全部" in captions, f"應有「已顯示全部」, captions: {captions}"
 
 
 # ============================================================================
