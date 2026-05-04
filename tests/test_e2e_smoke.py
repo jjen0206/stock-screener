@@ -211,6 +211,81 @@ def test_short_screen_renders_picks_without_exception(
     )
 
 
+def test_short_page_keeps_picks_after_expander_click(isolated_db, monkeypatch):
+    """**Critical regression** — 用戶點 picks 卡的「展開詳細分析」後,短線
+    頁不該退回「請選擇選股」初始畫面(原 bug:`submit = button("執行選股")`
+    edge-trigger,rerun 後變 False → `if not submit: return` → 退頁)。
+
+    修法:short_submitted session_state 黏住,rerun 後仍能 render picks。
+    """
+    from src import database as db, strategies
+
+    db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
+
+    fake_agg = {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD"],
+            "details": {"volume_kd": {
+                "stock_id": "2330", "name": "台積電",
+                "close": 600.0, "atr14": 12.0,
+            }},
+        },
+    }
+    monkeypatch.setattr(
+        strategies, "run_all_strategies", lambda *a, **kw: fake_agg,
+    )
+    monkeypatch.setattr(
+        strategies, "compute_target_prices",
+        lambda sids, **kw: {sid: {
+            "target_low": 610.0, "target_high": 620.0,
+            "stop_loss": 580.0, "risk_reward": 1.5,
+        } for sid in sids},
+    )
+
+    at = _new_at("🔥 短線")
+    at.run()
+    at.selectbox[0].set_value("快速:50 檔大型股").run()
+
+    # Step 1: 執行選股 → picks 出現
+    submit = next(b for b in at.button if b.label == "執行選股")
+    submit.click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text_after_submit = "\n".join(m.value for m in at.markdown)
+    assert "2330" in md_text_after_submit, (
+        f"執行選股後應 render 2330 卡片, md_text:\n{md_text_after_submit[:500]}"
+    )
+
+    # Step 2: 點「展開詳細分析」(觸發 rerun → 原本會 reset,現在不該)
+    expand_btns = [
+        b for b in at.button if "展開詳細分析" in (b.label or "")
+    ]
+    assert expand_btns, (
+        f"應有「展開詳細分析」按鈕, 實際: {[b.label for b in at.button]}"
+    )
+    expand_btns[0].click().run()
+    assert not at.exception, _exc_msgs(at)
+
+    # Step 3: assert page 還在短線 + picks 還在(沒退回「請選擇選股」)
+    assert at.session_state["active_page"] == "🔥 短線", (
+        f"page state 不該被 reset, 實際: {at.session_state.get('active_page')}"
+    )
+    md_text_after_expand = "\n".join(m.value for m in at.markdown)
+    assert "2330" in md_text_after_expand, (
+        f"展開後 picks 不該消失, md_text:\n{md_text_after_expand[:500]}"
+    )
+    # 「請選擇選股」初始 info 不該出現
+    info_text = "\n".join(str(i.value) for i in at.info)
+    assert "選好參數後按" not in info_text, (
+        f"短線頁不該退回初始畫面, info: {info_text}"
+    )
+    # 展開後該張卡片有 helper 內容(主力燈號等)
+    assert "主力燈號" in md_text_after_expand or "歷史不足" in md_text_after_expand, (
+        f"展開應 render helper section, md_text:\n{md_text_after_expand[:500]}"
+    )
+
+
 def test_short_star_button_adds_clicked_stock_id_not_another(
     isolated_db, monkeypatch
 ):

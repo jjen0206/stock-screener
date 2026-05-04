@@ -163,6 +163,18 @@ def render_pick_card(
         _render_lazy_detail_section(sid, button_key_prefix)
 
 
+def _toggle_expander(flag_key: str) -> None:
+    """on_click callback — 翻轉 expander 開合狀態。
+
+    用 callback 而非 `if st.button(): st.rerun()` 模式 — streamlit
+    callback 會在 rerun 「之前」執行,所有 widget state(含其他 page
+    selector)透過 widget key 自動 persist,不會 leak。
+    `st.rerun()` 顯式呼叫沒這保證,且容易跟其他 button 的 edge-trigger
+    互動產生 race(實測會把 _page_short 的 submit 狀態 reset)。
+    """
+    st.session_state[flag_key] = not st.session_state.get(flag_key, False)
+
+
 def _render_lazy_detail_section(sid: str, button_key_prefix: str) -> None:
     """卡片底部「詳細分析」區塊 — 真 lazy(session_state flag + 條件 render)。
 
@@ -171,19 +183,23 @@ def _render_lazy_detail_section(sid: str, button_key_prefix: str) -> None:
 
     flag key 帶 button_key_prefix + sid → 5 tabs UI 同 sid 可在
     「全部」/「趨勢」分別開合,互不干擾。
+
+    按鈕走 on_click callback 而非 `if st.button(): rerun()` — 後者會把
+    其他 widget 的 edge-trigger button(e.g. 短線頁的「執行選股」)的
+    True 狀態吃掉,造成 page reset 假象。
     """
     flag_key = f"card_exp_{button_key_prefix}_{sid}"
     is_expanded = st.session_state.get(flag_key, False)
 
     if not is_expanded:
-        if st.button(
+        st.button(
             "📊 展開詳細分析",
             key=f"open_{flag_key}",
             use_container_width=True,
             help="點開才會跑技術分析 / 主力燈號 / 公司資訊(避免清單 cold load 慢)",
-        ):
-            st.session_state[flag_key] = True
-            st.rerun()
+            on_click=_toggle_expander,
+            args=(flag_key,),
+        )
         return
 
     # 展開:render 5 sections
@@ -202,19 +218,26 @@ def _render_lazy_detail_section(sid: str, button_key_prefix: str) -> None:
         # button_key_prefix 帶進 helper — 5 tabs UI 同 sid 可能出現在
         # 「全部」+ 「趨勢」兩個 tab,各自 prefix 區隔避免 key 撞
         _render_company_info_compact(sid, key_prefix=button_key_prefix)
-        if st.button(
+        st.button(
             "🔼 收起",
             key=f"close_{flag_key}",
             use_container_width=True,
-        ):
-            st.session_state[flag_key] = False
-            st.rerun()
+            on_click=_toggle_expander,
+            args=(flag_key,),
+        )
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
     """批次渲染多張卡片。"""
     for row in rows:
         render_pick_card(row, **kwargs)
+
+
+def _load_more(shown_key: str, page_size: int) -> None:
+    """on_click callback — 多顯示 page_size 張卡片(避免 st.rerun 衝撞 edge-triggered button)。"""
+    st.session_state[shown_key] = (
+        st.session_state.get(shown_key, page_size) + page_size
+    )
 
 
 def render_picks_cards_paginated(
@@ -229,6 +252,9 @@ def render_picks_cards_paginated(
     state_key 必須跨 caller 唯一(e.g. "short_全部" / "watchlist" / "long")
     避免 5 tabs / 多頁面 session_state 撞。
 
+    「載入更多」走 on_click callback,不用 `if button(): rerun()` 模式
+    (後者跟其他 edge-triggered button 互動時會把對方狀態吃掉)。
+
     其他 kwargs 直接傳給 render_pick_card。
     """
     if not rows:
@@ -242,13 +268,13 @@ def render_picks_cards_paginated(
         render_pick_card(row, **kwargs)
 
     if shown < total:
-        if st.button(
+        st.button(
             f"📜 載入更多({total - shown} 檔未顯示)",
             key=f"{state_key}_load_more",
             use_container_width=True,
-        ):
-            st.session_state[shown_key] = shown + page_size
-            st.rerun()
+            on_click=_load_more,
+            args=(shown_key, page_size),
+        )
     else:
         st.caption(f"✅ 已顯示全部 {total} 檔")
 

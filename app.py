@@ -837,7 +837,15 @@ def _page_short() -> None:
         )
     )
 
-    if not submit:
+    # **st.button() 是 edge-triggered**:只在被點的那一輪 rerun 回 True。
+    # picks 卡片內的 lazy expander / 載入更多按鈕 → 觸發 rerun → submit
+    # 變 False → 短線頁退回「請選擇選股」初始畫面。
+    # 修:把 submit 狀態 + 上次參數寫進 session_state,rerun 後可恢復。
+    if submit:
+        st.session_state["short_submitted"] = True
+        st.session_state["short_last_target_date"] = target_date.isoformat()
+        st.session_state["short_last_universe"] = universe_choice
+    if not st.session_state.get("short_submitted"):
         st.info(
             "選好參數後按「執行選股」。\n\n"
             "全市場 / TOP 50 走 GH Actions 每日更新的 SQLite 快取,秒級回應;"
