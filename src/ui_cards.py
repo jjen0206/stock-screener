@@ -230,6 +230,7 @@ def render_pick_card(
     stop_loss = row.get("stop_loss") if show_targets else None
     risk_reward = row.get("risk_reward") if show_targets else None
     win_rate = row.get("win_rate")  # Phase B 加;Phase A 通常 None
+    ml_prob = row.get("ml_prob")    # Stage 1 加;雲端 enrich 後有值
 
     with st.container(border=True):
         # Row 1 + Row 2(整段 HTML 一次吐出 — 省 streamlit widget tree)
@@ -283,14 +284,14 @@ def render_pick_card(
             with r3_cols[1]:
                 _render_lazy_detail_section_compact(sid, button_key_prefix)
             with r3_cols[2]:
-                _render_card_metadata(n_signals, risk_reward)
+                _render_card_metadata(n_signals, risk_reward, ml_prob=ml_prob)
         else:
             # 沒 add button(watchlist 卡 / 表格附帶卡)— 只 render 詳細 + metadata
             r3_cols = st.columns([1, 1])
             with r3_cols[0]:
                 _render_lazy_detail_section_compact(sid, button_key_prefix)
             with r3_cols[1]:
-                _render_card_metadata(n_signals, risk_reward)
+                _render_card_metadata(n_signals, risk_reward, ml_prob=ml_prob)
 
         # 展開詳細分析「打開」狀態時,full helper section 還是要在 button 之外
         # render(button 觸發後 flag=True,下一輪 rerun render 完整 section)
@@ -321,8 +322,21 @@ def _render_watchlist_toggle_button(sid: str, button_key_prefix: str) -> None:
         )
 
 
-def _render_card_metadata(n_signals: int, risk_reward: float | None) -> None:
-    """卡片 row 3 右側 metadata — 信號數 · R:R(secondary 11px caption)。"""
+def _render_card_metadata(
+    n_signals: int,
+    risk_reward: float | None,
+    ml_prob: float | None = None,
+) -> None:
+    """卡片 row 3 右側 metadata — 信號數 · R:R · 🤖 ML 機率。
+
+    ml_prob 染色(高 = 好,台股慣例好 = 紅):
+    - >= 0.70 → 紅 #d62728
+    - 0.60-0.70 → 灰 #888888
+    - < 0.60 → 綠 #2ca02c
+    None / NaN → 顯「🤖 —」灰
+
+    用 markdown(unsafe_allow_html=True)而非 st.caption 才能上色。
+    """
     parts: list[str] = []
     if n_signals > 0:
         parts.append("熱門" if n_signals >= 2 else f"{n_signals} 訊號")
@@ -331,8 +345,38 @@ def _render_card_metadata(n_signals: int, risk_reward: float | None) -> None:
             parts.append(f"R:R {float(risk_reward):.1f}")
         except (TypeError, ValueError):
             pass
-    if parts:
-        st.caption(" · ".join(parts))
+
+    # ML 機率
+    ml_html = ""
+    if ml_prob is None or (
+        isinstance(ml_prob, float) and ml_prob != ml_prob  # NaN
+    ):
+        ml_html = "<span style='color:#888'>🤖 —</span>"
+    else:
+        try:
+            p = float(ml_prob)
+            if p >= 0.70:
+                ml_color = "#d62728"  # 紅(高,好)
+            elif p >= 0.60:
+                ml_color = "#888888"  # 灰
+            else:
+                ml_color = "#2ca02c"  # 綠(低,差)
+            ml_html = (
+                f"<span style='color:{ml_color}'>🤖 {p * 100:.0f}%</span>"
+            )
+        except (TypeError, ValueError):
+            ml_html = "<span style='color:#888'>🤖 —</span>"
+
+    if parts or ml_html:
+        text_parts = parts.copy()
+        if ml_html:
+            text_parts.append(ml_html)
+        st.markdown(
+            f"<div style='font-size:11px;color:#888'>"
+            + " · ".join(text_parts)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_lazy_detail_section_compact(sid: str, button_key_prefix: str) -> None:

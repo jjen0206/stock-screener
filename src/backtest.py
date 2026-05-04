@@ -111,6 +111,8 @@ def backtest_strategy(
     stop_pct: float = 0.03,
     hold_days: int = 5,
     params: dict | None = None,
+    ml_filter: float | None = None,
+    ml_model=None,
 ) -> dict:
     """跑單一 strategy 在過去 lookback_days 日的回測。
 
@@ -176,11 +178,24 @@ def backtest_strategy(
         if df is None or df.empty:
             continue
 
+        # ML 過濾(如果指定):對該 D 的所有 picks 一次 batch predict_proba
+        ml_probs_for_d: dict[str, float | None] = {}
+        if ml_filter is not None and ml_model is not None:
+            from src.ml_predictor import predict_batch
+            sids_for_pred = [str(r["stock_id"]) for _, r in df.iterrows()]
+            ml_probs_for_d = predict_batch(ml_model, sids_for_pred, D)
+
         for _, pick_row in df.iterrows():
             sid = str(pick_row["stock_id"])
             entry_price = float(pick_row.get("close", 0) or 0)
             if entry_price <= 0:
                 continue
+
+            # ML filter:prob >= filter 才算 fire(None 視為過濾掉)
+            if ml_filter is not None:
+                prob = ml_probs_for_d.get(sid)
+                if prob is None or prob < ml_filter:
+                    continue
 
             sid_df = prices_by_sid.get(sid)
             if sid_df is None or sid_df.empty:
@@ -222,15 +237,32 @@ def backtest_all_strategies(
     hold_days: int = 5,
     params: dict | None = None,
     strategies: Iterable[str] | None = None,
+    ml_filter: float | None = None,
 ) -> list[dict]:
     """跑全部(或指定子集)strategies — 回 list[dict] 餵 db.dump_strategy_backtest。
 
     Args:
         strategies: None = 跑 ALL_STRATEGIES 全 11 套;否則 subset
+        ml_filter: 若 != None,只 count 那些 ML prob >= 該值的 picks 進 fires
+            (給 with-ML 對比 baseline 驗證用)。Model 在 caller 之前載入並傳
+            給每 strategy(避免每 strategy 重 load 一次)。
     """
     keys = list(strategies) if strategies else list(ALL_STRATEGIES.keys())
     computed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     results: list[dict] = []
+
+    # 如果要 ML filter,先 load model 一次(後面每 strategy 共用)
+    ml_model = None
+    if ml_filter is not None:
+        try:
+            from src import config as _config
+            from src.ml_predictor import load_model
+            from pathlib import Path as _Path
+            model_path = _Path(_config.PROJECT_ROOT) / "models" / "short_pick.pkl"
+            if model_path.exists():
+                ml_model = load_model(model_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[BACKTEST] ML model load 失敗: %s", e)
 
     for name in keys:
         stats = backtest_strategy(
@@ -238,6 +270,7 @@ def backtest_all_strategies(
             lookback_days=lookback_days,
             target_pct=target_pct, stop_pct=stop_pct,
             hold_days=hold_days, params=params,
+            ml_filter=ml_filter, ml_model=ml_model,
         )
         results.append({
             "strategy": name,

@@ -2276,6 +2276,133 @@ def test_apply_confidence_filter_empty_input(isolated_db):
     assert filtered == [] and total == 0
 
 
+def test_pick_card_displays_ml_prob_when_present(isolated_db):
+    """row.ml_prob 有值時,row 3 metadata 顯 🤖 N% + 染色。
+
+    >= 0.70 紅 / 0.60-0.70 灰 / < 0.60 綠(高勝率好 = 紅,台股慣例)。
+    """
+    def _harness():
+        from src.ui_cards import render_pick_card
+        # 高機率(0.78)→ 紅
+        render_pick_card(
+            {
+                "stock_id": "2330", "name": "台積電", "close": 600.0,
+                "ml_prob": 0.78,
+                "信號": "量價KD",
+            },
+            show_targets=False, show_change=False,
+            button_key_prefix="high",
+        )
+        # 中機率(0.65)→ 灰
+        render_pick_card(
+            {
+                "stock_id": "2317", "name": "鴻海", "close": 200.0,
+                "ml_prob": 0.65,
+            },
+            show_targets=False, show_change=False,
+            button_key_prefix="mid",
+        )
+        # 低機率(0.40)→ 綠
+        render_pick_card(
+            {
+                "stock_id": "1101", "name": "台泥", "close": 50.0,
+                "ml_prob": 0.40,
+            },
+            show_targets=False, show_change=False,
+            button_key_prefix="low",
+        )
+        # None → 「🤖 —」灰
+        render_pick_card(
+            {
+                "stock_id": "9999", "name": "X", "close": 100.0,
+            },
+            show_targets=False, show_change=False,
+            button_key_prefix="none",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 高機率 78% 紅
+    assert "🤖 78%" in md_text
+    assert "color:#d62728'>🤖 78%" in md_text, (
+        f"高機率應紅色, 實際:\n{md_text[:600]}"
+    )
+    # 中機率 65% 灰(0.60-0.70)
+    assert "🤖 65%" in md_text
+    assert "color:#888888'>🤖 65%" in md_text or "color:#888'>🤖 65%" in md_text
+    # 低機率 40% 綠
+    assert "🤖 40%" in md_text
+    assert "color:#2ca02c'>🤖 40%" in md_text
+    # None → 「🤖 —」
+    assert "🤖 —" in md_text
+
+
+def test_backtest_strategy_with_ml_filter(tmp_path, monkeypatch):
+    """backtest_strategy 加 ml_filter=0.6 + ml_model → 只 count prob>=0.6 的 picks。"""
+    from src import backtest as bt
+    from src import config, database as db
+    import pandas as pd
+
+    db_file = tmp_path / "bt_ml.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    db._reset_path_cache()
+    db.init_db()
+
+    # 灌足夠 daily_prices 讓 backtest 跑(2 sids × 30 day)
+    dates = [f"2026-04-{d:02d}" for d in range(1, 31)]
+    rows = []
+    for sid in ("2330", "2317"):
+        for i, d in enumerate(dates):
+            close = 100.0 + i * 0.5
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": close, "high": close + 6, "low": close - 0.5,
+                "close": close, "volume": 1000,
+                "trading_money": None, "trading_turnover": None, "spread": None,
+            })
+    db.upsert_daily_prices(rows)
+
+    # mock screener: 每 D 都 fire 兩檔
+    def _fake_screener(date, params=None, stock_ids=None):
+        idx = dates.index(date) if date in dates else 0
+        close = 100.0 + idx * 0.5
+        return pd.DataFrame([
+            {"stock_id": "2330", "name": "台積電", "close": close},
+            {"stock_id": "2317", "name": "鴻海", "close": close},
+        ])
+    monkeypatch.setitem(bt.ALL_STRATEGIES, "fake_strat", _fake_screener)
+
+    # mock predict_batch:2330 prob=0.8(過濾保留)、2317 prob=0.4(被過濾)
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_batch",
+        lambda model, sids, date, db_path=None: {
+            sid: 0.8 if sid == "2330" else 0.4 for sid in sids
+        },
+    )
+
+    # 不傳 ml_filter:應該 count 兩檔
+    stats_no_filter = bt.backtest_strategy(
+        "fake_strat", universe=["2330", "2317"], period_end="2026-04-30",
+        lookback_days=30, hold_days=5,
+    )
+
+    # 傳 ml_filter=0.6:只 count 2330(0.8 >= 0.6),2317 被過濾
+    stats_with_filter = bt.backtest_strategy(
+        "fake_strat", universe=["2330", "2317"], period_end="2026-04-30",
+        lookback_days=30, hold_days=5,
+        ml_filter=0.6, ml_model="dummy",  # model 不需真實,batch 已被 mock
+    )
+
+    # 沒 filter 的 fires 應該 = filter 的 2 倍(各 D 有 2 sids → filter 後剩 1)
+    assert stats_no_filter["n_fires"] == stats_with_filter["n_fires"] * 2, (
+        f"no_filter={stats_no_filter} / with_filter={stats_with_filter}"
+    )
+
+
 def test_enrich_df_with_ml_prob_empty_df_returns_unchanged(isolated_db):
     """空 df → 直接回(不加欄,避免 schema drift)。"""
     import app as _app

@@ -130,6 +130,11 @@ def main() -> int:
         "--no-csv", action="store_true",
         help="跑完不 dump CSV(只寫 SQLite,給 ad-hoc 測試用)",
     )
+    p.add_argument(
+        "--ml-filter", type=float, default=None,
+        help="只回測 ML prob >= 此值的 picks(0.50-0.80;留空 = 不過濾,跟 "
+             "Stage 1 之前一致)。給 with-ML vs without-ML 對比驗證用。",
+    )
     args = p.parse_args()
 
     db.init_db()
@@ -171,10 +176,14 @@ def main() -> int:
     else:
         strategies = list(ALL_STRATEGIES.keys())
 
+    ml_note = (
+        f"  ML filter ≥ {args.ml_filter:.2f}" if args.ml_filter is not None else ""
+    )
     print(
         f"[BACKTEST] 跑 {len(strategies)} strategies × {len(universe)} sids "
         f"× {args.lookback} 日 lookback × hold {args.hold} 天 "
-        f"(target +{args.target * 100:.0f}% / stop -{args.stop * 100:.0f}%)...",
+        f"(target +{args.target * 100:.0f}% / stop -{args.stop * 100:.0f}%)"
+        f"{ml_note}...",
         flush=True,
     )
 
@@ -186,14 +195,25 @@ def main() -> int:
         stop_pct=args.stop,
         hold_days=args.hold,
         strategies=strategies,
+        ml_filter=args.ml_filter,
     )
 
-    n_inserted = db.dump_strategy_backtest(rows)
-    print(f"[BACKTEST] 寫入 strategy_backtest {n_inserted} 筆", flush=True)
+    # ML filter 模式不寫進 strategy_backtest 表(避免覆蓋 nightly 的 baseline)
+    if args.ml_filter is None:
+        n_inserted = db.dump_strategy_backtest(rows)
+        print(f"[BACKTEST] 寫入 strategy_backtest {n_inserted} 筆", flush=True)
+    else:
+        n_inserted = len(rows)
+        print(
+            f"[BACKTEST] --ml-filter mode: 不寫 strategy_backtest 表"
+            f"(只印 summary 給 ad-hoc 對比)",
+            flush=True,
+        )
 
     _print_summary_table(rows)
 
-    if not args.no_csv and n_inserted > 0:
+    # --ml-filter 模式不 dump CSV(也不寫表),純 ad-hoc 對比
+    if args.ml_filter is None and not args.no_csv and n_inserted > 0:
         dump_strategy_backtest_csv()
 
     return 0 if n_inserted > 0 else 1
