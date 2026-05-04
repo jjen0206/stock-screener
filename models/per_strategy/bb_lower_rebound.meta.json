@@ -1,0 +1,76 @@
+{
+  "strategy": "bb_lower_rebound",
+  "trained_at": "2026-05-04T11:13:34+00:00",
+  "samples": 109,
+  "wins": 27,
+  "win_rate": 0.24770642201834864,
+  "status": "trained",
+  "oob_score": 0.6972477064220184,
+  "feature_importances": [
+    {
+      "name": "macd_dif",
+      "importance": 0.21301193658890072
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.14634941365263976
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.13630319957096712
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.12361008431281176
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.11232678041235458
+    },
+    {
+      "name": "kd_d",
+      "importance": 0.10491472553057633
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.08181623966999865
+    },
+    {
+      "name": "bb_position",
+      "importance": 0.08166762026175105
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.0
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.0
+    }
+  ],
+  "feature_names": [
+    "kd_k",
+    "kd_d",
+    "macd_dif",
+    "macd_osc",
+    "ma_alignment",
+    "bb_position",
+    "vol_ratio",
+    "bias_pct",
+    "atr_normalized",
+    "inst_5d",
+    "inst_10d"
+  ],
+  "min_train_samples": 100,
+  "lookback_days": 200,
+  "target_pct": 0.05,
+  "stop_pct": 0.03,
+  "hold_days": 5,
+  "model_type": "RandomForestClassifier",
+  "n_estimators": 200,
+  "max_depth": 10
+}

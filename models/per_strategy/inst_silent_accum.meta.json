@@ -1,0 +1,14 @@
+{
+  "strategy": "inst_silent_accum",
+  "trained_at": "2026-05-04T11:14:47+00:00",
+  "samples": 3,
+  "wins": 1,
+  "win_rate": 0.3333333333333333,
+  "status": "fallback",
+  "reason": "samples 3 < 100",
+  "min_train_samples": 100,
+  "lookback_days": 200,
+  "target_pct": 0.05,
+  "stop_pct": 0.03,
+  "hold_days": 5
+}

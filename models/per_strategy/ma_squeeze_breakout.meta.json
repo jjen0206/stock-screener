@@ -1,0 +1,14 @@
+{
+  "strategy": "ma_squeeze_breakout",
+  "trained_at": "2026-05-04T11:11:57+00:00",
+  "samples": 1,
+  "wins": 1,
+  "win_rate": 1.0,
+  "status": "fallback",
+  "reason": "samples 1 < 100",
+  "min_train_samples": 100,
+  "lookback_days": 200,
+  "target_pct": 0.05,
+  "stop_pct": 0.03,
+  "hold_days": 5
+}
