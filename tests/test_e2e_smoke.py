@@ -149,6 +149,113 @@ def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):
 
 
 # ============================================================================
+# Phase 2 perf 改動:boot guard / dashboard lazy / run_all_strategies cache
+# ============================================================================
+
+def test_boot_setup_runs_only_once(isolated_db, monkeypatch):
+    """**Perf regression** — _load_snapshot_if_needed 在多次 rerun 內只該跑
+    一次。原本 module-level _snapshot_loaded 被 streamlit 每輪 script 重執行
+    reset → boot_setup 1.3s × N rerun 浪費。改 session_state guard 後只第一次跑。
+    """
+    from src import database as _db
+
+    preload_calls = []
+    real_preload = _db.preload_snapshots
+    def _spy(*a, **kw):
+        preload_calls.append(1)
+        return real_preload(*a, **kw)
+    monkeypatch.setattr(_db, "preload_snapshots", _spy)
+
+    at = _new_at("🏠 首頁")
+    at.run()  # phase 1
+    assert not at.exception, _exc_msgs(at)
+    first_count = len(preload_calls)
+    assert first_count >= 1, "首次 boot 應跑 preload_snapshots"
+
+    # 連跑兩輪 — 不該再 trigger preload
+    at.session_state["nav_segmented"] = "🔥 短線"
+    at.session_state["active_page"] = "🔥 短線"
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+    at.session_state["nav_segmented"] = "🏠 首頁"
+    at.session_state["active_page"] = "🏠 首頁"
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert len(preload_calls) == first_count, (
+        f"preload_snapshots 多次 rerun 內只該跑一次,實際 {len(preload_calls)} 次"
+    )
+
+
+def test_dashboard_does_not_auto_run_strategies_on_cold_load(
+    isolated_db, monkeypatch,
+):
+    """**Critical perf** — 進首頁 cold load 不該自動跑 run_all_strategies。
+    原本一進就跑全市場 ~2000 檔約 11 秒,改 lazy 後只 render「載入按鈕」。
+    """
+    import app as _app
+
+    spy_calls = []
+    monkeypatch.setattr(
+        _app, "_run_all_strategies_cached",
+        lambda *a, **kw: (spy_calls.append((a, kw)) or {}),
+    )
+
+    at = _new_at("🏠 首頁")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # cold load 不該觸發 run_all_strategies
+    assert spy_calls == [], (
+        f"首頁 cold load 不該自動跑 run_all_strategies, 但被叫 {len(spy_calls)} 次"
+    )
+
+    # 應有「🚀 載入今日推薦」按鈕(可能 + 其他按鈕)
+    btn_labels = [b.label for b in at.button]
+    assert any("載入今日推薦" in (lbl or "") for lbl in btn_labels), (
+        f"應有「載入今日推薦」按鈕, 實際: {btn_labels}"
+    )
+
+
+def test_run_all_strategies_cached_hits_on_repeated_args(isolated_db, monkeypatch):
+    """**Perf regression** — _run_all_strategies_cached 同 args 第二次 cache hit,
+    不重打 underlying run_all_strategies。
+    """
+    import app as _app
+    import streamlit as st
+
+    underlying_calls = []
+    def _underlying_spy(*a, **kw):
+        underlying_calls.append(1)
+        return {"2330": {"name": "台積電", "signals": ["量價KD"], "details": {}}}
+
+    # patch run_all_strategies(被 _run_all_strategies_cached 內部呼叫)
+    monkeypatch.setattr(_app, "run_all_strategies", _underlying_spy)
+
+    # 清 streamlit cache 確保乾淨起點
+    st.cache_data.clear()
+
+    args = ("2026-05-04", ("2330", "2317"), ("volume_kd",), None)
+
+    r1 = _app._run_all_strategies_cached(*args)
+    r2 = _app._run_all_strategies_cached(*args)
+    r3 = _app._run_all_strategies_cached(*args)
+
+    assert len(underlying_calls) == 1, (
+        f"同 args 第二次起該 cache hit,實際 underlying 被叫 {len(underlying_calls)} 次"
+    )
+    # 結果一致
+    assert r1 == r2 == r3
+
+    # 不同 args 該重打
+    different_args = ("2026-05-04", ("2330",), ("volume_kd",), None)
+    _app._run_all_strategies_cached(*different_args)
+    assert len(underlying_calls) == 2, (
+        f"不同 args 該重打,實際 {len(underlying_calls)} 次"
+    )
+
+
+# ============================================================================
 # 短線頁:跑選股 → render_picks_cards 真的渲染 mock 結果
 # ============================================================================
 

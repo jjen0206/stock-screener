@@ -253,7 +253,51 @@ def _inject_pwa() -> None:
 
 # === 雲端 fallback:從 CSV snapshot 灌資料(TWSE OpenAPI 在 Streamlit Cloud 被擋) ===
 
-_snapshot_loaded = False
+_BOOT_DONE_KEY = "_boot_setup_done"
+
+
+# === run_all_strategies cache wrapper ===
+# 包成 @st.cache_data 後同 (date, universe_key, params_key, enabled_key) 在 ttl
+# 內 cache hit。dashboard 「今日推薦 Top 3」+ 短線頁「執行選股」如果 universe
+# / params 一致,共享 cache。短線頁 sticky-submit 後每次 rerun 都重跑的
+# ~338ms 也省下。
+@st.cache_data(ttl=600, show_spinner=False)
+def _run_all_strategies_cached(
+    trade_date: str,
+    universe_key: tuple[str, ...],
+    enabled_key: tuple[str, ...] | None,
+    params_key: tuple[tuple[str, object], ...] | None,
+) -> dict:
+    """`run_all_strategies` 結果 cache 版。
+
+    所有參數必須 hashable(str / tuple),caller 端把 list/dict 轉 tuple 再傳。
+    內部還原回 list/dict 餵原 function。回 agg dict 同 run_all_strategies。
+    """
+    enabled = list(enabled_key) if enabled_key else None
+    params = dict(params_key) if params_key else None
+    sids = list(universe_key) if universe_key else None
+    return run_all_strategies(
+        trade_date,
+        enabled=enabled,
+        params=params,
+        stock_ids=sids,
+    )
+
+
+def _make_params_key(params: dict | None) -> tuple[tuple[str, object], ...] | None:
+    """把 params dict 轉 sorted tuple 給 cache_data 當 hashable key。
+
+    value 若是 list / dict 也要遞迴轉 tuple,但本專案 params 只有 scalar,
+    直接 sort+items 就行。
+    """
+    if not params:
+        return None
+    return tuple(sorted(params.items()))
+
+
+def _set_session_flag(key: str) -> None:
+    """on_click callback — 設 session_state flag(避免 lambda + late-binding)。"""
+    st.session_state[key] = True
 
 
 def _load_snapshot_if_needed() -> None:
@@ -262,14 +306,16 @@ def _load_snapshot_if_needed() -> None:
     解決 Streamlit Cloud IP 被 TWSE OpenAPI 擋的問題,改用每週六 GitHub Actions
     自動抓資料 commit CSV → Cloud 容器 git pull 時自動拿到 → app 啟動時讀進 SQLite。
 
-    Module-level flag 避免每次 page rerun 都重灌(streamlit hot-reload 不會重
-    import module)。實際 CSV preload 邏輯抽到 db.preload_snapshots,給
-    GitHub Actions workflow runner 也能 reuse(daily_fetch / daily_notify 入口
-    script 開頭呼叫,避免 fresh container 沒走 streamlit boot path 導致
-    SQLite 空)。
+    **Guard 用 st.session_state**(原本 module-level global `_snapshot_loaded`
+    每次 streamlit script rerun 都被 reset 回 False — script 是 top-to-bottom
+    重執行,不是 module reload)。session_state 才能跨 rerun persist。
+    每位 user 第一輪 rerun 跑一次,後續免錢。
+
+    實際 CSV preload 邏輯抽到 db.preload_snapshots,給 GitHub Actions workflow
+    runner 也能 reuse(daily_fetch / daily_notify 入口 script 開頭呼叫,避免
+    fresh container 沒走 streamlit boot path 導致 SQLite 空)。
     """
-    global _snapshot_loaded
-    if _snapshot_loaded:
+    if st.session_state.get(_BOOT_DONE_KEY):
         return
 
     db.preload_snapshots()  # 6 個 CSV(stocks / metrics / fin / prices / inst / taiex)
@@ -286,6 +332,8 @@ def _load_snapshot_if_needed() -> None:
     # fallback 本機 trades.csv。雲端容器重啟仍能還原使用者新加的交易。
     from src import portfolio_snapshot
     portfolio_snapshot.safe_boot_load()
+
+    st.session_state[_BOOT_DONE_KEY] = True
 
     _snapshot_loaded = True
 
@@ -409,10 +457,11 @@ def _page_dashboard() -> None:
                 delta_color="normal" if delta >= 0 else "inverse",
             )
 
-    # === 2. 今日短線推薦 Top 3 ===
+    # === 2. 今日短線推薦 Top 3(lazy — 預設不自動跑全市場)===
     st.markdown("### 🔥 今日短線推薦 (Top 3)")
-    # 20 天足夠跑量價KD + 乖離率(60+ 天靠 backfill 抓 90 calendar days
-    # 只能換到 ~54 個交易日,湊不到 60 桶);ETF/債券過濾(短線是個股取向)
+    # **Cold load 主痛點修正**:原本一進首頁就自動跑 run_all_strategies 在
+    # ~2000 檔全市場,profile 顯示 11 秒。改 lazy:user 點按鈕才跑,且結果
+    # 走 _run_all_strategies_cached(同 day 內共享 cache,跨頁也 hit)。
     eligible_sids = pure_stock_universe(min_history=20)
     if not eligible_sids:
         st.caption(
@@ -420,21 +469,41 @@ def _page_dashboard() -> None:
             "請按 sidebar『⏳ 一次性回補 90 日歷史』。"
         )
     else:
-        with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天 / 純股票)..."):
-            try:
-                # 用最後交易日而非 today,週末 / 假日跑 today 會找不到當日 close
-                # → 0 picks。跟短線頁 / daily_notify 同 _get_default_screen_date 邏輯。
-                target_date = _get_default_screen_date()
-                today_iso = target_date.isoformat()
-                agg = run_all_strategies(today_iso, stock_ids=eligible_sids)
-                df_picks = aggregated_to_dataframe(agg).head(3)
-            except Exception as e:  # noqa: BLE001
-                st.caption(f"掃描失敗:{type(e).__name__}: {e}")
-                df_picks = pd.DataFrame()
-        if df_picks.empty:
-            st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
+        target_date = _get_default_screen_date()
+        today_iso = target_date.isoformat()
+        # session_state flag 控制是否啟動掃描 — streamlit cache_data 沒有
+        # cache-only lookup API,只能用 flag 自己擋。flag 設過後,後續 rerun
+        # 就走 _run_all_strategies_cached(同 universe / day cache hit 0 SQL)。
+        loaded_key = "_dashboard_picks_loaded"
+        if not st.session_state.get(loaded_key):
+            st.info(
+                f"📭 點下方按鈕載入今日 Top 3 推薦"
+                f"(掃描 ~{len(eligible_sids)} 檔,首次需 ~10 秒)"
+            )
+            st.button(
+                "🚀 載入今日推薦",
+                key="dashboard_load_picks",
+                on_click=_set_session_flag,
+                args=(loaded_key,),
+                use_container_width=True,
+            )
         else:
-            render_picks_cards(df_picks.to_dict("records"))
+            with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天 / 純股票)..."):
+                try:
+                    agg = _run_all_strategies_cached(
+                        today_iso,
+                        tuple(eligible_sids),
+                        None,
+                        None,
+                    )
+                    df_picks = aggregated_to_dataframe(agg).head(3)
+                except Exception as e:  # noqa: BLE001
+                    st.caption(f"掃描失敗:{type(e).__name__}: {e}")
+                    df_picks = pd.DataFrame()
+            if df_picks.empty:
+                st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
+            else:
+                render_picks_cards(df_picks.to_dict("records"))
 
     # === 3. 我的關注 Top 3 ===
     st.markdown("### ⭐ 我的關注 (前 3 檔)")
@@ -989,9 +1058,13 @@ def _page_short() -> None:
         f"掃描 {len(sids_only)} 檔 × {len(enabled_keys)} 套策略 "
         f"(bulk SQL load)..."
     ):
-        agg = run_all_strategies(
-            today_iso, enabled=enabled_keys, params=params,
-            stock_ids=sids_only,
+        # 走 cache 版 — sticky-submit 後 rerun 同 (date, universe, params,
+        # enabled) 直接 hit,不再每次重打 ~338ms。
+        agg = _run_all_strategies_cached(
+            today_iso,
+            tuple(sids_only),
+            tuple(enabled_keys),
+            _make_params_key(params),
         )
     _toc("short_run_all_strategies")
 

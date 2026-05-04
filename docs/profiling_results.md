@@ -76,3 +76,59 @@ main_total                   1,732ms
 3. 🥉 **agg cache**(短線頁互動體感)
 
 (此次只做 profile,不動任何優化。等使用者決定 Phase 2 內容。)
+
+---
+
+# Phase 2 結果(2026-05-04 完成 A + B + C)
+
+三項一起做完,**整體從 16.4 秒砍到 2.9 秒**(-82%):
+
+| Phase | Before | After | 變化 |
+|---|---|---|---|
+| 1. Cold load(boot + 首頁) | 13,188ms | **2,200ms** | **-83%** |
+| 2. 切短線頁 | 1,384ms | **147ms** | **-89%** |
+| 3. 執行選股(50 檔) | 1,854ms | **571ms** | **-69%** |
+| **合計** | 16,426ms | **2,918ms** | **-82%** |
+
+## After 細項
+
+### Phase 1(2,200ms,主要剩 boot 不可省)
+```
+main_total                  1,623ms
+  boot_setup                1,536ms   ← 這次第一次 preload,合理
+  page_🏠 首頁                 40ms   ← 從 11,106ms 降到這
+  sidebar                       0ms
+```
+
+### Phase 2(147ms,boot guard 生效)
+```
+main_total                     21ms
+  page_🔥 短線                  18ms
+  boot_setup                    0ms   ← 從 1,246ms 降到 0(session_state guard)
+  sidebar                       0ms
+```
+
+### Phase 3(571ms,主要剩 run_all_strategies 算)
+```
+main_total                    437ms
+  page_🔥 短線                 434ms
+    short_run_all_strategies  365ms   ← cache miss(首次執行),第二次 rerun 0ms
+    short_render_picks         47ms   ← lazy expander 維持
+  boot_setup                    0ms   ← guard 生效
+```
+
+## 修法
+
+### A. `_load_snapshot_if_needed` 改 session_state guard
+原本 `_snapshot_loaded` 是 module-level global,但 streamlit 每輪 rerun 都重執行 script body → global 被 reset 回 False → preload 每次都跑。改 `st.session_state[_BOOT_DONE_KEY]` 才能跨 rerun persist。
+
+### B. Dashboard lazy
+`_page_dashboard` 內「今日推薦 Top 3」原本一進首頁自動跑全市場 `run_all_strategies` → 11 秒。改成「🚀 載入今日推薦」按鈕,user 主動點才跑。session_state flag 控制。
+
+### C. `_run_all_strategies_cached` wrapper
+`@st.cache_data(ttl=600)` 包 `run_all_strategies`,key = `(date, universe_tuple, enabled_tuple, params_items_tuple)`。同 (date, universe, params) 跨頁面共享 cache。短線頁 sticky-submit 後 rerun 直接 hit。
+
+## 守門 Test
+- `test_boot_setup_runs_only_once`:多輪 rerun preload 只跑 1 次
+- `test_dashboard_does_not_auto_run_strategies_on_cold_load`:cold load 0 次 strategies call
+- `test_run_all_strategies_cached_hits_on_repeated_args`:同 args 第 2/3 次 cache hit
