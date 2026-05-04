@@ -451,6 +451,72 @@ def _get_ml_model_for_enrich():
         return None
 
 
+def _render_high_confidence_sidebar() -> None:
+    """sidebar 「🎯 高信心模式」toggle + ML 機率門檻 slider。
+
+    跨頁面 session_state 共用 — dashboard / 短線 / watchlist 都讀同一個 key,
+    切頁不會 reset。預設**開**(value=True)— 用戶體感重點是「ML 過濾後勝率
+    拉升」,需要從一開始就生效。
+    """
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**🎯 信心過濾**")
+    high_conf = st.sidebar.toggle(
+        "高信心模式",
+        value=True,
+        help="只顯示 ML 預測機率 ≥ 門檻的 picks。關閉看全部。",
+        key="high_confidence_mode",
+    )
+    st.sidebar.slider(
+        "ML 機率門檻",
+        min_value=0.50,
+        max_value=0.80,
+        value=0.60,
+        step=0.05,
+        disabled=not high_conf,
+        help="≥ 此機率的 picks 才顯示。0.60 約過濾掉一半,0.70+ 更嚴格但 picks 少。",
+        key="ml_threshold",
+    )
+
+
+def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
+    """套用「高信心模式」過濾到 row list — 用 session_state 讀 toggle / threshold。
+
+    Args:
+        rows: list of pick dicts(必有 ml_prob 鍵,可為 None / float)
+
+    Returns:
+        (filtered_rows, total_before): tuple
+        - filtered_rows:過濾後 list(toggle off 時 = rows 原樣)
+        - total_before:原 rows 長度(供 caller 顯「N/M 檔」caption)
+
+    過濾規則:
+    - toggle off → 全保留
+    - toggle on:
+      * ml_prob 為 None / NaN → **過濾掉**(沒資料不算高信心)
+      * ml_prob >= threshold → 保留
+    """
+    total = len(rows)
+    if not rows:
+        return [], 0
+    if not st.session_state.get("high_confidence_mode", True):
+        return rows, total
+    threshold = float(st.session_state.get("ml_threshold", 0.60))
+    filtered: list[dict] = []
+    for r in rows:
+        prob = r.get("ml_prob")
+        if prob is None:
+            continue
+        try:
+            p = float(prob)
+            if p != p:  # NaN
+                continue
+        except (TypeError, ValueError):
+            continue
+        if p >= threshold:
+            filtered.append(r)
+    return filtered, total
+
+
 def _enrich_df_with_ml_prob(
     df: "pd.DataFrame", trade_date: str,
 ) -> "pd.DataFrame":
@@ -624,6 +690,8 @@ def main() -> None:
     _toc(f"page_{page}")
 
     _render_sidebar_update()
+    # 高信心過濾 — 跨頁共用,必須在 page render 之後(session_state 已 init)
+    _render_high_confidence_sidebar()
     st.sidebar.markdown("---")
     st.sidebar.caption(
         f"市場:{config.DEFAULT_MARKET}　·　"
@@ -715,18 +783,31 @@ def _page_dashboard() -> None:
                         None,
                         None,
                     )
-                    df_picks = _enrich_df_with_ml_prob(
+                    # 先 enrich 全部(不限 head 3),才能對 ML 過濾後再取 Top 3
+                    df_full = _enrich_df_with_ml_prob(
                         _enrich_df_with_win_rate(
-                            aggregated_to_dataframe(agg).head(3), agg,
+                            aggregated_to_dataframe(agg), agg,
                         ),
                         trade_date=today_iso,
                     )
+                    rows_full = df_full.to_dict("records")
+                    rows_filtered, total = _apply_confidence_filter(rows_full)
+                    df_picks = pd.DataFrame(rows_filtered[:3])
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"掃描失敗:{type(e).__name__}: {e}")
                     df_picks = pd.DataFrame()
+                    rows_full = []
+                    total = 0
             if df_picks.empty:
-                st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
+                if total > 0:
+                    st.caption(
+                        f"📭 高信心過濾後無入選(原 {total} 檔,可調 sidebar 門檻)。"
+                    )
+                else:
+                    st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
             else:
+                if st.session_state.get("high_confidence_mode", True):
+                    st.caption(f"🎯 高信心:{len(df_picks)}/{total} 檔顯示")
                 render_picks_cards(df_picks.to_dict("records"))
 
     # === 3. 我的關注 Top 3 ===
@@ -1353,8 +1434,12 @@ def _page_short() -> None:
         view_mode = view_mode_toggle("short_view_mode")
 
         if view_mode == "🃏 卡片":
+            all_rows = df.to_dict("records")
+            filtered_all, total_all = _apply_confidence_filter(all_rows)
+            if st.session_state.get("high_confidence_mode", True):
+                st.caption(f"🎯 高信心:{len(filtered_all)}/{total_all} 檔顯示")
             render_picks_cards_paginated(
-                df.to_dict("records"),
+                filtered_all,
                 state_key="short_全部",
                 page_size=10,
                 show_add_button=True, button_key_prefix="short",
@@ -1418,8 +1503,12 @@ def _page_short() -> None:
                 ),
                 trade_date=today_iso,
             )
+            sub_rows = sub_df.to_dict("records")
+            filtered_sub, total_sub = _apply_confidence_filter(sub_rows)
+            if st.session_state.get("high_confidence_mode", True):
+                st.caption(f"🎯 高信心:{len(filtered_sub)}/{total_sub} 檔顯示")
             render_picks_cards_paginated(
-                sub_df.to_dict("records"),
+                filtered_sub,
                 state_key=f"short_{cat}",
                 page_size=10,
                 show_add_button=True,

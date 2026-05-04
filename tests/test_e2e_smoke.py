@@ -92,6 +92,14 @@ def isolated_db(monkeypatch, tmp_path):
     except Exception:
         pass
 
+    # 預設關掉「高信心」過濾 — 多數 e2e 用合成 sids(沒灌 daily_prices),
+    # ML predict_batch 拿不到 features 回 None → 過濾掉所有 picks → 測試失敗。
+    # 想測 filter 行為的 test 自己 set high_confidence_mode=True。
+    try:
+        st.session_state["high_confidence_mode"] = False
+    except Exception:
+        pass
+
     yield tmp_path
 
     db._reset_path_cache()  # type: ignore[attr-defined]
@@ -101,6 +109,10 @@ def _new_at(page: str | None = None) -> AppTest:
     at = AppTest.from_file(APP_PATH, default_timeout=60)
     if page is not None:
         at.session_state["active_page"] = page
+    # 預設關閉「高信心」過濾(多數 e2e 用合成 sids 沒灌 daily_prices,
+    # ML predict_batch 拿不到 features → 過濾掉所有 picks)。
+    # 想測 filter 行為的 test 自己 at.session_state["high_confidence_mode"] = True。
+    at.session_state["high_confidence_mode"] = False
     return at
 
 
@@ -2187,6 +2199,81 @@ def test_enrich_df_with_ml_prob_no_model_fills_none(isolated_db, monkeypatch):
     enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
     assert "ml_prob" in enriched.columns
     assert enriched["ml_prob"].isna().all()
+
+
+def test_apply_confidence_filter_removes_below_threshold(isolated_db):
+    """toggle on + threshold=0.60 → 過濾掉 ml_prob < 0.60 + None 的 picks。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+    st.session_state["ml_threshold"] = 0.60
+
+    rows = [
+        {"stock_id": "2330", "ml_prob": 0.72},
+        {"stock_id": "2317", "ml_prob": 0.45},
+        {"stock_id": "1101", "ml_prob": 0.60},  # 邊界值,>= 60 → 留
+        {"stock_id": "9999", "ml_prob": None},  # 沒資料 → 過濾
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 4
+    sids = [r["stock_id"] for r in filtered]
+    assert "2330" in sids and "1101" in sids
+    assert "2317" not in sids
+    assert "9999" not in sids
+
+
+def test_apply_confidence_filter_off_shows_all(isolated_db):
+    """toggle off → 全保留(包括 None 的)。"""
+    import streamlit as st
+    import app as _app
+
+    # isolated_db fixture 預設 False(全多數 e2e),這 test 顯示確認此 path
+    st.session_state["high_confidence_mode"] = False
+
+    rows = [
+        {"stock_id": "2330", "ml_prob": 0.72},
+        {"stock_id": "2317", "ml_prob": 0.45},
+        {"stock_id": "9999", "ml_prob": None},
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 3
+    assert len(filtered) == 3
+
+
+def test_apply_confidence_filter_excludes_none_ml_prob(isolated_db):
+    """toggle on 時,ml_prob=None 一律過濾(不算高信心)。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+    st.session_state["ml_threshold"] = 0.50
+
+    rows = [{"stock_id": "X", "ml_prob": None}]
+    filtered, _ = _app._apply_confidence_filter(rows)
+    assert filtered == []
+
+
+def test_apply_confidence_filter_excludes_nan_ml_prob(isolated_db):
+    """ml_prob=NaN(來自 pd.read_csv 等)一樣過濾。"""
+    import math
+    import streamlit as st
+    import app as _app
+
+    st.session_state["high_confidence_mode"] = True
+    st.session_state["ml_threshold"] = 0.50
+
+    rows = [{"stock_id": "X", "ml_prob": float("nan")}]
+    filtered, _ = _app._apply_confidence_filter(rows)
+    assert filtered == []
+
+
+def test_apply_confidence_filter_empty_input(isolated_db):
+    """空 list → 空 list + total=0,不炸。"""
+    import app as _app
+
+    filtered, total = _app._apply_confidence_filter([])
+    assert filtered == [] and total == 0
 
 
 def test_enrich_df_with_ml_prob_empty_df_returns_unchanged(isolated_db):
