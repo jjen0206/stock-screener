@@ -2095,6 +2095,110 @@ def test_pick_card_remove_watchlist_button_when_already_added(isolated_db):
     )
 
 
+def test_enrich_df_with_ml_prob_adds_column(isolated_db, monkeypatch):
+    """_enrich_df_with_ml_prob 對 df 加 ml_prob 欄,用 batch predict 結果 map。"""
+    import app as _app
+    import pandas as pd
+
+    # mock model + predict_batch
+    class _FakeModel:
+        classes_ = [0, 1]
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _FakeModel())
+
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_batch",
+        lambda model, sids, target_date, db_path=None: {
+            "2330": 0.72, "2317": 0.45,
+        },
+    )
+
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0},
+        {"stock_id": "2317", "name": "鴻海", "close": 200.0},
+    ])
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
+    assert "ml_prob" in enriched.columns
+    assert enriched[enriched["stock_id"] == "2330"]["ml_prob"].iloc[0] == 0.72
+    assert enriched[enriched["stock_id"] == "2317"]["ml_prob"].iloc[0] == 0.45
+
+
+def test_enrich_df_with_ml_prob_handles_missing_history(isolated_db, monkeypatch):
+    """predict_batch 對 sid 回 None → df 內 ml_prob = None / NaN。"""
+    import app as _app
+    import pandas as pd
+
+    class _FakeModel:
+        classes_ = [0, 1]
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _FakeModel())
+
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_batch",
+        lambda *a, **kw: {"2330": 0.72, "1234": None},
+    )
+
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0},
+        {"stock_id": "1234", "name": "新股", "close": 50.0},
+    ])
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
+    assert enriched[enriched["stock_id"] == "2330"]["ml_prob"].iloc[0] == 0.72
+    val = enriched[enriched["stock_id"] == "1234"]["ml_prob"].iloc[0]
+    assert val is None or (val != val)  # NaN
+
+
+def test_enrich_df_with_ml_prob_no_double_enrich(isolated_db, monkeypatch):
+    """已有 ml_prob 欄(來自 daily_picks 預跑)→ 不 re-call predict_batch。"""
+    import app as _app
+    import pandas as pd
+
+    class _FakeModel:
+        classes_ = [0, 1]
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: _FakeModel())
+
+    spy_calls = []
+    from src import ml_predictor
+    monkeypatch.setattr(
+        ml_predictor, "predict_batch",
+        lambda *a, **kw: (spy_calls.append(1) or {}),
+    )
+
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0, "ml_prob": 0.65},
+    ])
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
+    assert spy_calls == [], "已有 ml_prob 欄不該 re-call predict_batch"
+    # 原值保留
+    assert enriched["ml_prob"].iloc[0] == 0.65
+
+
+def test_enrich_df_with_ml_prob_no_model_fills_none(isolated_db, monkeypatch):
+    """model 載不到(雲端 .pkl 缺)→ ml_prob 欄全 None,UI 顯「—」。"""
+    import app as _app
+    import pandas as pd
+
+    monkeypatch.setattr(_app, "_get_ml_model_for_enrich", lambda: None)
+
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "close": 600.0},
+        {"stock_id": "2317", "name": "鴻海", "close": 200.0},
+    ])
+    enriched = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
+    assert "ml_prob" in enriched.columns
+    assert enriched["ml_prob"].isna().all()
+
+
+def test_enrich_df_with_ml_prob_empty_df_returns_unchanged(isolated_db):
+    """空 df → 直接回(不加欄,避免 schema drift)。"""
+    import app as _app
+    import pandas as pd
+
+    df = pd.DataFrame()
+    out = _app._enrich_df_with_ml_prob(df, trade_date="2026-05-04")
+    assert out.empty
+
+
 def test_enrich_df_with_win_rate_avg_of_matched_strategies(isolated_db):
     """每張 pick 的 win_rate 是該檔命中各 strategy win_rate 的算術平均。"""
     import app as _app

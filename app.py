@@ -428,6 +428,66 @@ def _make_params_key(params: dict | None) -> tuple[tuple[str, object], ...] | No
     return tuple(sorted(params.items()))
 
 
+@st.cache_resource(show_spinner=False)
+def _get_ml_model_for_enrich():
+    """lazy load + cache ML model 給 _enrich_df_with_ml_prob 用。
+
+    跟 individual_sections._get_ml_model 同 pattern,但獨立 cache_resource
+    讓 sticky-submit 重 rerun 不重 load(joblib.load 約 50-150ms)。
+    Pickle 失敗 / 檔不存在一律回 None,_enrich 拿到 None 就跳過 enrich。
+    """
+    try:
+        from src.ml_predictor import load_model
+        path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+        if not path.exists():
+            return None
+        return load_model(path)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/enrich] _get_ml_model_for_enrich exception:"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+        return None
+
+
+def _enrich_df_with_ml_prob(
+    df: "pd.DataFrame", trade_date: str,
+) -> "pd.DataFrame":
+    """加 'ml_prob' 欄到 agg DataFrame — 對全 picks 一次 batch 預測。
+
+    沒 model 載入 / 個別 pick 資料不足 → 該行 ml_prob = None。重複呼叫安全:
+    若 df 已經有 ml_prob 欄(可能來自 daily_picks 預跑),原欄保留不重算。
+    """
+    if df is None or df.empty:
+        return df
+    # 已 enrich 過(daily_picks 預跑帶 ml_prob)→ 不重算
+    if "ml_prob" in df.columns and df["ml_prob"].notna().any():
+        return df
+
+    model = _get_ml_model_for_enrich()
+    if model is None:
+        # 沒 model → 給 ml_prob=None 一欄,UI 顯「—」
+        enriched = df.copy()
+        enriched["ml_prob"] = None
+        return enriched
+
+    from src.ml_predictor import predict_batch
+    sids = df["stock_id"].tolist()
+    try:
+        probs = predict_batch(model, sids, trade_date)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/enrich] predict_batch 失敗:{type(e).__name__}: {e}",
+            flush=True,
+        )
+        probs = {}
+
+    enriched = df.copy()
+    enriched["ml_prob"] = enriched["stock_id"].map(probs)
+    return enriched
+
+
 def _enrich_df_with_win_rate(
     df: "pd.DataFrame", agg: dict[str, dict],
 ) -> "pd.DataFrame":
@@ -655,8 +715,11 @@ def _page_dashboard() -> None:
                         None,
                         None,
                     )
-                    df_picks = _enrich_df_with_win_rate(
-                        aggregated_to_dataframe(agg).head(3), agg,
+                    df_picks = _enrich_df_with_ml_prob(
+                        _enrich_df_with_win_rate(
+                            aggregated_to_dataframe(agg).head(3), agg,
+                        ),
+                        trade_date=today_iso,
                     )
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"掃描失敗:{type(e).__name__}: {e}")
@@ -1258,7 +1321,10 @@ def _page_short() -> None:
     )
 
     _tic("short_aggregated_to_df")
-    df = _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg)
+    df = _enrich_df_with_ml_prob(
+        _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
+        trade_date=today_iso,
+    )
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
 
@@ -1346,8 +1412,11 @@ def _page_short() -> None:
             if not sub_agg:
                 st.info(f"📭 此分類本日無入選。")
                 continue
-            sub_df = _enrich_df_with_win_rate(
-                aggregated_to_dataframe(sub_agg), sub_agg,
+            sub_df = _enrich_df_with_ml_prob(
+                _enrich_df_with_win_rate(
+                    aggregated_to_dataframe(sub_agg), sub_agg,
+                ),
+                trade_date=today_iso,
             )
             render_picks_cards_paginated(
                 sub_df.to_dict("records"),

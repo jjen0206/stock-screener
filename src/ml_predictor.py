@@ -400,6 +400,63 @@ def predict_short_pick_winrate(
         return None
 
 
+def predict_batch(
+    model,
+    stock_ids: list[str],
+    target_date: str,
+    db_path: str | Path | None = None,
+) -> dict[str, float | None]:
+    """對一批 sids 預測 win 機率,一次 model.predict_proba 而非 N 次。
+
+    回 {sid: prob_up | None};資料不足(extract_features 回 None)的 sid
+    在 dict 內仍出現但值為 None。
+
+    比 predict_short_pick_winrate × N 快 — sklearn 一次 batch 呼叫省 N-1
+    次 Python ↔ C 邊界。
+    """
+    if model is None or not stock_ids:
+        return {}
+
+    # extract_features 個別跑(沒 batch 版本,SQL 已經是 per-sid 90-day pull)
+    rows: list[dict] = []
+    sids_with_features: list[str] = []
+    for sid in stock_ids:
+        feats = extract_features(sid, target_date, db_path=db_path)
+        if feats is None:
+            continue
+        rows.append(feats)
+        sids_with_features.append(sid)
+
+    out: dict[str, float | None] = {sid: None for sid in stock_ids}
+    if not rows:
+        return out
+
+    X = pd.DataFrame(rows)[FEATURE_NAMES]
+    try:
+        probas = model.predict_proba(X)
+        if 1 in model.classes_:
+            idx = list(model.classes_).index(1)
+            for sid, prob_row in zip(sids_with_features, probas):
+                out[sid] = float(prob_row[idx])
+        else:
+            # 罕見:訓練資料全 loss class
+            print(
+                "[ML/predict_batch] model.classes_ 沒包含 1,全回 0.0",
+                flush=True,
+            )
+            for sid in sids_with_features:
+                out[sid] = 0.0
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/predict_batch] sklearn predict_proba 失敗 "
+            f"({len(sids_with_features)} sids): {type(e).__name__}: {e}",
+            flush=True,
+        )
+        logger.warning("[ML] predict_batch 失敗:%s", e)
+        # 失敗時 dict 內全 None(對齊 caller fallback 行為)
+    return out
+
+
 def save_model(model, path: str | Path) -> None:
     """joblib dump 到 path。parent 不存在會建。"""
     p = Path(path)
@@ -499,6 +556,7 @@ __all__ = [
     "build_training_dataset",
     "train_short_pick_model",
     "predict_short_pick_winrate",
+    "predict_batch",
     "save_model",
     "load_model",
     "dump_model_meta",
