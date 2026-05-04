@@ -21,9 +21,14 @@ import streamlit as st
 from src import database as db, indicators as ind
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_recent_ohlc(sid: str, limit: int) -> pd.DataFrame:
     """SQL 撈該股最近 N 天 daily_prices 並升序回 DataFrame(空 → 空 DataFrame)。
     給 _compute_key_levels / _compute_technical_summary 共用,避免重複 query。
+
+    `@st.cache_data(ttl=60)` — 短線 / watchlist / 個股頁同 session 內 60 秒
+    內同 (sid, limit) 不重打 SQL。
+    276 cards × 多 helper 重複呼叫 = ~2200 SQL 砍到 ~300,profile 顯示主要瓶頸。
     """
     db.init_db()
     with db.get_conn() as conn:
@@ -48,12 +53,17 @@ def _load_recent_ohlc(sid: str, limit: int) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _compute_key_levels(sid: str) -> dict:
     """算壓力 / 回檔 / 支撐三區間。給 _render_key_levels + _render_action_suggestion 共用。
 
     回 dict:
       - {'error': str}  歷史不足 / NaN
       - {'close', 'atr14', 'bb_upper', 'bb_mid', 'bb_lower', 'levels': [(label, hint, low, high), ...]}
+
+    `@st.cache_data(ttl=60)` — 每張卡片內 _render_key_levels +
+    _render_action_suggestion + _compute_main_force_signal 共 3 個 caller
+    呼叫此函式;cache 後同 session 內同 sid 只算一次 BB / ATR。
     """
     df = _load_recent_ohlc(sid, limit=90)
     if len(df) < 20:
@@ -89,12 +99,16 @@ def _compute_key_levels(sid: str) -> dict:
     }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _compute_technical_summary(sid: str) -> dict:
     """算 7 項 rule-based 技術解讀。給 _render_technical_summary + _render_action_suggestion 共用。
 
     回 dict:
       - {'error': str}  歷史不足 / NaN
       - {'trend', 'price_pos', 'ma_align', 'vol_text', 'bb_pos', 'bb_width_state', 'summary'}
+
+    `@st.cache_data(ttl=60)` — _render_technical_summary +
+    _render_action_suggestion 兩個 caller,cache 後同 sid 只算一次。
     """
     df = _load_recent_ohlc(sid, limit=120)
     if len(df) < 60:
@@ -359,6 +373,7 @@ def _render_action_suggestion(sid: str) -> None:
     )
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _compute_main_force_signal(sid: str) -> dict:
     """主力燈號:法人 5/10/20 日累計 + BB 位置 + 量價配對 → 出貨 / 吸貨判斷。
 
@@ -371,6 +386,9 @@ def _compute_main_force_signal(sid: str) -> dict:
     - 吸貨初期:全正 + 低檔 + 量增上漲
     - 默默吸貨:全正 + 低檔 + 量平 / 量縮上漲
     - 中性:其他混合
+
+    `@st.cache_data(ttl=60)` — 含 1 個 SQL JOIN(daily_prices ⨝ institutional)
+    + 內部又呼叫 _compute_key_levels;cache 後跨 cards 同 sid 只跑一次。
     """
     db.init_db()
     with db.get_conn() as conn:

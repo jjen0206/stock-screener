@@ -40,7 +40,12 @@ def isolated_db(monkeypatch, tmp_path):
     config.DATABASE_PATH 改 tmp_path,並清掉 src.database 內部 path cache。
     GITHUB_PAT 確保不存在(snapshot dump 才不會 spawn push thread)。
     sys.modules 把 app 移除,確保 AppTest 跑出全新 module。
+
+    `st.cache_data` 是 process-wide cache,跨 tests 會殘留(test A 用 sid
+    '2330' 灌 fixture A、test B 灌 fixture B → test B 拿到 A 的 cache)。
+    每個 test 開始前清掉,跟 tmp_db 隔離概念一致。
     """
+    import streamlit as st
     from src import config, database as db
 
     monkeypatch.setattr(config, "DATABASE_PATH", str(tmp_path / "e2e.db"))
@@ -52,6 +57,11 @@ def isolated_db(monkeypatch, tmp_path):
     # sys.modules 內,from-import 會走 module 快取版本,patch 不到位。從 cache
     # 移除 → AppTest 載入時會走「全新 import」,所有 from-import 都會重綁。
     sys.modules.pop("app", None)
+
+    # 清 streamlit @st.cache_data — _compute_key_levels / _load_recent_ohlc /
+    # _compute_technical_summary / _compute_main_force_signal / 公司資訊
+    # 5 個 cache 都會殘留跨 tests
+    st.cache_data.clear()
 
     yield tmp_path
 
