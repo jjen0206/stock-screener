@@ -77,14 +77,14 @@ def _build_card_html(
     """
     from src.ui_format import color_for, arrow_for, COLOR_FLAT
 
-    # row 1 / 股號 + 名稱
+    # row 1 / 股號 + 名稱(股名為主視覺:18px 500;股號 13px secondary 化為 label)
     sid_block = (
         f"<div><div style='font-size:11px;color:#888'>股號</div>"
-        f"<div style='font-size:14px;font-weight:500'>{sid}</div>"
-        f"<div style='font-size:13px;color:#888'>{name}</div></div>"
+        f"<div style='font-size:13px;font-weight:400;color:#888'>{sid}</div>"
+        f"<div style='font-size:18px;font-weight:500'>{name}</div></div>"
     )
 
-    # row 1 / 股價 + 漲跌
+    # row 1 / 股價 + 漲跌(股價數字 18px + 依漲跌染色)
     if close is not None and close == close:  # not NaN
         try:
             close_str = f"{float(close):.2f}"
@@ -92,18 +92,29 @@ def _build_card_html(
             close_str = "—"
     else:
         close_str = "—"
+    # 漲跌色:漲 → 紅 / 跌 → 綠 / None or 平盤 → 不加 color attr 走 streamlit 預設
+    # (streamlit 暗色 / 亮色主題各自有合適 default,寫死灰會跟主題不協調)
+    if change_pct is None or float(change_pct) == 0:
+        price_color_style = ""
+        change_color_style = ""
+    else:
+        col = color_for(change_pct)
+        price_color_style = f";color:{col}"
+        change_color_style = f"color:{col}"
+
     if change_pct is None:
-        change_html = "<span style='color:#888'>—</span>"
+        change_html = "—"
     else:
         c = float(change_pct)
-        col = color_for(c)
         arr = arrow_for(c)
         change_html = (
-            f"<span style='color:{col}'>{arr} {abs(c):.2f}%</span>"
+            f"<span style='{change_color_style}'>{arr} {abs(c):.2f}%</span>"
+            if change_color_style else
+            f"{arr} {abs(c):.2f}%"
         )
     price_block = (
         f"<div><div style='font-size:11px;color:#888'>股價</div>"
-        f"<div style='font-size:15px;font-weight:500'>{close_str}</div>"
+        f"<div style='font-size:18px;font-weight:500{price_color_style}'>{close_str}</div>"
         f"<div style='font-size:11px'>{change_html}</div></div>"
     )
 

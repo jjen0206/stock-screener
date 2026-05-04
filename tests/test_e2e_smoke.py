@@ -1990,10 +1990,21 @@ def test_pick_card_3row_grid_layout(isolated_db):
     assert "買進" in md_text
     # 紅色 + 命中策略
     assert "量價KD" in md_text
-    # 股號 + 名稱
+    # 股號 + 名稱(新版:股名 18px 主視覺,股號 13px secondary 化)
     assert "8277" in md_text and "商丞" in md_text
-    # 股價 7.98 + 漲 1.27% (應紅色 + ↑)
+    # 股名 18px 500 + 股號 13px 400 secondary
+    assert "font-size:18px;font-weight:500'>商丞" in md_text, (
+        f"股名應 18px 500 主視覺, 實際:\n{md_text[:500]}"
+    )
+    assert "font-size:13px;font-weight:400;color:#888'>8277" in md_text, (
+        f"股號應 13px 400 secondary, 實際:\n{md_text[:500]}"
+    )
+    # 股價 7.98 18px + 漲 1.27% (應紅色 + ↑)
     assert "7.98" in md_text
+    # 股價放大為 18px,且因 change_pct=+1.27 染紅
+    assert "font-size:18px;font-weight:500;color:#d62728'>7.98" in md_text, (
+        f"股價應 18px 500 + 紅色(漲), 實際:\n{md_text[:500]}"
+    )
     assert "↑" in md_text and "1.27%" in md_text
 
     # row 2 數值
@@ -2013,6 +2024,49 @@ def test_pick_card_3row_grid_layout(isolated_db):
     )
     assert any("展開詳細" in lbl for lbl in btn_labels), (
         f"應有展開詳細 button, 實際: {btn_labels}"
+    )
+
+
+def test_pick_card_price_uses_tw_color_when_up_or_down(isolated_db):
+    """股價數字依漲跌染色:漲 → 紅 #d62728,跌 → 綠 #2ca02c。
+    沒 change_pct → 不加 color attr(走 streamlit 預設色)。
+    """
+    def _harness():
+        from src.ui_cards import render_pick_card
+        # 漲卡
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 600.0, "change_pct": 1.5},
+            show_change=True, button_key_prefix="up",
+        )
+        # 跌卡
+        render_pick_card(
+            {"stock_id": "2317", "name": "鴻海", "close": 200.0, "change_pct": -2.0},
+            show_change=True, button_key_prefix="down",
+        )
+        # 沒漲跌資料(None)→ 不染色
+        render_pick_card(
+            {"stock_id": "1101", "name": "台泥", "close": 50.0},
+            show_change=False, button_key_prefix="flat",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 漲(2330 +1.5%)→ 紅色股價
+    assert "color:#d62728'>600.00" in md_text, (
+        f"漲幅卡的股價應紅色, 實際:\n{md_text[:500]}"
+    )
+    # 跌(2317 -2.0%)→ 綠色股價
+    assert "color:#2ca02c'>200.00" in md_text, (
+        f"跌幅卡的股價應綠色, 實際:\n{md_text[:500]}"
+    )
+    # 沒漲跌資料(1101)→ 股價不該帶 color: hex hex code 在 18px style 裡
+    # 找 1101 那段 50.00,前面應該沒 color
+    # 「font-size:18px;font-weight:500'>50.00」(沒 ;color: 後綴)
+    assert "font-weight:500'>50.00" in md_text, (
+        f"沒漲跌資料的股價不該染色(走 streamlit 預設), 實際:\n{md_text[:500]}"
     )
 
 
