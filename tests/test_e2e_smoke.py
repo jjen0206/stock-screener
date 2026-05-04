@@ -547,7 +547,7 @@ def test_short_page_keeps_picks_after_expander_click(isolated_db, monkeypatch):
 
     # Step 2: 點「展開詳細分析」(觸發 rerun → 原本會 reset,現在不該)
     expand_btns = [
-        b for b in at.button if "展開詳細分析" in (b.label or "")
+        b for b in at.button if "展開詳細" in (b.label or "")
     ]
     assert expand_btns, (
         f"應有「展開詳細分析」按鈕, 實際: {[b.label for b in at.button]}"
@@ -1917,7 +1917,7 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
 
     # 點「📊 展開詳細分析」
     open_btn = next(
-        b for b in at.button if "展開詳細分析" in (b.label or "")
+        b for b in at.button if "展開詳細" in (b.label or "")
     )
     open_btn.click().run()
     assert not at.exception, _exc_msgs(at)
@@ -1936,13 +1936,146 @@ def test_pick_card_expander_renders_4_sections(isolated_db):
     )
 
 
-def test_pick_card_change_pct_uses_tw_convention_arrows(isolated_db):
-    """show_change=True 時 delta 字串含台股慣例箭頭(↑/↓)。
+def test_pick_card_3row_grid_layout(isolated_db):
+    """新版 3-row grid 表格式 — render 一張帶完整資料的卡,assert HTML 結構
+    含:
+    - row 1 grid template(108px 90px minmax(0,1fr))
+    - row 2 grid template(repeat(4, 1fr))
+    - 4 個 row 2 label:保守 / 積極 / 停損 / 勝率
+    - 「股號」「股價」「分析建議」row 1 labels
+    - 「買進」紅色文字(分析建議)
+    - 命中策略以 ` · ` 串接(Phase A 預期顯 1 個 strategy 即可)
+    """
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {
+                "stock_id": "8277", "name": "商丞",
+                "close": 7.98, "change_pct": 1.27,
+                "信號": "量價KD",
+                "信號數": 1,
+                "target_low": 8.10, "target_high": 8.50,
+                "stop_loss": 7.60,
+                "risk_reward": 2.0,
+                # win_rate Phase A 沒灌,期望顯 「—」
+            },
+            show_change=True, show_targets=True, show_signal=True,
+            show_add_button=True, button_key_prefix="grid",
+        )
 
-    AppTest 無法 inspect delta_color CSS,但可以從 delta 字串看箭頭,arrow
-    是 ui_format.arrow_for 出來的,跟 delta_color='inverse' 在同一個 commit
-    成對改動 — 箭頭出現等於 ui_format 邏輯有用上,delta_color 在 source
-    code 裡(grep 可驗證)。
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+
+    # row 1 grid template
+    assert "grid-template-columns:108px 90px minmax(0,1fr)" in md_text, (
+        f"預期 row 1 grid template, 實際 markdown:\n{md_text[:500]}"
+    )
+    # row 2 grid template
+    assert "grid-template-columns:repeat(4,1fr)" in md_text, (
+        f"預期 row 2 grid template, 實際:\n{md_text[:500]}"
+    )
+
+    # row 1 labels
+    for label in ("股號", "股價", "分析建議"):
+        assert label in md_text, f"row 1 缺 label「{label}」"
+
+    # row 2 labels(全 4 個)
+    for label in ("保守", "積極", "停損", "勝率"):
+        assert label in md_text, f"row 2 缺 label「{label}」"
+
+    # 分析建議「買進」+ 紅色
+    assert "買進" in md_text
+    # 紅色 + 命中策略
+    assert "量價KD" in md_text
+    # 股號 + 名稱
+    assert "8277" in md_text and "商丞" in md_text
+    # 股價 7.98 + 漲 1.27% (應紅色 + ↑)
+    assert "7.98" in md_text
+    assert "↑" in md_text and "1.27%" in md_text
+
+    # row 2 數值
+    assert "8.10" in md_text  # 保守
+    assert "8.50" in md_text  # 積極
+    assert "7.60" in md_text  # 停損
+
+    # 勝率欄 Phase A 預期 — (沒 win_rate 資料)
+    # row 2 4 格,最後一格是勝率,應含 「—」
+    # (md_text 其他地方也會有 — 例如 P&L 沒持倉時,但這裡至少要有 1 個)
+    assert "—" in md_text
+
+    # row 3:加入關注 + 展開詳細 兩個 button 都該在
+    btn_labels = [b.label for b in at.button if b.label]
+    assert any("加入關注" in lbl for lbl in btn_labels), (
+        f"應有加入關注 button, 實際: {btn_labels}"
+    )
+    assert any("展開詳細" in lbl for lbl in btn_labels), (
+        f"應有展開詳細 button, 實際: {btn_labels}"
+    )
+
+
+def test_pick_card_remove_watchlist_button_when_already_added(isolated_db):
+    """已關注的個股 → button label 變「移除關注」(toggle 行為)。"""
+    from src import database as db
+    db.add_to_watchlist("2330")  # 預先加好
+
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 600.0},
+            show_add_button=True, button_key_prefix="rem",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    btn_labels = [b.label for b in at.button if b.label]
+    assert any("移除關注" in lbl for lbl in btn_labels), (
+        f"已關注應顯「移除關注」, 實際: {btn_labels}"
+    )
+    assert not any("加入關注" in lbl for lbl in btn_labels), (
+        f"已關注不該顯「加入關注」, 實際: {btn_labels}"
+    )
+
+
+def test_pick_card_win_rate_renders_when_present(isolated_db):
+    """row.get('win_rate') 有值時,row 2 的勝率欄顯示百分比 + 顏色。
+
+    台股慣例:>=60% 紅(好)/ 50-60% 灰 / <50% 綠(差)。
+    Phase B 把 win_rate 灌進 agg DataFrame 後,卡片自動顯示。
+    """
+    def _harness():
+        from src.ui_cards import render_pick_card
+        # 高勝率 0.65 → 紅
+        render_pick_card(
+            {
+                "stock_id": "2330", "name": "台積電", "close": 600.0,
+                "win_rate": 0.65,
+                "信號": "量價KD",
+            },
+            show_targets=False, show_change=False,
+            button_key_prefix="wr",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 65% 顯示
+    assert "65%" in md_text, f"win_rate=0.65 應顯 65%, 實際: {md_text[:500]}"
+    # 高勝率紅色(台股慣例好=紅)
+    assert "#d62728" in md_text
+
+
+def test_pick_card_change_pct_uses_tw_convention_arrows(isolated_db):
+    """新版 3-row grid 卡片,股價區塊的漲跌走台股慣例:
+    漲 → 紅 ↑ + 絕對值;跌 → 綠 ↓ + 絕對值。
+
+    舊版用 st.metric;新版直接 HTML span 渲染(讀 markdown 內容驗證)。
     """
     def _harness():
         from src.ui_cards import render_pick_card
@@ -1960,15 +2093,16 @@ def test_pick_card_change_pct_uses_tw_convention_arrows(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    metrics = [m for m in at.metric if m.label == "收盤"]
-    assert len(metrics) >= 2, f"預期 ≥2 個收盤 metric, 實際 {len(metrics)}"
-
-    deltas = "\n".join(m.delta or "" for m in metrics)
-    assert "↑" in deltas, f"漲應有 ↑(台股慣例 + ui_format.arrow_for), 實際: {deltas}"
-    assert "↓" in deltas, f"跌應有 ↓, 實際: {deltas}"
-    # 不該再用舊 ▲/▼(台股慣例改用 ↑/↓)
-    assert "▲" not in deltas, "舊三角形箭頭應已換成 ↑"
-    assert "▼" not in deltas, "舊三角形箭頭應已換成 ↓"
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 漲(+1.5)→ 紅 + ↑
+    assert "↑ 1.50%" in md_text, f"漲應有 ↑ 1.50%, 實際:\n{md_text[:400]}"
+    assert "#d62728" in md_text, "漲應紅色"
+    # 跌(-2.0)→ 綠 + ↓
+    assert "↓ 2.00%" in md_text, f"跌應有 ↓ 2.00%, 實際:\n{md_text[:400]}"
+    assert "#2ca02c" in md_text, "跌應綠色"
+    # 不該再用舊 ▲/▼ 三角箭頭
+    assert "▲" not in md_text, "舊三角形箭頭應已換成 ↑"
+    assert "▼" not in md_text, "舊三角形箭頭應已換成 ↓"
 
 
 def test_pick_card_pnl_row_uses_tw_color_when_position_exists(isolated_db):
@@ -2190,7 +2324,7 @@ def test_pick_card_expander_renders_for_watchlist(isolated_db):
 
     # 點「📊 展開詳細分析」(watchlist 卡也有同一個 lazy 按鈕)
     open_btn = next(
-        b for b in at.button if "展開詳細分析" in (b.label or "")
+        b for b in at.button if "展開詳細" in (b.label or "")
     )
     open_btn.click().run()
     assert not at.exception, _exc_msgs(at)
@@ -2258,10 +2392,10 @@ def test_pick_card_lazy_expander_does_not_query_db_when_collapsed(isolated_db):
             f"lazy 收起狀態不該渲染『{section}』, md_text:\n{md_text}"
         )
 
-    # 應有「展開詳細分析」按鈕
+    # 應有「展開詳細」按鈕(新版 row 3 縮短 label,substring match 仍涵蓋舊「展開詳細分析」)
     btn_labels = [b.label for b in at.button]
-    assert any("展開詳細分析" in (lbl or "") for lbl in btn_labels), (
-        f"應有「展開詳細分析」按鈕, 實際: {btn_labels}"
+    assert any("展開詳細" in (lbl or "") for lbl in btn_labels), (
+        f"應有「展開詳細」按鈕, 實際: {btn_labels}"
     )
 
 

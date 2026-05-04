@@ -38,6 +38,13 @@ def _on_add_to_watchlist(stock_id: str) -> None:
     st.toast(f"已加入 {stock_id}", icon="⭐")
 
 
+def _on_remove_from_watchlist(stock_id: str) -> None:
+    """⭐ 按鈕反向 callback — 已關注時點按鈕變「移除關注」。"""
+    from src import database as db
+    db.remove_from_watchlist(stock_id)
+    st.toast(f"已移除 {stock_id}", icon="🗑️")
+
+
 def _fire_emoji(n_signals: int) -> str:
     """信號數 → 🔥 視覺。"""
     if n_signals <= 0:
@@ -49,6 +56,127 @@ def _fire_emoji(n_signals: int) -> str:
     return "🔥🔥🔥"  # 3+
 
 
+def _build_card_html(
+    sid: str,
+    name: str,
+    close: Any,
+    change_pct: float | None,
+    signals_label: str,
+    target_low: Any,
+    target_high: Any,
+    stop_loss: Any,
+    win_rate: float | None,
+    risk_reward: float | None,
+    n_signals: int,
+) -> str:
+    """組整張卡片的 HTML(row 1 + row 2 + 右側 metadata)— 給 st.markdown
+    一次吐出,省 streamlit widget 開銷。row 3 的「加入關注」/「展開詳細」
+    button 不在這裡(button 必須走 st.button,不能塞 HTML)。
+
+    回字串(unsafe_allow_html=True render)。
+    """
+    from src.ui_format import color_for, arrow_for, COLOR_FLAT
+
+    # row 1 / 股號 + 名稱
+    sid_block = (
+        f"<div><div style='font-size:11px;color:#888'>股號</div>"
+        f"<div style='font-size:14px;font-weight:500'>{sid}</div>"
+        f"<div style='font-size:13px;color:#888'>{name}</div></div>"
+    )
+
+    # row 1 / 股價 + 漲跌
+    if close is not None and close == close:  # not NaN
+        try:
+            close_str = f"{float(close):.2f}"
+        except (TypeError, ValueError):
+            close_str = "—"
+    else:
+        close_str = "—"
+    if change_pct is None:
+        change_html = "<span style='color:#888'>—</span>"
+    else:
+        c = float(change_pct)
+        col = color_for(c)
+        arr = arrow_for(c)
+        change_html = (
+            f"<span style='color:{col}'>{arr} {abs(c):.2f}%</span>"
+        )
+    price_block = (
+        f"<div><div style='font-size:11px;color:#888'>股價</div>"
+        f"<div style='font-size:15px;font-weight:500'>{close_str}</div>"
+        f"<div style='font-size:11px'>{change_html}</div></div>"
+    )
+
+    # row 1 / 分析建議 — 目前 11 套策略全 long-side,先全顯「買進」
+    # 紅色(看漲),搭配台股慣例。命中策略以 ` · ` 串接顯下方 caption
+    signals_text = signals_label.replace(",", " ·").replace("、", " ·")
+    if signals_text and "·" not in signals_text:
+        # 既有逗號 join,refresh 成 ` · ` 一致風格
+        pass
+    advice_block = (
+        f"<div><div style='font-size:11px;color:#888'>分析建議</div>"
+        f"<div style='font-size:13px;font-weight:500;color:#d62728'>買進</div>"
+        f"<div style='font-size:11px;color:#888'>{signals_text or '—'}</div></div>"
+    )
+
+    row1 = (
+        "<div style='display:grid;"
+        "grid-template-columns:108px 90px minmax(0,1fr);"
+        "gap:12px;padding:8px 0;'>"
+        f"{sid_block}{price_block}{advice_block}"
+        "</div>"
+    )
+
+    # row 2 / 4 等寬:保守 / 積極 / 停損 / 勝率
+    def _fmt_or_dash(v: Any, fmt: str = "{:.2f}") -> str:
+        if v is None:
+            return "—"
+        try:
+            f = float(v)
+            if f != f:  # NaN
+                return "—"
+            return fmt.format(f)
+        except (TypeError, ValueError):
+            return "—"
+
+    if win_rate is None:
+        wr_html = "<span style='color:#888'>—</span>"
+    else:
+        wr = float(win_rate)
+        # 勝率染色:>=60 紅(好,台股慣例)/ 50-60 灰 / <50 綠(差)
+        if wr >= 0.60:
+            wr_color = "#d62728"
+        elif wr >= 0.50:
+            wr_color = COLOR_FLAT
+        else:
+            wr_color = "#2ca02c"
+        wr_html = f"<span style='color:{wr_color}'>{wr * 100:.0f}%</span>"
+
+    cell_style = "font-size:14px;font-weight:500"
+    label_style = "font-size:11px;color:#888"
+    row2 = (
+        "<div style='display:grid;grid-template-columns:repeat(4,1fr);"
+        "gap:8px;padding:8px 0;'>"
+        f"<div><div style='{label_style}'>保守</div>"
+        f"<div style='{cell_style}'>{_fmt_or_dash(target_low)}</div></div>"
+        f"<div><div style='{label_style}'>積極</div>"
+        f"<div style='{cell_style}'>{_fmt_or_dash(target_high)}</div></div>"
+        f"<div><div style='{label_style}'>停損</div>"
+        f"<div style='{cell_style}'>{_fmt_or_dash(stop_loss)}</div></div>"
+        f"<div><div style='{label_style}'>勝率</div>"
+        f"<div style='{cell_style}'>{wr_html}</div></div>"
+        "</div>"
+    )
+
+    # 分隔線(0.5px secondary 色)
+    sep = (
+        "<hr style='margin:0;border:none;"
+        "border-top:0.5px solid rgba(128,128,128,0.25);' />"
+    )
+
+    return f"<div class='pick-card-content'>{row1}{sep}{row2}{sep}</div>"
+
+
 def render_pick_card(
     row: dict,
     show_signal: bool = True,
@@ -57,14 +185,19 @@ def render_pick_card(
     show_add_button: bool = False,
     button_key_prefix: str = "card",
 ) -> None:
-    """渲染單檔股票卡片。
+    """渲染單檔股票卡片(3 行 grid 表格式)。
 
-    row 必含:stock_id, name, close
+    Row 1:股號+名 | 股價+漲跌 | 分析建議+命中策略
+    Row 2:保守 | 積極 | 停損 | 勝率
+    Row 3:[加入/移除關注] [展開詳細分析] | 右側 metadata(信號數·R:R)
+
+    row dict 必含:stock_id, name, close
     可選:信號數, 信號, target_low/high, stop_loss, risk_reward, atr14,
-          change_pct (漲跌%), volume, ma5
+          change_pct (漲跌%), volume, ma5, win_rate(0-1, Phase B 加)
 
-    show_add_button=True 會在卡片下方加 ☆ 加關注按鈕(短線 / 長線推薦頁用,
-    我的關注頁不用 — 自己加自己沒意義)。
+    show_add_button=True 會 render 「加入關注 / 移除關注」 button。
+    show_change / show_targets / show_signal 控制各欄位是否顯示(全 False
+    仍會渲整個 grid,只是欄位顯 「—」)。
     """
     sid = row.get("stock_id", "?")
     name = row.get("name") or row.get("名稱") or "—"
@@ -74,53 +207,39 @@ def render_pick_card(
 
     n_signals = int(row.get("信號數") or 0)
     signal_text = row.get("信號") or ""
-    change_pct = row.get("change_pct")
-    if change_pct is None and "漲跌%" in row:
-        # 字串型如 "+1.23%" → 嘗試 parse
+    change_pct = row.get("change_pct") if show_change else None
+    if change_pct is None and "漲跌%" in row and show_change:
         try:
             change_pct = float(str(row["漲跌%"]).rstrip("%"))
         except (TypeError, ValueError):
             change_pct = None
 
+    target_low = row.get("target_low") if show_targets else None
+    target_high = row.get("target_high") if show_targets else None
+    stop_loss = row.get("stop_loss") if show_targets else None
+    risk_reward = row.get("risk_reward") if show_targets else None
+    win_rate = row.get("win_rate")  # Phase B 加;Phase A 通常 None
+
     with st.container(border=True):
-        col1, col2 = st.columns([3, 2])
-        with col1:
-            fire = _fire_emoji(n_signals) if show_signal else ""
-            title = f"**{sid} {name}**"
-            if fire:
-                title += f"  {fire}"
-            st.markdown(title)
-            if show_signal and signal_text:
-                st.caption(f"📌 {signal_text}")
-        with col2:
-            close_str = _fmt_num(close, "{:.2f}")
-            if show_change and change_pct is not None:
-                # 台股慣例:漲紅跌綠 — st.metric 用 inverse 反轉預設(預設正
-                # 是綠,跟台股顛倒)。format_change 統一箭頭 + 顏色字串
-                from src.ui_format import arrow_for
-                st.metric(
-                    "收盤", close_str,
-                    delta=f"{arrow_for(change_pct)} {abs(change_pct):.2f}%",
-                    delta_color="inverse",
-                )
-            else:
-                st.metric("收盤", close_str)
+        # Row 1 + Row 2(整段 HTML 一次吐出 — 省 streamlit widget tree)
+        st.markdown(
+            _build_card_html(
+                sid=sid,
+                name=name,
+                close=close,
+                change_pct=change_pct,
+                signals_label=signal_text if show_signal else "",
+                target_low=target_low,
+                target_high=target_high,
+                stop_loss=stop_loss,
+                win_rate=win_rate,
+                risk_reward=risk_reward,
+                n_signals=n_signals,
+            ),
+            unsafe_allow_html=True,
+        )
 
-        if show_targets:
-            tl = row.get("target_low")
-            th = row.get("target_high")
-            sl = row.get("stop_loss")
-            rr = row.get("risk_reward")
-            if tl is not None and th is not None and sl is not None:
-                rr_str = (
-                    f" (R:R {rr:.1f}:1)" if rr is not None and rr == rr else ""
-                )
-                st.markdown(
-                    f"🎯 {_fmt_num(tl)} / 🚀 {_fmt_num(th)} / "
-                    f"🛑 {_fmt_num(sl)}{rr_str}"
-                )
-
-        # P&L 行(if 該股在 trades 表有持倉)— 漲紅跌綠(台股慣例,via ui_format)
+        # P&L 行(if 該股在 trades 表有持倉)— 漲紅跌綠
         try:
             from src import database as _db
             from src.ui_format import color_for, arrow_for
@@ -144,26 +263,99 @@ def render_pick_card(
         except Exception:  # noqa: BLE001
             pass  # 沒倉位 / DB 錯誤都 silent skip(不影響卡片本體)
 
+        # Row 3:button 列(加入關注 / 展開詳細分析)+ 右側 metadata
+        # st.columns 把 row 3 分成 3 區塊:button | button | metadata
         if show_add_button:
-            from src import database as db
-            already = db.is_in_watchlist(sid)
-            label = "✅ 已關注" if already else "⭐ 加入關注"
-            st.button(
-                label,
-                key=f"{button_key_prefix}_add_{sid}",
-                disabled=already,
-                use_container_width=True,
-                on_click=_on_add_to_watchlist,
-                args=(sid,),
-            )
+            r3_cols = st.columns([1, 1, 1])
+            with r3_cols[0]:
+                _render_watchlist_toggle_button(sid, button_key_prefix)
+            with r3_cols[1]:
+                _render_lazy_detail_section_compact(sid, button_key_prefix)
+            with r3_cols[2]:
+                _render_card_metadata(n_signals, risk_reward)
+        else:
+            # 沒 add button(watchlist 卡 / 表格附帶卡)— 只 render 詳細 + metadata
+            r3_cols = st.columns([1, 1])
+            with r3_cols[0]:
+                _render_lazy_detail_section_compact(sid, button_key_prefix)
+            with r3_cols[1]:
+                _render_card_metadata(n_signals, risk_reward)
 
-        # 詳細分析(真 lazy — 點按鈕才 render 5 helper)
-        #
-        # 為什麼不用 st.expander(expanded=False):streamlit 的 expander
-        # body **永遠執行**(只是 CSS 收起 UI),138 picks × 8 SQL =
-        # ~1100 queries 打 SQLite,cold load 8-15 秒。
-        # 改用 session_state flag + 條件 render — 收起時完全不跑 helper。
-        _render_lazy_detail_section(sid, button_key_prefix)
+        # 展開詳細分析「打開」狀態時,full helper section 還是要在 button 之外
+        # render(button 觸發後 flag=True,下一輪 rerun render 完整 section)
+        flag_key = f"card_exp_{button_key_prefix}_{sid}"
+        if st.session_state.get(flag_key, False):
+            _render_lazy_detail_section_body(sid, button_key_prefix, flag_key)
+
+
+def _render_watchlist_toggle_button(sid: str, button_key_prefix: str) -> None:
+    """加入關注 / 移除關注 toggle button(已關注顯移除,反之加入)。"""
+    from src import database as db
+    already = db.is_in_watchlist(sid)
+    if already:
+        st.button(
+            "🗑️ 移除關注",
+            key=f"{button_key_prefix}_remove_{sid}",
+            use_container_width=True,
+            on_click=_on_remove_from_watchlist,
+            args=(sid,),
+        )
+    else:
+        st.button(
+            "⭐ 加入關注",
+            key=f"{button_key_prefix}_add_{sid}",
+            use_container_width=True,
+            on_click=_on_add_to_watchlist,
+            args=(sid,),
+        )
+
+
+def _render_card_metadata(n_signals: int, risk_reward: float | None) -> None:
+    """卡片 row 3 右側 metadata — 信號數 · R:R(secondary 11px caption)。"""
+    parts: list[str] = []
+    if n_signals > 0:
+        parts.append("熱門" if n_signals >= 2 else f"{n_signals} 訊號")
+    if risk_reward is not None and risk_reward == risk_reward:
+        try:
+            parts.append(f"R:R {float(risk_reward):.1f}")
+        except (TypeError, ValueError):
+            pass
+    if parts:
+        st.caption(" · ".join(parts))
+
+
+def _render_lazy_detail_section_compact(sid: str, button_key_prefix: str) -> None:
+    """row 3 的「展開詳細分析」按鈕(縮版)— 只渲 button,實際內容在卡片 below。"""
+    flag_key = f"card_exp_{button_key_prefix}_{sid}"
+    is_expanded = st.session_state.get(flag_key, False)
+    label = "🔼 收起" if is_expanded else "📊 展開詳細"
+    st.button(
+        label,
+        key=f"toggle_{flag_key}",
+        use_container_width=True,
+        help="技術分析 / 主力燈號 / 公司資訊",
+        on_click=_toggle_expander,
+        args=(flag_key,),
+    )
+
+
+def _render_lazy_detail_section_body(
+    sid: str, button_key_prefix: str, flag_key: str,
+) -> None:
+    """展開狀態下的 5 個 helper section body(button 之外另起一塊)。"""
+    from src.individual_sections import (
+        _render_action_suggestion,
+        _render_company_info_compact,
+        _render_key_levels,
+        _render_main_force_signal,
+        _render_technical_summary,
+    )
+    with st.container(border=True):
+        _render_main_force_signal(sid)
+        _render_technical_summary(sid)
+        _render_key_levels(sid)
+        _render_action_suggestion(sid)
+        _render_company_info_compact(sid, key_prefix=button_key_prefix)
 
 
 def _toggle_expander(flag_key: str) -> None:
@@ -178,56 +370,10 @@ def _toggle_expander(flag_key: str) -> None:
     st.session_state[flag_key] = not st.session_state.get(flag_key, False)
 
 
-def _render_lazy_detail_section(sid: str, button_key_prefix: str) -> None:
-    """卡片底部「詳細分析」區塊 — 真 lazy(session_state flag + 條件 render)。
-
-    收起狀態:只渲染「📊 展開詳細分析」按鈕(0 SQL)
-    展開狀態:渲染 5 個 helper section + 「🔼 收起」按鈕
-
-    flag key 帶 button_key_prefix + sid → 5 tabs UI 同 sid 可在
-    「全部」/「趨勢」分別開合,互不干擾。
-
-    按鈕走 on_click callback 而非 `if st.button(): rerun()` — 後者會把
-    其他 widget 的 edge-trigger button(e.g. 短線頁的「執行選股」)的
-    True 狀態吃掉,造成 page reset 假象。
-    """
-    flag_key = f"card_exp_{button_key_prefix}_{sid}"
-    is_expanded = st.session_state.get(flag_key, False)
-
-    if not is_expanded:
-        st.button(
-            "📊 展開詳細分析",
-            key=f"open_{flag_key}",
-            use_container_width=True,
-            help="點開才會跑技術分析 / 主力燈號 / 公司資訊(避免清單 cold load 慢)",
-            on_click=_toggle_expander,
-            args=(flag_key,),
-        )
-        return
-
-    # 展開:render 5 sections
-    from src.individual_sections import (
-        _render_action_suggestion,
-        _render_company_info_compact,
-        _render_key_levels,
-        _render_main_force_signal,
-        _render_technical_summary,
-    )
-    with st.container(border=True):
-        _render_main_force_signal(sid)
-        _render_technical_summary(sid)
-        _render_key_levels(sid)
-        _render_action_suggestion(sid)
-        # button_key_prefix 帶進 helper — 5 tabs UI 同 sid 可能出現在
-        # 「全部」+ 「趨勢」兩個 tab,各自 prefix 區隔避免 key 撞
-        _render_company_info_compact(sid, key_prefix=button_key_prefix)
-        st.button(
-            "🔼 收起",
-            key=f"close_{flag_key}",
-            use_container_width=True,
-            on_click=_toggle_expander,
-            args=(flag_key,),
-        )
+# NOTE: 舊版 _render_lazy_detail_section(button + body 一體)被 3-row grid
+# 改版拆成 _render_lazy_detail_section_compact(只 button)+
+# _render_lazy_detail_section_body(展開狀態 render 完整 5 sections),分別
+# 放進 row 3 button 列 + body 在卡片下方,維持「點才跑」的 lazy 行為不變。
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
