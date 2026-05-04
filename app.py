@@ -4208,6 +4208,32 @@ def _add_paper_trade_callback(
         st.toast(f"❌ {e}", icon="❌")
 
 
+def _bulk_add_paper_trades_callback(
+    rows: list[dict], entry_date: str,
+) -> None:
+    """on_click callback — 批量加入今日所有未追蹤 picks。
+
+    UNIQUE 衝突自動算 skipped(不報錯),callback 結束 toast 印 added/skipped。
+    """
+    from src import paper_trading as pt
+    result = pt.bulk_add_paper_trades(rows, entry_date=entry_date)
+    n_added = result["added"]
+    n_skipped = result["skipped"]
+    n_errors = result["errors"]
+    if n_added > 0:
+        msg = f"✅ 一鍵加入 {n_added} 張"
+        if n_skipped > 0:
+            msg += f"({n_skipped} 張已追蹤跳過)"
+        st.toast(msg, icon="🧪")
+        st.session_state["_paper_evaluate_buster"] = (
+            st.session_state.get("_paper_evaluate_buster", 0) + 1
+        )
+    elif n_skipped > 0:
+        st.toast(f"📭 全部 {n_skipped} 張都已追蹤過", icon="ℹ️")
+    if n_errors > 0:
+        st.toast(f"⚠ {n_errors} 張無效資料跳過", icon="⚠️")
+
+
 def _page_paper_tracking() -> None:
     """🧪 實測追蹤 — paper trading 驗證 Stage 2B v2 ML 過濾在實盤是否吻合 backtest 預測。
 
@@ -4290,6 +4316,27 @@ def _page_paper_tracking() -> None:
                             (today_iso,),
                         ).fetchall()
                     }
+
+                # 一鍵加入全部 picks(只算未追蹤的;callback 內仍經 UNIQUE 防雙加)
+                pending_count = sum(
+                    1 for r in rows_filtered
+                    if str(r.get("stock_id", "") or "") not in tracked_today
+                    and r.get("close") and float(r.get("close") or 0) > 0
+                )
+                if pending_count > 0:
+                    st.button(
+                        f"🧪 一鍵加入全部 picks({pending_count} 張未追蹤)",
+                        key=f"paper_bulk_add_{today_iso}",
+                        on_click=_bulk_add_paper_trades_callback,
+                        args=(rows_filtered, today_iso),
+                        type="primary", use_container_width=True,
+                    )
+                else:
+                    st.caption("✅ 今日所有 picks 都已加入追蹤")
+
+                st.markdown(
+                    "<small>或逐張選擇:</small>", unsafe_allow_html=True,
+                )
 
                 # 表格 + 每行旁邊「加入追蹤」button(on_click callback,不用 if-button 模式)
                 for r in rows_filtered:

@@ -108,6 +108,74 @@ def add_paper_trade(
         return cur.lastrowid if cur.rowcount > 0 else None
 
 
+def bulk_add_paper_trades(
+    rows: Iterable[dict],
+    entry_date: str,
+    target_pct: float = 0.05,
+    stop_pct: float = 0.03,
+    hold_days: int = 5,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """批量寫入 paper trades。已追蹤(UNIQUE 衝突)→ 算進 skipped 不加。
+
+    rows 預期 dict 含 stock_id / close;optional name / matched_strategies /
+    ml_prob。invalid(沒 sid / close ≤ 0 / NaN)→ errors。
+
+    回 {added, skipped, errors}。
+    """
+    n_added = 0
+    n_skipped = 0
+    n_errors = 0
+    for r in rows:
+        sid = str(r.get("stock_id", "") or "").strip()
+        if not sid:
+            n_errors += 1
+            continue
+        close = r.get("close")
+        try:
+            close_val = float(close) if close is not None else 0.0
+        except (TypeError, ValueError):
+            n_errors += 1
+            continue
+        if close_val <= 0 or close_val != close_val:  # NaN check
+            n_errors += 1
+            continue
+
+        name = str(r.get("name", "") or "")
+        matched = r.get("matched_strategies") or []
+        if isinstance(matched, str):
+            try:
+                matched = json.loads(matched)
+            except (TypeError, ValueError):
+                matched = []
+        ml_prob = r.get("ml_prob")
+        try:
+            ml_prob_val = (
+                float(ml_prob) if ml_prob is not None
+                and float(ml_prob) == float(ml_prob)  # not NaN
+                else None
+            )
+        except (TypeError, ValueError):
+            ml_prob_val = None
+
+        try:
+            new_id = add_paper_trade(
+                sid=sid, name=name, entry_date=entry_date,
+                entry_price=close_val,
+                matched_strategies=list(matched),
+                ml_prob=ml_prob_val,
+                target_pct=target_pct, stop_pct=stop_pct,
+                hold_days=hold_days, db_path=db_path,
+            )
+            if new_id:
+                n_added += 1
+            else:
+                n_skipped += 1  # UNIQUE conflict(已追蹤)
+        except ValueError:
+            n_errors += 1
+    return {"added": n_added, "skipped": n_skipped, "errors": n_errors}
+
+
 def already_tracked(
     sid: str, entry_date: str, db_path: str | Path | None = None,
 ) -> bool:
@@ -356,6 +424,7 @@ def compute_stats(settled_df: pd.DataFrame) -> dict:
 
 __all__ = [
     "add_paper_trade",
+    "bulk_add_paper_trades",
     "already_tracked",
     "evaluate_active_trades",
     "list_active_trades",

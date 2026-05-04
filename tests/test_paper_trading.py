@@ -117,6 +117,58 @@ def test_add_paper_trade_rejects_invalid_inputs(tmp_db):
         pt.add_paper_trade("2330", None, "2026-05-04", entry_price=100, target_pct=0)
 
 
+def test_bulk_add_inserts_all_pending(tmp_db):
+    """3 張全新 picks → 全寫入,added=3 / skipped=0 / errors=0。"""
+    rows = [
+        {"stock_id": "2330", "name": "台積電", "close": 600.0,
+         "matched_strategies": ["ma_alignment"], "ml_prob": 0.72},
+        {"stock_id": "2317", "name": "鴻海", "close": 200.0,
+         "matched_strategies": ["macd_golden"], "ml_prob": 0.65},
+        {"stock_id": "1101", "name": "台泥", "close": 50.0,
+         "matched_strategies": [], "ml_prob": None},
+    ]
+    result = pt.bulk_add_paper_trades(rows, entry_date="2026-05-04")
+    assert result == {"added": 3, "skipped": 0, "errors": 0}
+    with db.get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) c FROM paper_trades WHERE entry_date='2026-05-04'"
+        ).fetchone()["c"]
+    assert n == 3
+
+
+def test_bulk_add_skips_already_tracked(tmp_db):
+    """同 sid 同 entry_date 已存在 → 算 skipped,其他新的照常 added。"""
+    pt.add_paper_trade("2330", "台積電", "2026-05-04", 600.0)
+    rows = [
+        {"stock_id": "2330", "name": "台積電", "close": 605.0},  # 重複 → skip
+        {"stock_id": "2317", "name": "鴻海", "close": 200.0},   # 新 → add
+        {"stock_id": "1101", "name": "台泥", "close": 50.0},     # 新 → add
+    ]
+    result = pt.bulk_add_paper_trades(rows, entry_date="2026-05-04")
+    assert result == {"added": 2, "skipped": 1, "errors": 0}
+    with db.get_conn() as conn:
+        sids = {
+            r["sid"] for r in conn.execute(
+                "SELECT sid FROM paper_trades WHERE entry_date='2026-05-04'"
+            ).fetchall()
+        }
+    assert sids == {"2330", "2317", "1101"}
+
+
+def test_bulk_add_counts_invalid_rows_as_errors(tmp_db):
+    """invalid rows(沒 sid / close 0 / close NaN)→ errors,不影響其他。"""
+    rows = [
+        {"stock_id": "", "close": 100.0},        # 空 sid → error
+        {"stock_id": "2330", "close": 0},        # close 0 → error
+        {"stock_id": "2317", "close": float("nan")},  # NaN → error
+        {"stock_id": "1101", "close": 50.0},     # OK → add
+    ]
+    result = pt.bulk_add_paper_trades(rows, entry_date="2026-05-04")
+    assert result["added"] == 1
+    assert result["errors"] == 3
+    assert result["skipped"] == 0
+
+
 def test_already_tracked_returns_true_after_add(tmp_db):
     pt.add_paper_trade("2330", None, "2026-05-04", entry_price=600.0)
     assert pt.already_tracked("2330", "2026-05-04") is True
