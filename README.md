@@ -279,7 +279,7 @@ models/
 
 | Strategy | Threshold | 校準源 |
 |---|:---:|---|
-| ma_alignment | 0.60 | Stage 2A 60d audit |
+| ma_alignment | 0.55 | Stage 2B 126d 重校準(0.60 → 0.55,fires 多 8 個) |
 | bias_convergence | 0.65 | Stage 2B 30d calibration |
 | macd_golden | 0.60 | Stage 2B 30d calibration |
 | bb_lower_rebound | 0.50 | Stage 2B 30d calibration |

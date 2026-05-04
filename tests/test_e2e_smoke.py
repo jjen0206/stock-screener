@@ -2233,8 +2233,8 @@ def test_apply_confidence_filter_empty_input(isolated_db):
 # === Stage 2A: per-strategy ML filter ===
 
 def test_apply_per_strategy_ml_filter_ma_alignment_threshold(isolated_db):
-    """ma_alignment 在 STRATEGY_ML_THRESHOLDS 中設 0.60。
-    pick 命中 ma_alignment + ml_prob 0.55 → 過濾;ml_prob 0.65 → 保留。
+    """ma_alignment 在 STRATEGY_ML_THRESHOLDS 中設 0.55(Stage 2B 重校準)。
+    pick 命中 ma_alignment + ml_prob 0.50 → 過濾;ml_prob 0.60 → 保留。
     """
     import streamlit as st
     import app as _app
@@ -2244,11 +2244,11 @@ def test_apply_per_strategy_ml_filter_ma_alignment_threshold(isolated_db):
     # 模擬 row dict + matched_strategies
     rows = [
         {
-            "stock_id": "2330", "ml_prob": 0.55,
+            "stock_id": "2330", "ml_prob": 0.50,
             "matched_strategies": ["ma_alignment"],
         },
         {
-            "stock_id": "2317", "ml_prob": 0.65,
+            "stock_id": "2317", "ml_prob": 0.60,
             "matched_strategies": ["ma_alignment"],
         },
         {
@@ -2259,8 +2259,8 @@ def test_apply_per_strategy_ml_filter_ma_alignment_threshold(isolated_db):
     filtered, total = _app._apply_confidence_filter(rows)
     assert total == 3
     sids = [r["stock_id"] for r in filtered]
-    assert "2317" in sids       # 0.65 ≥ 0.60 → 留
-    assert "2330" not in sids   # 0.55 < 0.60 → 過濾
+    assert "2317" in sids       # 0.60 ≥ 0.55 → 留
+    assert "2330" not in sids   # 0.50 < 0.55 → 過濾
     assert "9999" not in sids   # ml_prob None + threshold 存在 → 過濾
 
 
@@ -2298,7 +2298,7 @@ def test_apply_per_strategy_ml_filter_no_threshold_strategies_unchanged(
 
 
 def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
-    """pick 同時命中 bias_convergence(0.65)+ ma_alignment(0.60)→ 取最嚴格 0.65 套用。"""
+    """pick 同時命中 bias_convergence(0.65)+ ma_alignment(0.55)→ 取最嚴格 0.65 套用。"""
     import streamlit as st
     import app as _app
 
@@ -2309,7 +2309,7 @@ def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
             "stock_id": "2330", "ml_prob": 0.70,
             "matched_strategies": ["bias_convergence", "ma_alignment"],
         },
-        {  # 0.62 < 0.65 → 過濾(雖然 0.62 ≥ 0.60 ma_alignment threshold)
+        {  # 0.62 < 0.65 → 過濾(雖然 0.62 ≥ 0.55 ma_alignment threshold)
             "stock_id": "2317", "ml_prob": 0.62,
             "matched_strategies": ["bias_convergence", "ma_alignment"],
         },
@@ -2337,14 +2337,14 @@ def test_per_strategy_threshold_for_pick_helper(isolated_db):
     """_per_strategy_threshold_for_pick 取最嚴格門檻。"""
     import app as _app
 
-    # bias_convergence 0.65 + ma_alignment 0.60 → 0.65(strictest)
+    # bias_convergence 0.65 + ma_alignment 0.55 → 0.65(strictest)
     assert _app._per_strategy_threshold_for_pick(
         ["bias_convergence", "ma_alignment"]
     ) == 0.65
-    # ma_alignment 0.60 + volume_kd(無 threshold)→ 0.60
+    # ma_alignment 0.55 + volume_kd(無 threshold)→ 0.55
     assert _app._per_strategy_threshold_for_pick(
         ["ma_alignment", "volume_kd"]
-    ) == 0.60
+    ) == 0.55
     # 全無 threshold → None(rsi_recovery / volume_kd 都不在 dict)
     assert _app._per_strategy_threshold_for_pick(
         ["rsi_recovery", "volume_kd"]
@@ -2357,7 +2357,7 @@ def test_strategy_ml_thresholds_contains_calibrated_keys():
     """STRATEGY_ML_THRESHOLDS dict 必含 Stage 2B 校準後的 6 個 thresholds。"""
     from src.strategies import STRATEGY_ML_THRESHOLDS
     expected = {
-        "ma_alignment": 0.60,
+        "ma_alignment": 0.55,
         "bias_convergence": 0.65,
         "macd_golden": 0.60,
         "bb_lower_rebound": 0.50,
@@ -2380,11 +2380,11 @@ def test_routing_strategy_for_pick_returns_strictest_threshold_strategy(isolated
     """_routing_strategy_for_pick 取 STRATEGY_ML_THRESHOLDS 內最嚴格 threshold 對應的 strategy_name。"""
     import app as _app
 
-    # bias_convergence(0.65) + ma_alignment(0.60) → 回 bias_convergence(strictest)
+    # bias_convergence(0.65) + ma_alignment(0.55) → 回 bias_convergence(strictest)
     assert _app._routing_strategy_for_pick(
         ["bias_convergence", "ma_alignment"]
     ) == "bias_convergence"
-    # ma_alignment(0.60) + volume_kd(無)→ 回 ma_alignment
+    # ma_alignment(0.55) + volume_kd(無)→ 回 ma_alignment
     assert _app._routing_strategy_for_pick(
         ["ma_alignment", "volume_kd"]
     ) == "ma_alignment"
@@ -2399,7 +2399,7 @@ def test_routing_strategy_for_pick_returns_strictest_threshold_strategy(isolated
 def test_enrich_df_with_ml_prob_per_strategy_routes_to_strategy_model(
     isolated_db, monkeypatch,
 ):
-    """給 agg + pick 命中 ma_alignment(0.60 threshold)→ 用 per-strategy model
+    """給 agg + pick 命中 ma_alignment(0.55 threshold)→ 用 per-strategy model
     預測,不走通用 model。"""
     import app as _app
     import pandas as pd

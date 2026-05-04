@@ -452,11 +452,11 @@ def _get_ml_model_for_enrich():
 
 
 def _render_high_confidence_sidebar() -> None:
-    """sidebar 「🎯 高信心模式」toggle — Stage 2A per-strategy 模式。
+    """sidebar 「🎯 高信心模式」toggle — Stage 2B per-strategy 模式。
 
-    每個策略各自校準 ML 門檻(來自 60-day backtest grid search),不再用全
-    域 slider。當前生效:**ma_alignment ≥ 0.60**(其餘策略不過濾,實測加
-    過濾反而傷 alpha 或沒幫助)。
+    每個策略各自校準 ML 門檻(per-strategy retrain + grid search)。當前生效
+    6 個策略 thresholds(STRATEGY_ML_THRESHOLDS dict);其餘 5 個結構性低 fire
+    維持不過濾。
 
     跨頁面 session_state 共用,預設開。
     """
@@ -469,9 +469,12 @@ def _render_high_confidence_sidebar() -> None:
         key="high_confidence_mode",
     )
     st.sidebar.caption(
-        "📊 per-strategy 模式自動套用:\n"
-        "・**多頭排列** ≥ 0.60(基於 60-day backtest +12.9 pp WR)\n"
-        "・其他 10 套策略不過濾(實測 ML filter 沒幫助)"
+        "📊 per-strategy 模式自動套用(6 個策略,Stage 2B 校準):\n"
+        "・**乖離收斂 / 量爆突破** ≥ 0.65\n"
+        "・**MACD 黃金交叉 / 跳空缺口** ≥ 0.60\n"
+        "・**多頭排列** ≥ 0.55\n"
+        "・**布林下軌反彈** ≥ 0.50\n"
+        "・其他 5 套策略不過濾(sample 太小或 audit 顯示無效)"
     )
 
 

@@ -1094,20 +1094,22 @@ STRATEGY_LABELS: dict[str, str] = {
 # strategy retrain)後 5 個 strategies 額外過 winner — 通用模型跟其他策略 alpha
 # 信號重疊的問題確認被 per-strategy 重訓化解。
 #
-# Threshold 對照(per-strategy 校準 30d):
-#   bias_convergence    0.65 → 100% WR (97 fires)
-#   macd_golden         0.60 → 100% WR (30 fires)
-#   bb_lower_rebound    0.50 → 75.8% WR (33 fires)
-#   volume_breakout     0.65 → 100% WR (74 fires)
-#   gap_up              0.60 → 100% WR (108 fires)
-#   ma_alignment        保留 0.60(Stage 2A 60d 確認;30d sample 太小 (<30 fires)
-#                       calibrator 退 baseline,但 60d 已驗證有效)
+# Threshold 對照(per-strategy 校準 30d / 60d / 126d):
+#   bias_convergence    0.65 → 100% WR (30d: 97 fires)
+#   macd_golden         0.60 → 100% WR (30d: 30 fires)
+#   bb_lower_rebound    0.50 → 75.8% WR (30d: 33 fires)
+#   volume_breakout     0.65 → 100% WR (30d: 74 fires)
+#   gap_up              0.60 → 100% WR (30d: 108 fires)
+#   ma_alignment        0.55 → 100% WR (126d: 45 fires;60d: 26 fires < 30 邊緣)
+#                       — Stage 2B 重校準把 0.60 → 0.55:同 100% WR 但 fires 多
+#                       8 個(126d 37→45),60d 多 5 個(21→26)。60d 仍不過嚴格
+#                       30-fire bar,但 126d 穩定 winner,保留入 dict。
 #
 # 沒過 winner / 沒跑(sample 太小)的策略不放 dict 內(.get → None,不過濾):
-#   rsi_recovery / volume_kd / ma_squeeze_breakout / inst_consensus /
-#   inst_silent_accum
+#   rsi_recovery(38 samples 結構性 sparse,200/365/560-day 全試過皆 38)/
+#   volume_kd / ma_squeeze_breakout / inst_consensus / inst_silent_accum
 STRATEGY_ML_THRESHOLDS: dict[str, float] = {
-    "ma_alignment": 0.60,
+    "ma_alignment": 0.55,
     "bias_convergence": 0.65,
     "macd_golden": 0.60,
     "bb_lower_rebound": 0.50,
