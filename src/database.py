@@ -231,6 +231,27 @@ SCHEMA: list[str] = [
         llm_updated_at     TEXT
     )
     """,
+    # daily_picks:nightly 預跑 run_all_strategies 的結果。App 端 cache 命中即
+    # 0ms 回(取代每 rerun 重算 ~338ms)。一行 = 一個 (sid, strategy) 命中,
+    # payload 是該 row 完整 dict 的 JSON。
+    # universe:'pure_stock' / 'with_etf' / 'top_50' 三種預跑常用 universe。
+    # params_hash:'default_v1' 表示 default params,user 改過 sliders 走 runtime。
+    """
+    CREATE TABLE IF NOT EXISTS daily_picks (
+        trade_date  TEXT NOT NULL,
+        universe    TEXT NOT NULL,
+        strategy    TEXT NOT NULL,
+        sid         TEXT NOT NULL,
+        score       REAL,
+        rank        INTEGER,
+        params_hash TEXT NOT NULL,
+        payload     TEXT,
+        computed_at TEXT NOT NULL,
+        PRIMARY KEY (trade_date, universe, strategy, sid, params_hash)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_daily_picks_lookup "
+    "ON daily_picks(trade_date, universe, params_hash)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -971,6 +992,144 @@ def stocks_with_min_history(
     return [r["stock_id"] for r in rows]
 
 
+# === daily_picks:預跑 strategies 結果(nightly precompute) ===
+
+def dump_daily_picks(
+    trade_date: str,
+    universe_key: str,
+    agg: dict[str, dict],
+    params_hash: str = "default_v1",
+    db_path: str | Path | None = None,
+) -> int:
+    """把 run_all_strategies 結果 bulk insert 進 daily_picks。
+
+    Args:
+        trade_date: 'YYYY-MM-DD'
+        universe_key: 'pure_stock' / 'with_etf' / 'top_50' 之一(precompute 用)
+        agg: run_all_strategies 回傳的 dict[sid, {name, signals, details}]
+        params_hash: 'default_v1' 表示 default params(預跑路徑)
+        db_path: 預設用 config.DATABASE_PATH
+
+    一個 (sid, strategy) 變一行;score/rank 留 None(目前不用,留欄位給未
+    來擴充);payload = 該策略 row dict 的 JSON(name + close + 各 indicator)。
+    用 ON CONFLICT REPLACE 重跑同 (date, universe, strategy, sid, params_hash)
+    時覆蓋舊值。
+
+    回 inserted row count(若 agg 全空回 0)。
+    """
+    import json as _json
+
+    if not agg:
+        return 0
+
+    now = _now_iso()
+    rows: list[dict] = []
+    for sid, info in agg.items():
+        for strategy_key, row_dict in (info.get("details") or {}).items():
+            # row_dict 內可能含 numpy/pandas 類型,json.dumps 用 default=str
+            payload = _json.dumps(row_dict, ensure_ascii=False, default=str)
+            rows.append({
+                "trade_date": trade_date,
+                "universe": universe_key,
+                "strategy": strategy_key,
+                "sid": str(sid),
+                "score": None,
+                "rank": None,
+                "params_hash": params_hash,
+                "payload": payload,
+                "computed_at": now,
+            })
+
+    if not rows:
+        return 0
+
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO daily_picks (
+                trade_date, universe, strategy, sid, score, rank,
+                params_hash, payload, computed_at
+            ) VALUES (
+                :trade_date, :universe, :strategy, :sid, :score, :rank,
+                :params_hash, :payload, :computed_at
+            )
+            ON CONFLICT(trade_date, universe, strategy, sid, params_hash)
+            DO UPDATE SET
+                score=excluded.score, rank=excluded.rank,
+                payload=excluded.payload, computed_at=excluded.computed_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def load_daily_picks(
+    trade_date: str,
+    universe_key: str,
+    params_hash: str = "default_v1",
+    db_path: str | Path | None = None,
+) -> dict[str, dict] | None:
+    """從 daily_picks 撈回 agg dict(跟 run_all_strategies 同 schema)。
+
+    回:
+        - None:cache miss(這 (date, universe, params_hash) 組合無資料)
+        - dict[sid, {name, signals, details}]:重組成跟 run_all_strategies 一樣
+
+    signals 欄位用 STRATEGY_LABELS 還原中文標籤(跟 run_all_strategies 一致)。
+    """
+    import json as _json
+
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT strategy, sid, payload FROM daily_picks
+            WHERE trade_date=? AND universe=? AND params_hash=?
+            """,
+            (trade_date, universe_key, params_hash),
+        ).fetchall()
+
+    if not rows:
+        return None
+
+    # lazy import 避免循環依賴(strategies 也 import database)
+    from src.strategies import STRATEGY_LABELS
+
+    agg: dict[str, dict] = {}
+    for r in rows:
+        sid = r["sid"]
+        strategy = r["strategy"]
+        try:
+            payload = _json.loads(r["payload"]) if r["payload"] else {}
+        except (TypeError, _json.JSONDecodeError):
+            payload = {}
+        if sid not in agg:
+            agg[sid] = {
+                "name": payload.get("name", ""),
+                "signals": [],
+                "details": {},
+            }
+        # 用 STRATEGY_LABELS 拿中文標籤;未知 strategy key 退回原 key
+        agg[sid]["signals"].append(STRATEGY_LABELS.get(strategy, strategy))
+        agg[sid]["details"][strategy] = payload
+    return agg
+
+
+def clear_daily_picks_for_date(
+    trade_date: str,
+    db_path: str | Path | None = None,
+) -> int:
+    """清掉某日的 daily_picks(precompute 重跑時先清避免遺留舊 universe/params)。
+    回 deleted row count。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM daily_picks WHERE trade_date=?", (trade_date,),
+        )
+        return cur.rowcount
+
+
 # === Trades / P&L tracking ===
 
 def add_trade(
@@ -1135,5 +1294,8 @@ __all__ = [
     "get_position",
     "get_unrealized_pnl",
     "stocks_with_min_history",
+    "dump_daily_picks",
+    "load_daily_picks",
+    "clear_daily_picks_for_date",
     "SCHEMA",
 ]

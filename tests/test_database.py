@@ -391,3 +391,148 @@ def test_get_trades_filter_by_stock(tmp_db):
     assert len(db.get_trades("2330")) == 2
     assert len(db.get_trades("2454")) == 1
     assert len(db.get_trades()) == 3
+
+
+# === daily_picks(precompute 預跑 strategies)===
+
+def _fake_agg_2sids() -> dict[str, dict]:
+    """構造跟 run_all_strategies 同 schema 的假 agg。"""
+    return {
+        "2330": {
+            "name": "台積電",
+            "signals": ["量價KD", "多頭排列"],
+            "details": {
+                "volume_kd": {
+                    "stock_id": "2330", "name": "台積電",
+                    "close": 600.0, "atr14": 12.0, "matched_at": "2026-05-04",
+                },
+                "ma_alignment": {
+                    "stock_id": "2330", "name": "台積電",
+                    "close": 600.0, "ma5": 595.0, "ma20": 580.0, "ma60": 540.0,
+                },
+            },
+        },
+        "2317": {
+            "name": "鴻海",
+            "signals": ["量價KD"],
+            "details": {
+                "volume_kd": {
+                    "stock_id": "2317", "name": "鴻海",
+                    "close": 200.0, "atr14": 5.0, "matched_at": "2026-05-04",
+                },
+            },
+        },
+    }
+
+
+def test_daily_picks_schema_exists(tmp_db):
+    """init_db 後 daily_picks 表 + index 存在,欄位齊全。"""
+    with db.get_conn() as conn:
+        # 表存在
+        names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "daily_picks" in names
+
+        # 欄位齊全
+        cols = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(daily_picks)"
+            ).fetchall()
+        }
+        assert cols == {
+            "trade_date", "universe", "strategy", "sid",
+            "score", "rank", "params_hash", "payload", "computed_at",
+        }
+
+        # 查詢 index 存在
+        idx_names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_daily_picks_lookup" in idx_names
+
+
+def test_dump_daily_picks_then_load_roundtrip(tmp_db):
+    """dump → load 還原成同 schema agg dict,signals 用中文標籤。"""
+    fake_agg = _fake_agg_2sids()
+    n = db.dump_daily_picks("2026-05-04", "pure_stock", fake_agg)
+    assert n == 3  # 2330 兩個策略 + 2317 一個
+
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock")
+    assert loaded is not None
+    assert sorted(loaded.keys()) == ["2317", "2330"]
+
+    # 2330 兩個策略命中 + signals 是中文標籤
+    assert sorted(loaded["2330"]["details"].keys()) == ["ma_alignment", "volume_kd"]
+    assert "量價KD" in loaded["2330"]["signals"]
+    assert "多頭排列" in loaded["2330"]["signals"]
+    assert loaded["2330"]["name"] == "台積電"
+
+    # 2317 只一個策略
+    assert sorted(loaded["2317"]["details"].keys()) == ["volume_kd"]
+    assert loaded["2317"]["signals"] == ["量價KD"]
+
+    # payload 還原成 dict + 數值
+    payload = loaded["2330"]["details"]["volume_kd"]
+    assert payload["stock_id"] == "2330"
+    assert payload["close"] == 600.0
+    assert payload["atr14"] == 12.0
+
+
+def test_load_daily_picks_cache_miss_returns_none(tmp_db):
+    """daily_picks 沒這 (date, universe, params_hash) → 回 None(讓 caller fallback)。"""
+    assert db.load_daily_picks("2026-05-04", "pure_stock") is None
+    # 灌一筆別 universe 的,查我要的 universe 仍 miss
+    db.dump_daily_picks("2026-05-04", "top_50", _fake_agg_2sids())
+    assert db.load_daily_picks("2026-05-04", "pure_stock") is None
+    # 不同 params_hash 也 miss
+    assert db.load_daily_picks("2026-05-04", "top_50", "custom_v1") is None
+
+
+def test_dump_daily_picks_on_conflict_replaces(tmp_db):
+    """同 (date, universe, strategy, sid, params_hash) 重新 dump → 用新值覆蓋。"""
+    db.dump_daily_picks("2026-05-04", "pure_stock", _fake_agg_2sids())
+    # 改 close 重 dump
+    new_agg = _fake_agg_2sids()
+    new_agg["2330"]["details"]["volume_kd"]["close"] = 999.99
+    db.dump_daily_picks("2026-05-04", "pure_stock", new_agg)
+
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock")
+    assert loaded["2330"]["details"]["volume_kd"]["close"] == 999.99
+    # 沒爆出兩倍 row
+    with db.get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) c FROM daily_picks").fetchone()["c"]
+    assert n == 3
+
+
+def test_clear_daily_picks_for_date_only_affects_target_date(tmp_db):
+    """清今天不該影響昨天。"""
+    db.dump_daily_picks("2026-05-03", "pure_stock", _fake_agg_2sids())
+    db.dump_daily_picks("2026-05-04", "pure_stock", _fake_agg_2sids())
+    assert db.clear_daily_picks_for_date("2026-05-04") == 3
+    # 5-04 沒了,5-03 還在
+    assert db.load_daily_picks("2026-05-04", "pure_stock") is None
+    assert db.load_daily_picks("2026-05-03", "pure_stock") is not None
+
+
+def test_dump_daily_picks_empty_agg_returns_zero(tmp_db):
+    """空 agg → 不該炸 + 回 0。"""
+    assert db.dump_daily_picks("2026-05-04", "pure_stock", {}) == 0
+
+
+def test_dump_daily_picks_separates_universes(tmp_db):
+    """同 date 但不同 universe 各自獨立,load 不串(避免 pure_stock 撈到 top_50 結果)。"""
+    db.dump_daily_picks("2026-05-04", "pure_stock", _fake_agg_2sids())
+    only_2330 = {
+        "2330": _fake_agg_2sids()["2330"],
+    }
+    db.dump_daily_picks("2026-05-04", "top_50", only_2330)
+
+    pure = db.load_daily_picks("2026-05-04", "pure_stock")
+    top50 = db.load_daily_picks("2026-05-04", "top_50")
+    assert sorted(pure.keys()) == ["2317", "2330"]   # pure_stock 兩檔
+    assert list(top50.keys()) == ["2330"]            # top_50 只有 2330
