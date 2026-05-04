@@ -696,6 +696,69 @@ def format_pick_summary(sid: str, indent: str = "   ") -> str:
     return indent + " / ".join([tech_part, force_part, action_part, ai_part])
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _read_company_profile_cached(sid: str) -> dict | None:
+    """從 SQLite company_profiles 讀整筆資料(read-only,**不**呼叫 LLM)。
+
+    `@st.cache_data(ttl=300)` 避免一張清單 N 張卡片重複查同股(138 picks
+    一次展開 = 138 次 SELECT 是純浪費)。TTL 5 分鐘給 user 點「重新生成」
+    後一段時間能看到新值。
+
+    回 dict(同 company_profiles 欄位)或 None。
+    """
+    try:
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT industry, market, description, uniqueness, moat, "
+                "llm_updated_at FROM company_profiles WHERE stock_id=?",
+                (sid,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return dict(row) if row else None
+
+
+def _render_company_info_compact(sid: str) -> None:
+    """卡片 expander 內的精簡公司資訊(read-only,純讀 SQLite cache)。
+
+    設計:
+    - **不主動跑 LLM** — 138 picks 全展開會打爆 Gemini quota;想生成走個股頁
+    - **不放重新生成按鈕** — 同上
+    - facts 即時(industry / market 從 cache 一行帶出)
+    - LLM 3 段(description / uniqueness / moat)有就顯,沒就 placeholder
+    """
+    profile = _read_company_profile_cached(sid)
+    st.markdown("### 🏢 公司資訊")
+
+    if profile is None:
+        st.caption(
+            "🤖 公司資訊尚未生成 — 進「🔍 個股」頁查詢此股可自動生成"
+            "(LLM 描述會 cache,之後卡片就看得到)"
+        )
+        return
+
+    # facts(industry / market)— 沒寫進 cache 用 — 佔位
+    industry = profile.get("industry") or "—"
+    market = profile.get("market") or "—"
+    st.markdown(f"**產業**:{industry}　|　**市場**:{market}")
+
+    desc = profile.get("description")
+    uniq = profile.get("uniqueness")
+    moat = profile.get("moat")
+    if not (desc or uniq or moat):
+        st.caption(
+            "📝 LLM 描述尚未生成 — 進「🔍 個股」頁查詢此股可自動生成"
+        )
+        return
+
+    if desc:
+        st.markdown(f"**📝 業務**:{desc}")
+    if uniq:
+        st.markdown(f"**✨ 獨特性**:{uniq}")
+    if moat:
+        st.markdown(f"**🏰 護城河**:{moat}")
+
+
 def _render_main_force_signal(sid: str) -> None:
     """個股頁:主力燈號(出貨 / 吸貨判斷 + 強度條 + 解讀)。"""
     result = _compute_main_force_signal(sid)

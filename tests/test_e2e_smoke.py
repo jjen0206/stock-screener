@@ -2237,3 +2237,136 @@ def test_system_health_renders_all_sections(isolated_db):
     assert len(at.dataframe) >= 2, (
         f"預期 ≥2 個 dataframe, 實際 {len(at.dataframe)}"
     )
+
+
+# ============================================================================
+# 卡片詳細分析 expander:🏢 公司資訊 section(cache-only,不主動跑 LLM)
+# ============================================================================
+
+def _seed_company_profile(
+    sid: str, *, industry: str = "半導體業", market: str = "上市",
+    description: str | None = "晶圓代工龍頭",
+    uniqueness: str | None = "領先製程節點",
+    moat: str | None = "規模 + 客戶綁定",
+) -> None:
+    """灌一筆 company_profiles 給 _render_company_info_compact 讀。"""
+    from src import database as db
+    db.init_db()
+    with db.get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO company_profiles (
+                stock_id, industry, market, description, uniqueness, moat,
+                finmind_updated_at, llm_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stock_id) DO UPDATE SET
+                industry=excluded.industry, market=excluded.market,
+                description=excluded.description, uniqueness=excluded.uniqueness,
+                moat=excluded.moat
+            """,
+            (
+                sid, industry, market, description, uniqueness, moat,
+                "2026-05-04T00:00:00+00:00", "2026-05-04T00:00:00+00:00",
+            ),
+        )
+
+
+def test_company_info_compact_shows_facts_and_llm_when_cached(isolated_db):
+    """SQLite 有完整 profile → markdown 含 industry / description / uniqueness / moat。"""
+    from src.individual_sections import _read_company_profile_cached
+
+    _seed_company_profile("2330")
+    _read_company_profile_cached.clear()  # 避免上一個 test 殘留 cache
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        _render_company_info_compact("2330")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(str(m.value) for m in at.markdown)
+    assert "公司資訊" in md_text, f"缺標題: {md_text!r}"
+    assert "半導體業" in md_text, f"缺 industry: {md_text!r}"
+    assert "上市" in md_text, f"缺 market: {md_text!r}"
+    assert "晶圓代工龍頭" in md_text, f"缺 description: {md_text!r}"
+    assert "領先製程節點" in md_text, f"缺 uniqueness: {md_text!r}"
+    assert "規模 + 客戶綁定" in md_text, f"缺 moat: {md_text!r}"
+
+
+def test_company_info_compact_fallback_when_no_cache(isolated_db):
+    """SQLite 沒這檔 → 顯 placeholder caption,**不**呼叫 LLM。"""
+    from src.individual_sections import _read_company_profile_cached
+
+    _read_company_profile_cached.clear()
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        _render_company_info_compact("9999")  # 不存在
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    captions = [str(c.value) for c in at.caption]
+    caption_text = "\n".join(captions)
+    assert "尚未生成" in caption_text, (
+        f"預期 fallback 提示『尚未生成』, 實際 captions: {captions}"
+    )
+
+
+def test_company_info_compact_facts_only_when_no_llm(isolated_db):
+    """有 facts 但 description=None → 顯 industry / market + 提示『LLM 描述尚未生成』。"""
+    from src.individual_sections import _read_company_profile_cached
+
+    _seed_company_profile(
+        "2317", industry="電腦及週邊設備業", market="上市",
+        description=None, uniqueness=None, moat=None,
+    )
+    _read_company_profile_cached.clear()
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        _render_company_info_compact("2317")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(str(m.value) for m in at.markdown)
+    assert "電腦及週邊設備業" in md_text  # facts 在
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "LLM 描述尚未生成" in captions, (
+        f"預期 caption 提示 LLM 尚未生成, 實際: {captions}"
+    )
+
+
+def test_company_info_compact_does_not_call_llm(isolated_db, monkeypatch):
+    """硬性確認 — render 流程不該觸發 generate_with_gemini(避免 138 picks
+    全展開打爆 quota)。"""
+    from src import company_profile as cp
+    from src.individual_sections import _read_company_profile_cached
+
+    _read_company_profile_cached.clear()
+
+    llm_calls = []
+    monkeypatch.setattr(
+        cp, "generate_with_gemini",
+        lambda *a, **kw: (llm_calls.append(1) or {
+            "description": "X", "uniqueness": "Y", "moat": "Z",
+        }),
+    )
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        # 不存在的 + 存在的 都跑一次 — 都不該觸發 LLM
+        _render_company_info_compact("9999")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert llm_calls == [], (
+        f"render 不該呼叫 LLM(會打爆 quota), 但被叫了 {len(llm_calls)} 次"
+    )

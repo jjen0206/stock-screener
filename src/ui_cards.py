@@ -155,11 +155,14 @@ def render_pick_card(
             )
 
         # 詳細分析 expander(無條件顯示 — 推薦卡 / watchlist 卡都有)
-        # 預設收合,點開才執行 4 個 helper → 不影響清單初次渲染速度。
-        # 4 個 section 跟個股頁同一份 helper,展開後數值跟個股頁一致。
+        # 預設收合,點開才執行 5 個 helper → 不影響清單初次渲染速度。
+        # 4 個技術 section 跟個股頁同一份 helper,展開後數值跟個股頁一致。
+        # 第 5 個 section(公司資訊)是 cache-only,不主動跑 LLM(避免 138
+        # picks 全展開時打爆 Gemini quota)。想生成走個股頁。
         with st.expander("📊 詳細分析", expanded=False):
             from src.individual_sections import (
                 _render_action_suggestion,
+                _render_company_info_compact,
                 _render_key_levels,
                 _render_main_force_signal,
                 _render_technical_summary,
@@ -168,6 +171,7 @@ def render_pick_card(
             _render_technical_summary(sid)
             _render_key_levels(sid)
             _render_action_suggestion(sid)
+            _render_company_info_compact(sid)
 
 
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
