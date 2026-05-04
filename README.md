@@ -252,6 +252,90 @@ universe 不在預跑清單)。
 
 可調 sliders 改過 → 走 runtime,正常。
 
+## ML 勝率預測管線(Stage 2B)
+
+每張 pick 卡片右上會顯示「🤖 N%」AI 勝率。**「高信心模式」toggle**(開啟側欄)
+會用該勝率過濾 picks,只留下高機率命中的訊號 — 短線使用者「寧少而精」。
+
+### 模型架構
+
+兩層模型,inference 時優先 per-strategy → 沒就 fallback 通用:
+
+```
+models/
+├── short_pick.pkl              # 通用 RandomForest(全 universe sliding window 訓練)
+├── short_pick.meta.json
+└── per_strategy/               # 每 strategy 一個專屬模型(Stage 2B)
+    ├── ma_alignment.pkl + .meta.json     # samples ≥ 100 → trained
+    ├── bias_convergence.pkl + .meta.json
+    ├── macd_golden.pkl + .meta.json
+    ├── bb_lower_rebound.pkl + .meta.json
+    ├── volume_breakout.pkl + .meta.json
+    ├── gap_up.pkl + .meta.json
+    └── ...                              # 樣本不足 strategies 只 dump meta(status="fallback")
+```
+
+### 過濾門檻(`STRATEGY_ML_THRESHOLDS` in `src/strategies.py`)
+
+| Strategy | Threshold | 校準源 |
+|---|:---:|---|
+| ma_alignment | 0.60 | Stage 2A 60d audit |
+| bias_convergence | 0.65 | Stage 2B 30d calibration |
+| macd_golden | 0.60 | Stage 2B 30d calibration |
+| bb_lower_rebound | 0.50 | Stage 2B 30d calibration |
+| volume_breakout | 0.65 | Stage 2B 30d calibration |
+| gap_up | 0.60 | Stage 2B 30d calibration |
+| 其餘 5 個 | 不過濾 | sample 太小 / 沒過 winner |
+
+「pick 同時命中多 strategies → 取最嚴格(最高)threshold 套用」— 避免寬鬆策略
+讓低分 pick 漏過。
+
+### 自動重訓(每週日凌晨)
+
+`.github/workflows/retrain-ml.yml` 排程:**每週日 18:00 UTC = 週一 02:00 台北**
+跑兩個訓練腳本:
+1. `scripts/train_ml_model.py` — 訓練通用模型(short_pick.pkl)
+2. `scripts/train_per_strategy_ml.py --lookback 200` — 每 strategy 訓練專屬模型
+
+跑完 commit `models/short_pick.{pkl,meta.json}` + `models/per_strategy/*` 進 repo。
+Streamlit Cloud 容器下次 redeploy 時 git pull 拿新 pkl。
+
+通用模型 accuracy 退化 > 5pp → 拒絕 commit(避免推爛模型)。per-strategy 模型
+無退化檢查 — 樣本不足走 fallback 通用 model,不會壞。
+
+### 重新校準 thresholds(retrain 後 ad-hoc)
+
+如果重訓後想重新校準 dict 內的 thresholds:
+
+```bash
+# Stage 2B 路徑(用新 per-strategy models 校準,推薦)
+python scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models
+
+# 自訂 lookback
+python scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models --lookback 60
+
+# 4-mode backtest 對比驗證(baseline / global / per-strat thr / per-strat full)
+python scripts/audit/compare_ml_modes.py --lookback 126
+```
+
+校準會印 winner thresholds 跟建議的 dict 內容 — 手動 copy-paste 進
+`src/strategies.py` 的 `STRATEGY_ML_THRESHOLDS`。
+
+### 手動訓練(本機開發)
+
+```bash
+# 通用模型(short_pick.pkl)
+python scripts/train_ml_model.py
+
+# 全 11 個 per-strategy 模型
+python scripts/train_per_strategy_ml.py --lookback 200
+
+# 單一 strategy
+python scripts/train_per_strategy_ml.py --strategy ma_alignment --lookback 200
+```
+
+訓完 pkl + meta.json 進 `models/per_strategy/`,可手動 commit + push。
+
 ## 常見問題
 
 **Q: Claude Code 改了我不想改的檔案怎麼辦?**
