@@ -779,7 +779,7 @@ def _render_company_info_compact(sid: str, key_prefix: str = "card") -> None:
         st.warning(f"⚠️ 無法載入公司資訊:{e}")
         return
 
-    # facts(industry / market)
+    # facts(industry / market)— 永遠顯,不受 LLM 狀態影響
     industry = profile.get("industry") or "—"
     market = profile.get("market") or "—"
     st.markdown(f"**產業**:{industry}　|　**市場**:{market}")
@@ -787,23 +787,50 @@ def _render_company_info_compact(sid: str, key_prefix: str = "card") -> None:
     desc = profile.get("description")
     uniq = profile.get("uniqueness")
     moat = profile.get("moat")
+    status = profile.get("narrative_status", "empty")
     llm_error = profile.get("llm_error")
 
-    if llm_error and not (desc or uniq or moat):
-        # LLM 完全失敗(無歷史 cache 也沒新值)→ 顯錯,提示重試
-        st.caption(f"⚠️ {llm_error}")
-    else:
-        if llm_error:
-            # 有歷史 cache 但本次重試失敗 — 顯舊 LLM 內容 + 錯誤 caption
-            st.caption(f"⚠️ {llm_error}(顯示上次 cache)")
+    # narrative_status 分流(取代舊版直接 dump llm_error 字串):
+    # - "ok":顯示 narrative(cache 或新生成)
+    # - "quota_exceeded":友善提示「今日額度用完」+ facts only
+    # - "not_configured":提示 GEMINI_API_KEY
+    # - "failed":generic「暫時無法呼叫」
+    # - "empty":首次未生成
+    # 有 cache narrative + 新狀態錯誤 → 顯舊 narrative + 短 caption
+    if status == "ok":
         if desc:
             st.markdown(f"**📝 業務**:{desc}")
         if uniq:
             st.markdown(f"**✨ 獨特性**:{uniq}")
         if moat:
             st.markdown(f"**🏰 護城河**:{moat}")
-        if not (desc or uniq or moat):
-            st.caption("📝 LLM 描述尚未生成,點下方按鈕重試")
+    elif status == "quota_exceeded":
+        if desc or uniq or moat:
+            # 有歷史 cache + 本次失敗 → 顯舊 + 提示
+            st.caption("ℹ️ 今日 LLM 額度已用完,顯示上次 cache(明天恢復)")
+            if desc:
+                st.markdown(f"**📝 業務**:{desc}")
+            if uniq:
+                st.markdown(f"**✨ 獨特性**:{uniq}")
+            if moat:
+                st.markdown(f"**🏰 護城河**:{moat}")
+        else:
+            st.caption("ℹ️ 今日 Gemini 免費額度已用完,只顯示基本資料(明天恢復)")
+    elif status == "not_configured":
+        st.caption("ℹ️ LLM 未設定,只顯示基本資料(設 GEMINI_API_KEY 開啟生成)")
+    elif status == "failed":
+        if desc or uniq or moat:
+            st.caption(f"⚠️ {llm_error}(顯示上次 cache)")
+            if desc:
+                st.markdown(f"**📝 業務**:{desc}")
+            if uniq:
+                st.markdown(f"**✨ 獨特性**:{uniq}")
+            if moat:
+                st.markdown(f"**🏰 護城河**:{moat}")
+        else:
+            st.caption(f"⚠️ {llm_error or 'LLM 暫時無法呼叫'}")
+    else:  # "empty"
+        st.caption("📝 LLM 描述尚未生成,點下方按鈕重試")
 
     # 重新生成按鈕 — key 帶 prefix + sid 避免同 sid 出現在多個 tab 時衝撞
     if st.button(

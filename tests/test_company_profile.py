@@ -21,6 +21,14 @@ def tmp_db(monkeypatch, tmp_path):
     db.init_db()
     # 清掉 data_fetcher 的記憶體 cache 避免測試之間污染
     data_fetcher._reset_stock_info_cache()
+    # 清掉 streamlit session_state 內 quota flag(streamlit 在 pytest 程序內
+    # 有 SessionStateProxy 會跨 tests 殘留;測試 quota 路徑時若上個 test 設了
+    # 旗標,這個 test 的 LLM call 會被跳過 → 預期外的 narrative_status)
+    try:
+        import streamlit as st
+        st.session_state.pop(cp._QUOTA_FLAG_KEY, None)
+    except Exception:
+        pass
     yield db_file
     db._reset_path_cache()
 
@@ -171,41 +179,130 @@ def test_get_company_profile_regenerate_forces_llm_recall(tmp_db, monkeypatch):
     assert p3["description"] == "v3"
 
 
-def test_get_company_profile_llm_failure_returns_facts_with_error(
+def test_get_company_profile_generic_failure_returns_facts_with_error(
     tmp_db, monkeypatch,
 ):
-    """Gemini API 拋 exception → facts 仍寫進 cache,llm_error 帶 user-facing 訊息。"""
+    """Gemini API 拋 generic exception(非 quota / 非 config)→ facts 仍寫進
+    cache,narrative_status='failed',llm_error 是友善短訊(不含 raw exception)。
+    """
     _seed_finmind_mock(monkeypatch)
     monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
     monkeypatch.setattr(
         cp, "generate_with_gemini",
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("API quota exceeded")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("Network unreachable: connection refused")
+        ),
     )
 
     profile = cp.get_company_profile("2330")
-    # facts 還是有
     assert profile["industry"] == "半導體業"
     assert profile["market"] == "上市"
-    # LLM 失敗 → description None + llm_error 有訊息
     assert profile["description"] is None
+    assert profile["narrative_status"] == "failed"
     assert profile["llm_error"] is not None
-    assert "API quota exceeded" in profile["llm_error"]
+    # 不該 dump raw exception 字串給 user
+    assert "Network unreachable" not in profile["llm_error"]
+    assert "connection refused" not in profile["llm_error"]
+    # 是友善訊息(短)
+    assert len(profile["llm_error"]) < 50
+
+
+def test_get_company_profile_quota_exceeded_returns_facts_with_quota_status(
+    tmp_db, monkeypatch,
+):
+    """打 Gemini 撞 429 → narrative_status='quota_exceeded',llm_error 是友善
+    訊息(不 dump 整段 google API error)。"""
+    _seed_finmind_mock(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
+    # 模擬 google api_core ResourceExhausted 的訊息格式(含 429 + quota)
+    monkeypatch.setattr(
+        cp, "generate_with_gemini",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError(
+                "429 You exceeded your current quota, please check your "
+                "plan and billing details. quota_metric: ..."
+            )
+        ),
+    )
+
+    profile = cp.get_company_profile("2330")
+    assert profile["industry"] == "半導體業"
+    assert profile["description"] is None
+    assert profile["narrative_status"] == "quota_exceeded"
+    assert profile["llm_error"] is not None
+    # 不 dump 原始 google API 錯誤(429 / quota_metric / billing 等技術字)
+    assert "429" not in profile["llm_error"]
+    assert "quota_metric" not in profile["llm_error"]
+    # 是友善繁中訊息
+    assert "額度" in profile["llm_error"]
+
+
+def test_get_company_profile_quota_flag_skips_subsequent_llm_calls(
+    tmp_db, monkeypatch,
+):
+    """打到 429 → session_state quota flag 設;後續同/異 sid 直接跳過 LLM,
+    不再撞 429 浪費 RTT。regenerate=True 仍會強制再試。"""
+    _seed_finmind_mock(monkeypatch)
+    # 第二檔股號的 finmind mock(2317 鴻海)— 補進 mock
+    monkeypatch.setattr(
+        data_fetcher, "ensure_stock_info",
+        lambda sid: (
+            {"stock_id": "2330", "name": "台積電", "industry": "半導體業"}
+            if sid == "2330" else
+            {"stock_id": "2317", "name": "鴻海", "industry": "電腦及週邊設備業"}
+            if sid == "2317" else None
+        ),
+    )
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_all_stock_info",
+        lambda: {
+            "2330": {"type": "twse"},
+            "2317": {"type": "twse"},
+        },
+    )
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
+
+    call_count = [0]
+    def _raiser(*a, **kw):
+        call_count[0] += 1
+        raise RuntimeError("429 quota exceeded")
+    monkeypatch.setattr(cp, "generate_with_gemini", _raiser)
+
+    p1 = cp.get_company_profile("2330")
+    p2 = cp.get_company_profile("2317")  # 不同 sid
+
+    assert p1["narrative_status"] == "quota_exceeded"
+    assert p2["narrative_status"] == "quota_exceeded"
+    # 第一次撞 429,設旗標;第二次直接跳過 → 總共只打 1 次
+    assert call_count[0] == 1, (
+        f"預期 LLM 只打 1 次(第二次因 quota flag 跳過),實際 {call_count[0]}"
+    )
+
+    # regenerate=True 強制再打一次(讓 user 手動重試)
+    p3 = cp.get_company_profile("2330", regenerate=True)
+    assert p3["narrative_status"] == "quota_exceeded"
+    assert call_count[0] == 2, (
+        f"regenerate=True 該再打一次,實際 total {call_count[0]}"
+    )
 
 
 def test_get_company_profile_no_gemini_key_returns_facts_only(
     tmp_db, monkeypatch,
 ):
-    """沒設 GEMINI_API_KEY → 只回 facts,description None,llm_error 帶訊息。"""
+    """沒設 GEMINI_API_KEY → narrative_status='not_configured',llm_error 提示。"""
     _seed_finmind_mock(monkeypatch)
     monkeypatch.setattr(config, "GEMINI_API_KEY", "")
     monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
-    # 這條路徑下 generate_with_gemini 真的會被呼叫(因為 cache 還沒 description),
-    # 但 SDK 內 raise RuntimeError("GEMINI_API_KEY 未設定")— 走 fallback 流程
+    # generate_with_gemini 內部 raise RuntimeError("GEMINI_API_KEY 未設定")
+    # → _is_not_configured_error 偵測到 → narrative_status='not_configured'
 
     profile = cp.get_company_profile("2330")
     assert profile["industry"] == "半導體業"
     assert profile["description"] is None
+    assert profile["narrative_status"] == "not_configured"
     assert profile["llm_error"] is not None
     assert "GEMINI_API_KEY" in profile["llm_error"]
 

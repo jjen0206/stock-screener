@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 import logging
 from datetime import datetime, timezone
@@ -40,9 +41,75 @@ except Exception as _e:  # noqa: BLE001
 
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
+# session_state 旗標 key — 當輪打到 429 後寫入今日日期,後續同 sid / 異 sid
+# 都跳過 LLM 直到明天(當輪指 streamlit session,跨 process 不共享)
+_QUOTA_FLAG_KEY = "_gemini_quota_exceeded_date"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# === Quota / 錯誤分類 helpers ===
+
+def _is_quota_exceeded(exc: BaseException) -> bool:
+    """偵測 Gemini 429 quota 錯誤。
+
+    可能來源:
+    - google.api_core.exceptions.ResourceExhausted(canonical 429)
+    - generic exception 字串內含 "429" / "quota exceeded" / "ResourceExhausted"
+    用 class name + 字串雙重 match,避免硬綁特定 google 版本。
+    """
+    cls_name = type(exc).__name__
+    if cls_name in ("ResourceExhausted", "TooManyRequests"):
+        return True
+    msg = str(exc)
+    if "429" in msg:
+        return True
+    msg_low = msg.lower()
+    if "quota" in msg_low and ("exceeded" in msg_low or "exhausted" in msg_low):
+        return True
+    return False
+
+
+def _is_not_configured_error(exc: BaseException) -> bool:
+    """偵測 SDK / API key 缺失 — generate_with_gemini 自己拋的 RuntimeError。"""
+    msg = str(exc)
+    return "GEMINI_API_KEY" in msg or "google-generativeai" in msg
+
+
+def _safe_get_session_state():
+    """取 streamlit.session_state — 不在 streamlit context 下回 None。
+    company_profile 也會被 CLI / pytest 直接呼叫,不能 hard depend on streamlit。
+    """
+    try:
+        import streamlit as st
+        return st.session_state
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_quota_flag_set_today() -> bool:
+    """今日 quota 旗標是否已設(避免反覆撞 429 浪費 RTT)。"""
+    state = _safe_get_session_state()
+    if state is None:
+        return False
+    today = _datetime.date.today().isoformat()
+    try:
+        return state.get(_QUOTA_FLAG_KEY) == today
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _set_quota_flag_today() -> None:
+    """打到 429 後寫旗標,當輪不再呼叫 LLM 直到明天。"""
+    state = _safe_get_session_state()
+    if state is None:
+        return
+    try:
+        state[_QUOTA_FLAG_KEY] = _datetime.date.today().isoformat()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[COMPANY] 寫 quota flag 失敗(忽略): %s", e)
 
 
 # === FinMind facts ===
@@ -217,27 +284,42 @@ def get_company_profile(
     Args:
         stock_id: 股號(e.g. "2330")
         regenerate: True = 強制重打 Gemini 重生 description/uniqueness/moat
+            (即使當輪已 quota_exceeded,仍嘗試 — 讓 user 手動重試)
 
-    回:
-        {
-          stock_id, name, industry, market, listing_date, foreign_limit,
-          description, uniqueness, moat,
-          finmind_updated_at, llm_updated_at,
-          llm_error: str | None,    # LLM 生成失敗的 user-facing 訊息
-        }
-        所有欄位可為 None。description 為 None 表示「沒生過 / 失敗」。
+    回 dict:
+        stock_id, name, industry, market, listing_date, foreign_limit,
+        description, uniqueness, moat,
+        finmind_updated_at, llm_updated_at,
+        llm_error: str | None       — user-facing 短訊(< 100 字,不含 raw API dump)
+        narrative_status: str       — "ok" | "quota_exceeded" | "not_configured"
+                                      | "failed" | "empty"
+            * "ok"             = description 有值(cache 或新生成)
+            * "quota_exceeded" = 今日 Gemini 配額用完(或被旗標跳過)
+            * "not_configured" = 缺 GEMINI_API_KEY 或 SDK 沒裝
+            * "failed"         = 其他 LLM 錯誤(網路 / parse 失敗等)
+            * "empty"          = 還沒嘗試過(理論上幾乎不會)
+
+    Quota 防呆:打到 429 後設 session_state 旗標,當輪後續同/異 sid 直接跳
+    過 LLM(不浪費 RTT)。regenerate=True 仍會再試。
     """
     sid = (stock_id or "").strip()
     if not sid:
         return _empty_profile(sid)
 
     cached = _read_profile(sid)
+    has_cached_narrative = bool(cached and cached.get("description"))
     needs_finmind = cached is None or not cached.get("industry")
-    needs_llm = (
-        regenerate
-        or cached is None
-        or not cached.get("description")
-    )
+
+    # 決定是否跑 LLM:
+    # - cache 有 narrative + 沒 regenerate → 不跑
+    # - 當輪今日已 quota_exceeded + 沒 regenerate → 不跑
+    # - 否則跑
+    needs_llm = regenerate or not has_cached_narrative
+    quota_was_exceeded = _is_quota_flag_set_today()
+    skipped_due_to_quota = False
+    if needs_llm and quota_was_exceeded and not regenerate:
+        needs_llm = False
+        skipped_due_to_quota = True
 
     profile_to_write: dict[str, Any] = {}
     name = ""
@@ -267,6 +349,7 @@ def get_company_profile(
 
     # 2. LLM 生成
     llm_error: str | None = None
+    failure_status: str | None = None  # "quota_exceeded" / "not_configured" / "failed"
     if needs_llm:
         industry_for_prompt = (
             profile_to_write.get("industry")
@@ -282,8 +365,24 @@ def get_company_profile(
                 "llm_updated_at": _now_iso(),
             })
         except Exception as e:  # noqa: BLE001
-            logger.warning("[COMPANY] LLM 生成失敗 sid=%s: %s", sid, e)
-            llm_error = f"LLM 暫時失敗:{e}"
+            # **不**把 raw exception dump 給 UI(google API 錯訊很長)。
+            # 分三類顯示對應友善訊息,只有 logger 內保留完整字串。
+            logger.warning(
+                "[COMPANY] LLM 生成失敗 sid=%s: %s", sid, str(e)[:300],
+            )
+            if _is_quota_exceeded(e):
+                _set_quota_flag_today()
+                failure_status = "quota_exceeded"
+                llm_error = "今日 Gemini 免費額度已用完(明天重置)"
+            elif _is_not_configured_error(e):
+                failure_status = "not_configured"
+                llm_error = "LLM 未設定 — 請設 GEMINI_API_KEY"
+            else:
+                failure_status = "failed"
+                llm_error = "LLM 暫時無法呼叫,請稍後重試"
+    elif skipped_due_to_quota:
+        failure_status = "quota_exceeded"
+        llm_error = "今日 Gemini 免費額度已用完(明天重置)"
 
     if profile_to_write:
         _upsert_profile(sid, profile_to_write)
@@ -292,6 +391,14 @@ def get_company_profile(
     final = _read_profile(sid) or _empty_profile(sid)
     final["name"] = name or final.get("name", "")
     final["llm_error"] = llm_error
+
+    # narrative_status 優先:有 description(cache 或新)→ ok;否則看 failure_status
+    if final.get("description"):
+        final["narrative_status"] = "ok"
+    elif failure_status:
+        final["narrative_status"] = failure_status
+    else:
+        final["narrative_status"] = "empty"
     return final
 
 
@@ -309,6 +416,7 @@ def _empty_profile(sid: str) -> dict[str, Any]:
         "finmind_updated_at": None,
         "llm_updated_at": None,
         "llm_error": None,
+        "narrative_status": "empty",
     }
 
 

@@ -63,6 +63,14 @@ def isolated_db(monkeypatch, tmp_path):
     # 5 個 cache 都會殘留跨 tests
     st.cache_data.clear()
 
+    # 清 quota flag — _gemini_quota_exceeded_date(在 SessionStateProxy 內,
+    # 一個 test 撞到 429 後設了旗標,下個 test 的 LLM 會被跳過,造成測試漂移)
+    try:
+        from src.company_profile import _QUOTA_FLAG_KEY
+        st.session_state.pop(_QUOTA_FLAG_KEY, None)
+    except Exception:
+        pass
+
     yield tmp_path
 
     db._reset_path_cache()  # type: ignore[attr-defined]
@@ -2559,6 +2567,7 @@ def test_company_info_compact_auto_calls_get_profile_on_cache_miss(
             "finmind_updated_at": None,
             "llm_updated_at": "2026-05-04T00:00:00+00:00",
             "llm_error": None,
+            "narrative_status": "ok",
         }
     monkeypatch.setattr(cp, "get_company_profile", _spy)
 
@@ -2580,11 +2589,15 @@ def test_company_info_compact_auto_calls_get_profile_on_cache_miss(
     assert "做面板" in md_text
 
 
-def test_company_info_compact_llm_failure_shows_error_caption(
+def test_company_info_compact_quota_exceeded_shows_friendly_caption(
     isolated_db, monkeypatch,
 ):
-    """LLM 失敗(get_company_profile 回 llm_error)→ 顯 error caption,
-    若也沒 description 則 caption 顯整個錯誤訊息。"""
+    """narrative_status='quota_exceeded' → 顯友善訊息(非 raw API error),
+    facts 仍顯。
+
+    這是用戶報的 critical bug:google API 整段 raw error 直接 dump 給 user
+    看(429 + quota_metric + billing... ),改 graceful degradation。
+    """
     from src import company_profile as cp
     from src.individual_sections import _get_company_profile_cached
 
@@ -2599,7 +2612,8 @@ def test_company_info_compact_llm_failure_shows_error_caption(
             "description": None, "uniqueness": None, "moat": None,
             "finmind_updated_at": "2026-05-04T00:00:00+00:00",
             "llm_updated_at": None,
-            "llm_error": "LLM 暫時失敗:API quota exceeded",
+            "llm_error": "今日 Gemini 免費額度已用完(明天重置)",
+            "narrative_status": "quota_exceeded",
         },
     )
 
@@ -2615,8 +2629,53 @@ def test_company_info_compact_llm_failure_shows_error_caption(
     assert "光電業" in md_text  # facts 仍顯
 
     captions = "\n".join(str(c.value) for c in at.caption)
-    assert "API quota exceeded" in captions, (
-        f"預期 caption 顯 LLM error, 實際: {captions}"
+    # 友善訊息含「額度」/「明天」,不該含「429」/「quota_metric」等技術字
+    assert "額度" in captions or "免費" in captions, (
+        f"預期友善 quota caption,實際: {captions}"
+    )
+    assert "429" not in captions
+    assert "quota_metric" not in captions
+    assert "billing" not in captions
+
+
+def test_company_info_compact_failed_status_shows_generic_caption(
+    isolated_db, monkeypatch,
+):
+    """narrative_status='failed' → 顯 generic 訊息(不 dump raw exception),
+    facts 仍顯。"""
+    from src import company_profile as cp
+    from src.individual_sections import _get_company_profile_cached
+
+    _get_company_profile_cached.clear()
+
+    monkeypatch.setattr(
+        cp, "get_company_profile",
+        lambda sid, regenerate=False: {
+            "stock_id": sid, "name": "X",
+            "industry": "光電業", "market": "上市",
+            "listing_date": None, "foreign_limit": None,
+            "description": None, "uniqueness": None, "moat": None,
+            "finmind_updated_at": "2026-05-04T00:00:00+00:00",
+            "llm_updated_at": None,
+            "llm_error": "LLM 暫時無法呼叫,請稍後重試",
+            "narrative_status": "failed",
+        },
+    )
+
+    def _harness():
+        from src.individual_sections import _render_company_info_compact
+        _render_company_info_compact("3008")
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(str(m.value) for m in at.markdown)
+    assert "光電業" in md_text
+
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "LLM" in captions or "暫時" in captions, (
+        f"預期 failed caption, 實際: {captions}"
     )
 
 
@@ -2635,7 +2694,7 @@ def test_company_info_compact_has_regenerate_button(isolated_db, monkeypatch):
             "description": "晶圓代工", "uniqueness": "領先製程",
             "moat": "規模 + 客戶",
             "finmind_updated_at": None, "llm_updated_at": None,
-            "llm_error": None,
+            "llm_error": None, "narrative_status": "ok",
         },
     )
 
