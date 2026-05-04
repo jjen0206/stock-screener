@@ -132,3 +132,38 @@ main_total                    437ms
 - `test_boot_setup_runs_only_once`:多輪 rerun preload 只跑 1 次
 - `test_dashboard_does_not_auto_run_strategies_on_cold_load`:cold load 0 次 strategies call
 - `test_run_all_strategies_cached_hits_on_repeated_args`:同 args 第 2/3 次 cache hit
+
+---
+
+# Phase 3 — Daily Picks 預跑(2026-05-04)
+
+方案 C 的 Part 1-3 完成:nightly precompute 把 strategy 結果寫進 SQLite +
+dump CSV;App 端兩段 lookup,default 路徑命中即 0ms。
+
+## After Part 3 對比(灌 630 rows daily_picks 後)
+
+| Phase | 改前(Phase 2 完) | 改後(Part 3) | 變化 |
+|---|---|---|---|
+| 1. Cold load | 2,200ms | 2,175ms | -1% |
+| 2. 切短線頁 | 147ms | 136ms | -7% |
+| 3. 執行選股(50 檔) | 571ms | **217ms** | **-62%** |
+
+主要變化在 Phase 3,`short_run_all_strategies` 從 338ms → **27ms**(-92%):
+27ms 是 `_universe_to_label` 第一次 build 3 universe 的 frozenset(SQL 查
+stocks 表 + pure_stock_universe 篩 ETF)。後續走 `@st.cache_data` 真正 hit 0ms。
+
+## 跨 3 階段累計影響(原始 → 現在)
+
+| Phase | 原始(Phase 0) | Phase 2 完 | Phase 3 完 | 總改變 |
+|---|---|---|---|---|
+| 1. Cold load | 13,188ms | 2,200ms | 2,175ms | **-83%** |
+| 2. 切短線頁 | 1,384ms | 147ms | 136ms | **-90%** |
+| 3. 執行選股 | 1,854ms | 571ms | 217ms | **-88%** |
+| **合計** | 16,426ms | 2,918ms | **2,528ms** | **-85%** |
+
+## 守門 Test(Part 3 新增 4 個)
+- `test_run_all_strategies_cached_hits_daily_picks_on_default_args` — 灌 daily_picks
+  後 default 路徑 hit,run_all_strategies 0 次
+- `test_run_all_strategies_cached_falls_through_on_custom_params` — slider 改過 → 走 runtime
+- `test_run_all_strategies_cached_falls_through_on_unknown_universe` — universe mismatch → 走 runtime
+- `test_universe_to_label_recognizes_three_known_universes` — pure_stock / with_etf / top_50 識別 OK

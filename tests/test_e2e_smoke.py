@@ -53,6 +53,27 @@ def isolated_db(monkeypatch, tmp_path):
     db._reset_path_cache()  # type: ignore[attr-defined]
     db.init_db()
 
+    # 包覆 preload_snapshots,跑完後清掉 daily_picks 表 — 否則本機
+    # data/twse_snapshot/daily_picks.csv(precompute 產物)會灌進 tmp DB,
+    # 讓 mock 後的 run_all_strategies 被 daily_picks lookup short-circuit。
+    # 同時保留 stocks / daily_prices / institutional 等 CSV preload(個股頁等
+    # 測試需要)。其他 caller(test_preload_snapshots_loads_csvs_into_sqlite)
+    # 自己傳 snap_dir 走 wrapper 也不影響(它沒 daily_picks.csv)。
+    _real_preload = db.preload_snapshots
+
+    def _preload_minus_daily_picks(*a, **kw):
+        counts = _real_preload(*a, **kw)
+        try:
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM daily_picks")
+        except Exception:  # noqa: BLE001
+            pass
+        if isinstance(counts, dict):
+            counts.pop("daily_picks", None)
+        return counts
+
+    monkeypatch.setattr(db, "preload_snapshots", _preload_minus_daily_picks)
+
     # AppTest 的 script runner 會重新執行 app.py module body,但若 app 已在
     # sys.modules 內,from-import 會走 module 快取版本,patch 不到位。從 cache
     # 移除 → AppTest 載入時會走「全新 import」,所有 from-import 都會重綁。
@@ -215,6 +236,158 @@ def test_dashboard_does_not_auto_run_strategies_on_cold_load(
     assert any("載入今日推薦" in (lbl or "") for lbl in btn_labels), (
         f"應有「載入今日推薦」按鈕, 實際: {btn_labels}"
     )
+
+
+def test_run_all_strategies_cached_hits_daily_picks_on_default_args(
+    isolated_db, monkeypatch,
+):
+    """**Part 3 perf** — default params + 已知 universe + daily_picks 有資料
+    → 直接從表撈,**不**呼叫 underlying run_all_strategies。"""
+    import app as _app
+    import streamlit as st
+    from src import database as db
+
+    # 灌一筆 daily_picks 進 SQLite(模擬 nightly 跑完寫進來)
+    db.dump_daily_picks(
+        "2026-05-04", "pure_stock",
+        {
+            "2330": {
+                "name": "台積電",
+                "signals": ["量價KD"],
+                "details": {"volume_kd": {
+                    "stock_id": "2330", "name": "台積電", "close": 600.0,
+                }},
+            },
+        },
+        params_hash="default_v1",
+    )
+
+    underlying_calls = []
+    monkeypatch.setattr(
+        _app, "run_all_strategies",
+        lambda *a, **kw: (underlying_calls.append(1) or {}),
+    )
+
+    # 必須清掉 _known_universe_sets 的 cache 避免拿到別 test 的 stale set
+    st.cache_data.clear()
+
+    # 灌假 stocks 表讓 _known_universe_sets() 對 pure_stock 回 {2330}
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+    ])
+    monkeypatch.setattr(db, "stocks_with_min_history", lambda min_history=20: ["2330"])
+
+    # default 路徑(enabled=None, params=None)+ universe={2330} 對到 pure_stock
+    agg = _app._run_all_strategies_cached(
+        "2026-05-04", ("2330",), None, None,
+    )
+    assert "2330" in agg, "預期從 daily_picks 撈到 2330"
+    assert agg["2330"]["signals"] == ["量價KD"]
+    assert underlying_calls == [], (
+        f"daily_picks hit 時不該 fallback 到 run_all_strategies, "
+        f"被叫 {len(underlying_calls)} 次"
+    )
+
+
+def test_run_all_strategies_cached_falls_through_on_custom_params(
+    isolated_db, monkeypatch,
+):
+    """custom params(slider 改過)→ 不走 daily_picks,改 runtime 算。"""
+    import app as _app
+    import streamlit as st
+    from src import database as db
+
+    # 灌 daily_picks 但 caller 故意傳 non-default params
+    db.dump_daily_picks(
+        "2026-05-04", "pure_stock",
+        {"2330": {
+            "name": "台積電", "signals": ["量價KD"],
+            "details": {"volume_kd": {"stock_id": "2330", "close": 600.0}},
+        }},
+    )
+
+    underlying_calls = []
+    monkeypatch.setattr(
+        _app, "run_all_strategies",
+        lambda *a, **kw: (underlying_calls.append(1) or {"runtime": {"runtime": True}}),
+    )
+
+    st.cache_data.clear()
+
+    # custom params(volume_multiplier=999 不是 default)→ runtime path
+    custom_params_key = (("volume_multiplier", 999.0),)
+    agg = _app._run_all_strategies_cached(
+        "2026-05-04", ("2330",), None, custom_params_key,
+    )
+    assert "runtime" in agg
+    assert len(underlying_calls) == 1, (
+        f"custom params 必須走 runtime, 實際 underlying 被叫 {len(underlying_calls)} 次"
+    )
+
+
+def test_run_all_strategies_cached_falls_through_on_unknown_universe(
+    isolated_db, monkeypatch,
+):
+    """universe 不匹配任何已知預跑 universe → runtime path。"""
+    import app as _app
+    import streamlit as st
+    from src import database as db
+
+    # daily_picks 有(pure_stock universe = {2330}),但 caller 傳的 universe
+    # 不一樣 — _universe_to_label 回 None
+    db.dump_daily_picks(
+        "2026-05-04", "pure_stock",
+        {"2330": {
+            "name": "台積電", "signals": ["量價KD"],
+            "details": {"volume_kd": {"stock_id": "2330", "close": 600.0}},
+        }},
+    )
+
+    underlying_calls = []
+    monkeypatch.setattr(
+        _app, "run_all_strategies",
+        lambda *a, **kw: (underlying_calls.append(1) or {"custom": {"a": 1}}),
+    )
+
+    st.cache_data.clear()
+    db.upsert_stocks([{"stock_id": "9999", "name": "X", "market": "TW"}])
+    monkeypatch.setattr(db, "stocks_with_min_history", lambda min_history=20: ["9999"])
+
+    # universe={"5566"} 不對應任何已知 universe(stocks 沒這檔 + 不在 TW_TOP_50)
+    agg = _app._run_all_strategies_cached(
+        "2026-05-04", ("5566",), None, None,
+    )
+    assert "custom" in agg
+    assert len(underlying_calls) == 1, "unknown universe 必走 runtime"
+
+
+def test_universe_to_label_recognizes_three_known_universes(
+    isolated_db, monkeypatch,
+):
+    """_universe_to_label 識別三個 universe label,其他 → None。"""
+    import app as _app
+    import streamlit as st
+    from src import database as db
+
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "0050", "name": "元大台灣 50", "market": "TW"},
+    ])
+    monkeypatch.setattr(
+        db, "stocks_with_min_history", lambda min_history=20: ["2330", "0050"],
+    )
+    st.cache_data.clear()
+
+    # pure_stock 過濾 ETF(0050) → 只剩 2330
+    assert _app._universe_to_label(("2330",)) == "pure_stock"
+    # with_etf 不過濾,兩檔都在
+    assert _app._universe_to_label(("0050", "2330")) == "with_etf"
+    # top_50:第 1 檔是 2330,只 2330 不算 top_50(top_50 要全 50 檔)
+    assert _app._universe_to_label(("9999",)) is None
+    # 完整 top_50
+    from src.universe import TW_TOP_50
+    top50_sids = tuple(s for s, _ in TW_TOP_50)
+    assert _app._universe_to_label(top50_sids) == "top_50"
 
 
 def test_run_all_strategies_cached_hits_on_repeated_args(isolated_db, monkeypatch):

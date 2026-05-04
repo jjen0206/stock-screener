@@ -256,22 +256,124 @@ def _inject_pwa() -> None:
 _BOOT_DONE_KEY = "_boot_setup_done"
 
 
-# === run_all_strategies cache wrapper ===
-# 包成 @st.cache_data 後同 (date, universe_key, params_key, enabled_key) 在 ttl
-# 內 cache hit。dashboard 「今日推薦 Top 3」+ 短線頁「執行選股」如果 universe
-# / params 一致,共享 cache。短線頁 sticky-submit 後每次 rerun 都重跑的
-# ~338ms 也省下。
+# === run_all_strategies cache wrapper(兩段式 lookup)===
+# Stage 1: daily_picks 表(nightly 預跑;default params + 已知 universe → 0ms)
+# Stage 2: @st.cache_data 包 run_all_strategies(custom params / unknown
+#          universe → 算過後 ttl 600s 內 cache hit)
+
+PRECOMPUTE_PARAMS_HASH = "default_v1"
+
+
+def _with_etf_universe_sids(min_history: int = 20) -> list[str]:
+    """20+ 天歷史所有股(含 ETF / 債券)— 對齊 precompute_strategies 同名 helper。
+    放在這裡是讓 _universe_to_label 不用去 import scripts.precompute_strategies。
+    """
+    sids = set(db.stocks_with_min_history(min_history))
+    if not sids:
+        return []
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id FROM stocks WHERE market='TW' "
+            "AND name IS NOT NULL AND name != '' "
+            "ORDER BY stock_id"
+        ).fetchall()
+    return [r["stock_id"] for r in rows if r["stock_id"] in sids]
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def _run_all_strategies_cached(
+def _known_universe_sets() -> dict[str, frozenset[str]]:
+    """3 個預跑 universe 的 sid 集合(frozenset 用於與 caller 傳入的
+    universe_tuple 比較)。@st.cache_data 避免每 rerun 都重打 SQLite。
+    """
+    return {
+        "pure_stock": frozenset(pure_stock_universe(min_history=20)),
+        "with_etf": frozenset(_with_etf_universe_sids(min_history=20)),
+        "top_50": frozenset(s for s, _ in TW_TOP_50),
+    }
+
+
+def _universe_to_label(universe_tuple: tuple[str, ...]) -> str | None:
+    """把 universe tuple 對應到 daily_picks 預跑的 universe label。
+    mismatch 回 None(custom universe → 走 stage 2 runtime)。
+    """
+    if not universe_tuple:
+        return None
+    target = frozenset(universe_tuple)
+    for label, sids_set in _known_universe_sets().items():
+        if target == sids_set:
+            return label
+    return None
+
+
+def _canonical_default_params_key() -> tuple[tuple[str, object], ...]:
+    """precompute 用 params=None,各策略走 DEFAULT_*_PARAMS。caller 端
+    短線頁會傳合併過的 params dict;若所有 sliders 都在 default,那 dict
+    對應到這裡的 canonical key。
+
+    來源:_SHORT_PARAM_DEFAULTS 對應的 strategy params(volume_kd / bias /
+    squeeze / inst_consensus / bb_rebound / rsi / inst_silent / vol_breakout /
+    gap_up)。
+    """
+    return tuple(sorted({
+        "volume_multiplier": float(DEFAULT_SHORT_PARAMS["volume_multiplier"]),
+        "kd_threshold_low": float(DEFAULT_SHORT_PARAMS["kd_threshold_low"]),
+        "inst_buy_days": int(DEFAULT_SHORT_PARAMS["inst_buy_days"]),
+        "bias_low": float(DEFAULT_BIAS_PARAMS["bias_low"]),
+        "bias_high": float(DEFAULT_BIAS_PARAMS["bias_high"]),
+        "vol_ratio_min": float(DEFAULT_BIAS_PARAMS["vol_ratio_min"]),
+        "squeeze_pct_max": float(DEFAULT_SQUEEZE_PARAMS["squeeze_pct_max"]),
+        "consecutive_days": int(DEFAULT_INST_CONSENSUS_PARAMS["consecutive_days"]),
+        "bb_touch_lookback": int(DEFAULT_BB_REBOUND_PARAMS["bb_touch_lookback"]),
+        "rsi_oversold": float(DEFAULT_RSI_RECOVERY_PARAMS["rsi_oversold"]),
+        "rsi_recovered": float(DEFAULT_RSI_RECOVERY_PARAMS["rsi_recovered"]),
+        "pct_change_max": float(DEFAULT_INST_SILENT_PARAMS["pct_change_max"]),
+        "bb_position_max": float(DEFAULT_INST_SILENT_PARAMS["bb_position_max"]),
+        "vbo_vol_ratio_min": float(DEFAULT_VOL_BREAKOUT_PARAMS["vbo_vol_ratio_min"]),
+        "highest_lookback": int(DEFAULT_VOL_BREAKOUT_PARAMS["highest_lookback"]),
+        "gap_pct_min": float(DEFAULT_GAP_UP_PARAMS["gap_pct_min"]),
+        "gap_vol_ratio_min": float(DEFAULT_GAP_UP_PARAMS["gap_vol_ratio_min"]),
+    }.items()))
+
+
+def _canonical_default_enabled_key() -> tuple[str, ...]:
+    """全 11 套策略 sorted tuple — 短線頁 user 沒取消任何策略時等於這個。"""
+    from src.strategies import ALL_STRATEGIES
+    return tuple(sorted(ALL_STRATEGIES.keys()))
+
+
+def _is_precompute_eligible(
+    enabled_key: tuple[str, ...] | None,
+    params_key: tuple[tuple[str, object], ...] | None,
+) -> bool:
+    """判斷 args 是否對應到 nightly precompute 跑的 default 路徑。
+
+    精確對應 precompute_strategies.py 的 run_all_strategies(date, stock_ids=...)
+    呼叫(enabled=None, params=None)。
+    Caller 端若傳:
+    - 都 None → True(dashboard 路徑)
+    - enabled = 全部 11 策略 + params = canonical defaults → True(短線頁無
+      動 sliders 路徑)
+    - 任一 mismatch → False(custom params / 取消策略 → runtime 算)
+
+    enabled 用 frozenset 比較避免 caller 傳入順序差異(短線頁 multiselect
+    回傳順序是 user click 順序,不是 sorted)。
+    """
+    if enabled_key is None and params_key is None:
+        return True
+    if frozenset(enabled_key or ()) != frozenset(_canonical_default_enabled_key()):
+        return False
+    return params_key == _canonical_default_params_key()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _run_all_strategies_runtime(
     trade_date: str,
     universe_key: tuple[str, ...],
     enabled_key: tuple[str, ...] | None,
     params_key: tuple[tuple[str, object], ...] | None,
 ) -> dict:
-    """`run_all_strategies` 結果 cache 版。
-
-    所有參數必須 hashable(str / tuple),caller 端把 list/dict 轉 tuple 再傳。
-    內部還原回 list/dict 餵原 function。回 agg dict 同 run_all_strategies。
+    """Stage 2:cache miss 才走;真的呼叫 run_all_strategies 算一輪。
+    @st.cache_data ttl 600 → 同 args 短時間內重複 call 直接 hit memory。
     """
     enabled = list(enabled_key) if enabled_key else None
     params = dict(params_key) if params_key else None
@@ -281,6 +383,37 @@ def _run_all_strategies_cached(
         enabled=enabled,
         params=params,
         stock_ids=sids,
+    )
+
+
+def _run_all_strategies_cached(
+    trade_date: str,
+    universe_key: tuple[str, ...],
+    enabled_key: tuple[str, ...] | None,
+    params_key: tuple[tuple[str, object], ...] | None,
+) -> dict:
+    """兩段式 lookup:先試 daily_picks 預跑表,miss 走 runtime cache。
+
+    Stage 1 條件(全滿足才 hit):
+    1. (enabled, params) 對應 precompute 的 default 路徑
+    2. universe 是 3 個預跑 universe 之一(pure_stock / with_etf / top_50)
+    3. SQLite daily_picks 有這 (trade_date, universe_label, default_v1) 記錄
+
+    Stage 2:任何 stage 1 miss 走原 runtime path,@st.cache_data 涵蓋 ttl 內
+    重 rerun 不重算(短線 sticky-submit 後 rerun 0ms 命中)。
+    """
+    if _is_precompute_eligible(enabled_key, params_key):
+        u_label = _universe_to_label(universe_key)
+        if u_label is not None:
+            cached = db.load_daily_picks(
+                trade_date, u_label, PRECOMPUTE_PARAMS_HASH,
+            )
+            if cached is not None:
+                # ⚡ 0ms 命中 nightly 預跑 — 不打 SQL helpers,不算 indicator
+                return cached
+    # Stage 2:custom params / unknown universe / precompute 沒這天的資料
+    return _run_all_strategies_runtime(
+        trade_date, universe_key, enabled_key, params_key,
     )
 
 
@@ -334,8 +467,6 @@ def _load_snapshot_if_needed() -> None:
     portfolio_snapshot.safe_boot_load()
 
     st.session_state[_BOOT_DONE_KEY] = True
-
-    _snapshot_loaded = True
 
 
 # === 主程式 ===
