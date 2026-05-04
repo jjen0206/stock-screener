@@ -87,6 +87,90 @@ def test_precompute_runs_all_universes_and_writes_daily_picks(
     assert all(d == "2026-05-04" for d, _ in call_log)
 
 
+def test_dump_daily_picks_csv_writes_file_in_snapshot_dir(
+    tmp_db, tmp_path, monkeypatch,
+):
+    """dump_daily_picks_csv 把 daily_picks 全表寫成 CSV 進指定目錄。"""
+    from scripts import precompute_strategies as pcs
+
+    # 灌一筆 daily_picks
+    db.dump_daily_picks(
+        "2026-05-04", "pure_stock",
+        {
+            "2330": {
+                "name": "台積電",
+                "signals": ["量價KD"],
+                "details": {"volume_kd": {
+                    "stock_id": "2330", "name": "台積電", "close": 600.0,
+                }},
+            },
+        },
+    )
+
+    snapshot_dir = tmp_path / "snap"
+    n = pcs.dump_daily_picks_csv(snapshot_dir=snapshot_dir)
+    assert n == 1
+    csv_path = snapshot_dir / "daily_picks.csv"
+    assert csv_path.exists()
+
+    # CSV 內容驗證
+    import pandas as pd
+    df = pd.read_csv(csv_path, dtype={"sid": str, "trade_date": str})
+    assert len(df) == 1
+    assert df.iloc[0]["sid"] == "2330"
+    assert df.iloc[0]["strategy"] == "volume_kd"
+    assert df.iloc[0]["universe"] == "pure_stock"
+    assert df.iloc[0]["params_hash"] == "default_v1"
+
+
+def test_dump_daily_picks_csv_skips_when_table_empty(tmp_db, tmp_path):
+    """daily_picks 表空 → 不寫 CSV,回 0(避免 commit 空檔)。"""
+    from scripts import precompute_strategies as pcs
+
+    snapshot_dir = tmp_path / "snap"
+    n = pcs.dump_daily_picks_csv(snapshot_dir=snapshot_dir)
+    assert n == 0
+    assert not (snapshot_dir / "daily_picks.csv").exists()
+
+
+def test_preload_snapshots_loads_daily_picks_csv(tmp_db, tmp_path):
+    """preload_snapshots 讀 daily_picks.csv 灌進 SQLite,App 端 load 拿到資料。"""
+    import pandas as pd
+
+    # 寫一份 CSV(模擬 nightly workflow 推進來)
+    csv_path = tmp_path / "daily_picks.csv"
+    pd.DataFrame([
+        {
+            "trade_date": "2026-05-04", "universe": "pure_stock",
+            "strategy": "volume_kd", "sid": "2330",
+            "score": None, "rank": None,
+            "params_hash": "default_v1",
+            "payload": '{"stock_id": "2330", "name": "台積電", "close": 600.0}',
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+        {
+            "trade_date": "2026-05-04", "universe": "pure_stock",
+            "strategy": "ma_alignment", "sid": "2330",
+            "score": None, "rank": None,
+            "params_hash": "default_v1",
+            "payload": '{"stock_id": "2330", "name": "台積電", "close": 600.0, "ma5": 595.0}',
+            "computed_at": "2026-05-04T00:00:00+00:00",
+        },
+    ]).to_csv(csv_path, index=False)
+
+    # preload 模擬找 daily_picks.csv 路徑(snapshot_dir 直接指向 tmp_path)
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("daily_picks") == 2
+
+    # load_daily_picks 該拿到資料
+    loaded = db.load_daily_picks("2026-05-04", "pure_stock", "default_v1")
+    assert loaded is not None
+    assert "2330" in loaded
+    assert sorted(loaded["2330"]["details"].keys()) == [
+        "ma_alignment", "volume_kd",
+    ]
+
+
 def test_precompute_clears_old_data_for_same_date(tmp_db, monkeypatch):
     """rerun 同一天 → 先清舊 + 重寫,沒遺留。"""
     from scripts import precompute_strategies as pcs

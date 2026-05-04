@@ -66,6 +66,28 @@ jobs:
             git push
           fi
 
+      # 預跑 default-params 全 11 strategies × 3 universe → SQLite daily_picks 表
+      # + dump 成 data/twse_snapshot/daily_picks.csv 給 streamlit cloud preload。
+      # 雲端 App boot 後 _run_all_strategies_cached 命中 SQLite → 0ms 回(取代
+      # 每次 user 開頁重算 ~338ms~11s)。
+      # continue-on-error:precompute 失敗(SQLite 沒歷史等)不該擋推播 step。
+      - name: Precompute strategies (default params)
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/precompute_strategies.py
+
+      - name: Commit precompute snapshot if changed
+        continue-on-error: true
+        run: |
+          git add data/twse_snapshot/daily_picks.csv || true
+          if git diff --quiet --staged; then
+            echo "No daily_picks snapshot changes to commit"
+          else
+            git commit -m "chore(precompute): daily strategies snapshot [skip ci]"
+            git push
+          fi
+
       - name: Run daily notify
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}

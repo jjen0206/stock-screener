@@ -32,7 +32,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from src import database as db  # noqa: E402
+from src import config, database as db  # noqa: E402
 from src.strategies import run_all_strategies  # noqa: E402
 from src.universe import (  # noqa: E402
     TW_TOP_50, is_pure_stock, pure_stock_universe,
@@ -123,6 +123,42 @@ def precompute_for_date(trade_date: str) -> dict[str, int]:
     return results
 
 
+def dump_daily_picks_csv(snapshot_dir: Path | None = None) -> int:
+    """把 daily_picks 全表 dump 成 CSV(給 nightly workflow git push 用)。
+
+    雲端容器 boot 時 preload_snapshots 會讀 daily_picks.csv 灌進 SQLite,
+    App 端 _run_all_strategies_cached 即可命中。
+
+    回 row count(無資料 → 不寫 CSV,回 0)。
+    """
+    import pandas as pd
+
+    if snapshot_dir is None:
+        snapshot_dir = config.PROJECT_ROOT / "data" / "twse_snapshot"
+    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT trade_date, universe, strategy, sid, score, rank, "
+            "params_hash, payload, computed_at FROM daily_picks "
+            "ORDER BY trade_date DESC, universe, strategy, sid"
+        ).fetchall()
+
+    if not rows:
+        print("[PRECOMPUTE] daily_picks 表空,不 dump CSV", flush=True)
+        return 0
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    csv_path = snapshot_dir / "daily_picks.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(
+        f"[PRECOMPUTE] dump CSV → {csv_path} ({len(rows)} rows)",
+        flush=True,
+    )
+    return len(rows)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="預跑 daily_picks(default params)")
     p.add_argument(
@@ -151,6 +187,11 @@ def main() -> int:
 
     results = precompute_for_date(target)
     total = sum(results.values())
+
+    # dump CSV 給 nightly workflow git push(雲端容器 preload 用)
+    if total > 0:
+        dump_daily_picks_csv()
+
     print(f"[PRECOMPUTE] DONE total_rows={total}", flush=True)
     return 0 if total > 0 else 1
 

@@ -952,6 +952,37 @@ def preload_snapshots(
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] trades load 失敗:%s", e)
 
+    # 8. daily_picks(precompute 預跑結果)— nightly workflow dump 進 repo,
+    # Cloud 容器 git pull 拿到 CSV → 這裡灌進 SQLite,App 端 _run_all_strategies_cached
+    # 命中 → 0ms 回。CSV 沒有就跳過(precompute step 失敗 / 第一次部署沒檔)。
+    picks_csv = snapshot_dir / "daily_picks.csv"
+    if picks_csv.exists():
+        df = pd.read_csv(picks_csv, dtype={"sid": str, "trade_date": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            with get_conn(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO daily_picks (
+                        trade_date, universe, strategy, sid, score, rank,
+                        params_hash, payload, computed_at
+                    ) VALUES (
+                        :trade_date, :universe, :strategy, :sid, :score, :rank,
+                        :params_hash, :payload, :computed_at
+                    )
+                    ON CONFLICT(trade_date, universe, strategy, sid, params_hash)
+                    DO UPDATE SET
+                        score=excluded.score, rank=excluded.rank,
+                        payload=excluded.payload, computed_at=excluded.computed_at
+                    """,
+                    records,
+                )
+            counts["daily_picks"] = len(records)
+
     return counts
 
 
