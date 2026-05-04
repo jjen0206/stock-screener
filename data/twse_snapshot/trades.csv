@@ -1,3 +1,2 @@
 id,stock_id,direction,price,quantity,trade_date,note,created_at
-3,3284,buy,100.0,1,2026-05-04,,2026-05-04T21:46:34+00:00
 2,1584,buy,100.0,1,2026-05-04,,2026-05-04T21:46:13+00:00
