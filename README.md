@@ -210,6 +210,48 @@ python scripts/daily_notify.py --no-telegram   # 只送 Discord
 python scripts/daily_notify.py --no-discord    # 只送 Telegram
 ```
 
+## 預跑策略加速(Daily Picks Precompute)
+
+App 開啟時跑 `run_all_strategies` 在 ~2000 檔全市場 = 11+ 秒。改用「nightly
+預跑 + SQLite cache」後,App 端 default 路徑 0ms 命中。
+
+### 自動執行(已接 nightly workflow)
+
+`.github/workflows/daily-notify.yml` 排程:**週一到週五 22:13 Asia/Taipei**
+跑 `scripts/precompute_strategies.py`:
+1. 跑 default params 全 11 strategies × 3 universe(pure_stock / with_etf / top_50)
+2. 結果寫進 SQLite `daily_picks` 表
+3. dump 成 `data/twse_snapshot/daily_picks.csv` commit 進 repo
+4. Streamlit Cloud 容器 redeploy 時自動 git pull → boot 時 preload 進 SQLite
+5. App 開頁直接讀 daily_picks 表,取代每次重跑 strategies
+
+### 手動執行
+
+```bash
+# 跑當日(latest trading date,本機開發 / 補跑用)
+python scripts/precompute_strategies.py
+
+# 跑特定日(覆蓋舊資料)
+python scripts/precompute_strategies.py --date 2026-05-04
+
+# Backfill 最近 N 個交易日(回補歷史)
+python scripts/precompute_strategies.py --backfill 30
+```
+
+跑完會 dump `data/twse_snapshot/daily_picks.csv`,可手動 commit + push。
+
+### 確認 cache hit
+
+App 端 `_run_all_strategies_cached`:
+1. 先試 `db.load_daily_picks(date, universe_label, "default_v1")`
+2. miss 才走 runtime `run_all_strategies(...)`
+
+驗證雲端 hit:打開短線頁(default 設定)按「執行選股」,實測時間 < 100ms 表
+示走 daily_picks。> 1s 表示 cache miss(可能 nightly 沒跑成 / params 不對 /
+universe 不在預跑清單)。
+
+可調 sliders 改過 → 走 runtime,正常。
+
 ## 常見問題
 
 **Q: Claude Code 改了我不想改的檔案怎麼辦?**

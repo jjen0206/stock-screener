@@ -133,6 +133,49 @@ def test_dump_daily_picks_csv_skips_when_table_empty(tmp_db, tmp_path):
     assert not (snapshot_dir / "daily_picks.csv").exists()
 
 
+def test_list_recent_trading_dates_returns_distinct_descending(tmp_db):
+    """_list_recent_trading_dates 從 daily_prices 撈最近 N 個交易日,
+    去重 + 降序,排除 TAIEX。"""
+    from scripts import precompute_strategies as pcs
+
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "2317", "name": "鴻海", "market": "TW"},
+    ])
+    # 灌 5 個日期(2330 + 2317 都有,確認去重)
+    rows = []
+    for sid in ("2330", "2317"):
+        for d in ("2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-02"):
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 1000,
+                "trading_money": None, "trading_turnover": None, "spread": None,
+            })
+    # TAIEX 一筆 — 不該出現在結果
+    rows.append({
+        "stock_id": "TAIEX", "date": "2026-05-03",
+        "open": 39000.0, "high": 39500.0, "low": 38900.0, "close": 39200.0,
+        "volume": 100000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+
+    # backfill 3 → 拿最近 3 個交易日(降序)
+    dates = pcs._list_recent_trading_dates(3)
+    assert dates == ["2026-05-02", "2026-05-01", "2026-04-30"]
+
+    # 0 → 空
+    assert pcs._list_recent_trading_dates(0) == []
+
+    # 100 → 上限即所有 5 天
+    dates_all = pcs._list_recent_trading_dates(100)
+    assert len(dates_all) == 5
+    assert dates_all == [
+        "2026-05-02", "2026-05-01", "2026-04-30", "2026-04-29", "2026-04-28",
+    ]
+
+
 def test_preload_snapshots_loads_daily_picks_csv(tmp_db, tmp_path):
     """preload_snapshots 讀 daily_picks.csv 灌進 SQLite,App 端 load 拿到資料。"""
     import pandas as pd

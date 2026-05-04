@@ -159,13 +159,43 @@ def dump_daily_picks_csv(snapshot_dir: Path | None = None) -> int:
     return len(rows)
 
 
+def _list_recent_trading_dates(n: int) -> list[str]:
+    """從 daily_prices 撈最近 N 個交易日(去重 + 降序)。"""
+    if n <= 0:
+        return []
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT date FROM daily_prices "
+            "WHERE stock_id != 'TAIEX' "
+            "ORDER BY date DESC LIMIT ?",
+            (n,),
+        ).fetchall()
+    return [r["date"] for r in rows]
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="預跑 daily_picks(default params)")
     p.add_argument(
         "--date",
         help="目標日期 YYYY-MM-DD;留空 = SQLite 內 daily_prices MAX(date)",
     )
+    p.add_argument(
+        "--backfill",
+        type=int,
+        default=0,
+        help="倒推 N 天:跑最近 N 個交易日(不能跟 --date 並用)",
+    )
     args = p.parse_args()
+
+    if args.backfill and args.date:
+        print(
+            "[PRECOMPUTE] --date 跟 --backfill 不可同用",
+            flush=True,
+        )
+        return 1
+    if args.backfill < 0:
+        print("[PRECOMPUTE] --backfill 必須 ≥ 0", flush=True)
+        return 1
 
     db.init_db()
     # GitHub Actions runner fresh container,要 preload snapshot CSV 確保有歷史
@@ -173,27 +203,48 @@ def main() -> int:
     if preload:
         print(f"[PRECOMPUTE] preload snapshots: {preload}", flush=True)
 
-    if args.date:
-        target = args.date
-    else:
-        target = db.get_latest_trading_date()
-        if not target:
-            from datetime import date as _date
-            target = _date.today().isoformat()
+    # 決定要跑的日期清單
+    if args.backfill > 0:
+        dates = _list_recent_trading_dates(args.backfill)
+        if not dates:
             print(
-                f"[PRECOMPUTE] 警告:SQLite 無歷史,用 today={target}",
+                "[PRECOMPUTE] daily_prices 表空,backfill 沒日期可跑",
                 flush=True,
             )
+            return 1
+        print(
+            f"[PRECOMPUTE] backfill {len(dates)} 天: "
+            f"{dates[-1]} ~ {dates[0]}",
+            flush=True,
+        )
+    elif args.date:
+        dates = [args.date]
+    else:
+        latest = db.get_latest_trading_date()
+        if not latest:
+            from datetime import date as _date
+            latest = _date.today().isoformat()
+            print(
+                f"[PRECOMPUTE] 警告:SQLite 無歷史,用 today={latest}",
+                flush=True,
+            )
+        dates = [latest]
 
-    results = precompute_for_date(target)
-    total = sum(results.values())
+    grand_total = 0
+    for d in dates:
+        results = precompute_for_date(d)
+        grand_total += sum(results.values())
 
     # dump CSV 給 nightly workflow git push(雲端容器 preload 用)
-    if total > 0:
+    # backfill 模式也只 dump 一次 — CSV 包整個 daily_picks 表所有日期
+    if grand_total > 0:
         dump_daily_picks_csv()
 
-    print(f"[PRECOMPUTE] DONE total_rows={total}", flush=True)
-    return 0 if total > 0 else 1
+    print(
+        f"[PRECOMPUTE] DONE total_rows={grand_total} dates={len(dates)}",
+        flush=True,
+    )
+    return 0 if grand_total > 0 else 1
 
 
 if __name__ == "__main__":
