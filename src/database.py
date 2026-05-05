@@ -303,6 +303,29 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_paper_trades_status "
     "ON paper_trades(status, entry_date DESC)",
+    # news:TWSE 重大訊息(t187ap04_L OpenAPI 抓全市場)。每小時 cron 抓
+    # 一次,白名單過濾後推 Telegram + Discord。url_hash UNIQUE 防重複。
+    """
+    CREATE TABLE IF NOT EXISTS news (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        sid             TEXT NOT NULL,
+        company_name    TEXT,
+        publish_date    TEXT NOT NULL,    -- YYYY-MM-DD(已從民國年轉)
+        publish_time    TEXT,             -- HHMMSS
+        subject         TEXT NOT NULL,
+        article_no      TEXT,             -- 條款編號 "第8款" 等
+        description     TEXT,             -- 說明全文
+        fact_date       TEXT,             -- 事實發生日 YYYY-MM-DD
+        url_hash        TEXT NOT NULL UNIQUE,
+        sent_telegram   INTEGER NOT NULL DEFAULT 0,
+        sent_discord    INTEGER NOT NULL DEFAULT 0,
+        fetched_at      TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_news_sent "
+    "ON news(sent_telegram, sent_discord, publish_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_news_sid_date "
+    "ON news(sid, publish_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -1042,6 +1065,52 @@ def preload_snapshots(
         if rows:
             upsert_dividend(rows, db_path=db_path)
             counts["dividend"] = len(rows)
+
+    # 7b. news(TWSE 重大訊息,from news-notify.yml hourly)
+    # 雲端容器重啟時讀進 SQLite,讓 sent_telegram / sent_discord 跨容器保留
+    # 避免推過的重訊在新容器重啟時又再推一次(news_notify 走 sent flag dedup)。
+    news_csv = snapshot_dir / "news.csv"
+    if news_csv.exists():
+        try:
+            df = pd.read_csv(news_csv, dtype={"sid": str})
+        except pd.errors.EmptyDataError:
+            df = pd.DataFrame()
+        if not df.empty:
+            n_loaded = 0
+            with get_conn(db_path) as conn:
+                for _, r in df.iterrows():
+                    if not r.get("url_hash") or pd.isna(r.get("url_hash")):
+                        continue
+                    try:
+                        cur = conn.execute(
+                            """
+                            INSERT OR REPLACE INTO news
+                                (sid, company_name, publish_date, publish_time,
+                                 subject, article_no, description, fact_date,
+                                 url_hash, sent_telegram, sent_discord, fetched_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(r["sid"]),
+                                str(r.get("company_name") or ""),
+                                str(r.get("publish_date") or ""),
+                                str(r.get("publish_time") or ""),
+                                str(r.get("subject") or ""),
+                                str(r.get("article_no") or ""),
+                                str(r.get("description") or ""),
+                                str(r.get("fact_date") or "") or None,
+                                str(r["url_hash"]),
+                                int(r.get("sent_telegram") or 0),
+                                int(r.get("sent_discord") or 0),
+                                str(r.get("fetched_at") or _now_iso()),
+                            ),
+                        )
+                        if cur.rowcount > 0:
+                            n_loaded += 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("[PRELOAD] news row skip: %s", e)
+            if n_loaded > 0:
+                counts["news"] = n_loaded
 
     # 8. trades(P&L 紀錄)— delegate 給 portfolio_snapshot,只在表空時灌
     # 避免覆蓋本機使用者新加的交易

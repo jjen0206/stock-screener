@@ -1,0 +1,104 @@
+name: News Notify (hourly)
+
+# 每小時整點抓 TWSE 重大訊息,白名單條款過濾後推 Telegram + Discord。
+# 來源:https://openapi.twse.com.tw/v1/opendata/t187ap04_L(免費官方,加 User-Agent)
+# Public repo Actions 分鐘無限,每小時跑沒成本壓力。
+#
+# Dedup by url_hash UNIQUE,同一條重訊只推一次(跨小時 cron 看到舊條目跳過)。
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+      batch_size:
+        description: "單批最多推幾則(default 5)"
+        required: false
+        default: "5"
+
+# 同 group 同時最多 1 個,避免兩輪 cron 重疊
+concurrency:
+  group: news-notify
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch + filter + push news
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.batch_size }}" ]; then
+            ARGS="$ARGS --batch-size ${{ inputs.batch_size }}"
+          fi
+          echo "Running: python scripts/news_notify.py $ARGS"
+          python scripts/news_notify.py $ARGS
+
+      - name: Dump news.csv snapshot
+        # SQLite news 表狀態 dump 進 repo,雲端 preload_snapshots 可看到歷史
+        continue-on-error: true
+        run: |
+          python -c "
+          import pandas as pd
+          from pathlib import Path
+          from src import database as db
+          db.init_db()
+          with db.get_conn() as conn:
+              df = pd.read_sql(
+                  'SELECT * FROM news ORDER BY publish_date DESC, '
+                  'publish_time DESC LIMIT 5000',
+                  conn,
+              )
+          out = Path('data/twse_snapshot/news.csv')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          df.to_csv(out, index=False)
+          print(f'wrote {out}: {len(df)} rows')
+          "
+
+      - name: Commit & push news.csv if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/news.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "[NEWS] news.csv 無變化"
+            exit 0
+          fi
+          git commit -m "chore(news): hourly TWSE news snapshot [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[NEWS] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::push 失敗 5 次"

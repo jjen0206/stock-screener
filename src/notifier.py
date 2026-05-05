@@ -426,6 +426,80 @@ def notify_top_picks(
     return results
 
 
+def format_news_block(news: dict, channel: str = "telegram") -> str:
+    """組單則重大訊息的訊息區塊。Telegram(*bold*)+ Discord(**bold**)共用。
+
+    Input news dict 必有:sid, company_name, publish_date, publish_time, subject,
+    article_no。description / fact_date 可選(目前不顯,只當 SQLite 紀錄)。
+
+    格式(仿口袋台股):
+        🔔 *公司名 (sid)*        ⏰ HH:MM
+        📋 *第 N 款 · 條款說明簡稱*
+        📰 主旨...
+    """
+    b = _bold
+    sid = str(news.get("sid") or "")
+    name = str(news.get("company_name") or "")
+    date_iso = str(news.get("publish_date") or "")
+    time_str = str(news.get("publish_time") or "")
+    subject = str(news.get("subject") or "")
+    article = str(news.get("article_no") or "")
+
+    # HHMMSS → HH:MM(若解析失敗顯原值)
+    time_label = ""
+    if time_str and time_str.isdigit():
+        if len(time_str) >= 6:
+            time_label = f"{time_str[:2]}:{time_str[2:4]}"
+        elif len(time_str) >= 4:
+            # 5 碼如 70003 → 07:00(時間補 0)
+            padded = time_str.zfill(6)
+            time_label = f"{padded[:2]}:{padded[2:4]}"
+
+    # 第一行:🔔 *公司名 (sid)*  ⏰ time
+    header = f"🔔 {b(f'{name} ({sid})', channel)}"
+    if time_label:
+        header += f"  ⏰ {time_label}"
+
+    lines = [header]
+    if article:
+        lines.append(f"📋 {b(article, channel)}")
+    if subject:
+        # subject 太長截斷(訊息整體要顧 4096 / 2000 字限制)
+        subj_display = subject if len(subject) <= 200 else subject[:197] + "..."
+        lines.append(f"📰 {subj_display}")
+    return "\n".join(lines)
+
+
+def format_news_message(
+    news_list: list[dict], channel: str = "telegram",
+) -> str:
+    """合併多則 news 成單一訊息。Header + each block + footer。
+
+    沒新聞 → 空 string(caller 自己判斷,不送)。長度限制:Telegram 4096,
+    Discord 2000;單則平均 ~150-300 字 → 大概 5-10 則就到上限。caller 應控制
+    一輪推不超過 5 則。
+    """
+    if not news_list:
+        return ""
+    b = _bold
+    today = _date.today().isoformat()
+    lines = [
+        f"🔔 {b(f'重大訊息 · {today}', channel)}",
+        _SEPARATOR,
+        "",
+    ]
+    for news in news_list:
+        lines.append(format_news_block(news, channel=channel))
+        lines.append("")
+        lines.append(_SEPARATOR)
+        lines.append("")
+    n = len(news_list)
+    lines.append(f"📊 本輪推送 {n} 則重訊")
+    lines.append("")
+    lines.append("⚠️ 來源 TWSE 公開資訊;僅供研究,非投資建議。")
+    return "\n".join(lines)
+
+
 def format_short_picks(picks: pd.DataFrame, date: str) -> str:
     """把短線選股結果包成 Telegram Markdown 訊息。
 
