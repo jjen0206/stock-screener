@@ -95,8 +95,11 @@ def isolated_db(monkeypatch, tmp_path):
     # 預設關掉「高信心」過濾 — 多數 e2e 用合成 sids(沒灌 daily_prices),
     # ML predict_batch 拿不到 features 回 None → 過濾掉所有 picks → 測試失敗。
     # 想測 filter 行為的 test 自己 set high_confidence_mode=True。
+    # confluence 也預設關 — 同樣理由,殘留會污染下個 test。
     try:
         st.session_state["high_confidence_mode"] = False
+        st.session_state["confluence_filter_on"] = False
+        st.session_state["confluence_n"] = 2
     except Exception:
         pass
 
@@ -2238,6 +2241,96 @@ def test_apply_confidence_filter_empty_input(isolated_db):
 
     filtered, total = _app._apply_confidence_filter([])
     assert filtered == [] and total == 0
+
+
+# === Confluence(共識)過濾 ===
+
+def test_apply_confluence_filter_keeps_picks_with_n_or_more_strategies(
+    isolated_db,
+):
+    """confluence_filter_on=True + N=2 → 命中 2 策略以上的留,1 策略的砍。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["confluence_filter_on"] = True
+    st.session_state["confluence_n"] = 2
+    st.session_state["high_confidence_mode"] = False  # 純測 confluence
+
+    rows = [
+        {"stock_id": "2330", "ml_prob": 0.5,
+         "matched_strategies": ["volume_kd", "ma_alignment"]},   # 2 → 留
+        {"stock_id": "2317", "ml_prob": 0.5,
+         "matched_strategies": ["macd_golden"]},                  # 1 → 砍
+        {"stock_id": "1101", "ml_prob": 0.5,
+         "matched_strategies": ["a", "b", "c"]},                  # 3 → 留
+        {"stock_id": "9999", "ml_prob": 0.5,
+         "matched_strategies": []},                                # 0 → 砍
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 4
+    sids = [r["stock_id"] for r in filtered]
+    assert "2330" in sids and "1101" in sids
+    assert "2317" not in sids and "9999" not in sids
+
+
+def test_apply_confluence_filter_n_3_stricter(isolated_db):
+    """N=3 → 只命中 3+ 策略才留。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["confluence_filter_on"] = True
+    st.session_state["confluence_n"] = 3
+    st.session_state["high_confidence_mode"] = False
+
+    rows = [
+        {"stock_id": "A", "matched_strategies": ["a", "b"]},      # 2 → 砍
+        {"stock_id": "B", "matched_strategies": ["a", "b", "c"]}, # 3 → 留
+    ]
+    filtered, _ = _app._apply_confidence_filter(rows)
+    sids = [r["stock_id"] for r in filtered]
+    assert sids == ["B"]
+
+
+def test_apply_confluence_filter_off_keeps_all(isolated_db):
+    """confluence_filter_on=False → 保留全部(連 0 策略都不砍)。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["confluence_filter_on"] = False
+    st.session_state["high_confidence_mode"] = False
+
+    rows = [
+        {"stock_id": "A", "matched_strategies": []},
+        {"stock_id": "B", "matched_strategies": ["x"]},
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 2 and len(filtered) == 2
+
+
+def test_apply_confluence_chains_with_confidence_filter(isolated_db):
+    """confluence + confidence 雙開:先 confluence 砍,剩下再過 ML 門檻。"""
+    import streamlit as st
+    import app as _app
+
+    st.session_state["confluence_filter_on"] = True
+    st.session_state["confluence_n"] = 2
+    st.session_state["high_confidence_mode"] = True
+
+    rows = [
+        # 命中 2 策略(過 confluence),但其中 ma_alignment threshold 0.55 → ml_prob 0.50 < 0.55,confidence 砍
+        {"stock_id": "A", "ml_prob": 0.50,
+         "matched_strategies": ["ma_alignment", "volume_kd"]},
+        # 命中 2 策略 + ml_prob 0.60 ≥ 0.55 → 兩層都過 → 留
+        {"stock_id": "B", "ml_prob": 0.60,
+         "matched_strategies": ["ma_alignment", "volume_kd"]},
+        # 命中 1 策略 → confluence 直接砍,根本沒進 confidence
+        {"stock_id": "C", "ml_prob": 0.99,
+         "matched_strategies": ["ma_alignment"]},
+    ]
+    filtered, total = _app._apply_confidence_filter(rows)
+    assert total == 3
+    sids = [r["stock_id"] for r in filtered]
+    assert sids == ["B"]
 
 
 # === Stage 2A: per-strategy ML filter ===

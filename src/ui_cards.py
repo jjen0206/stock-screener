@@ -339,7 +339,11 @@ def _render_card_metadata(
     """
     parts: list[str] = []
     if n_signals > 0:
-        parts.append("熱門" if n_signals >= 2 else f"{n_signals} 訊號")
+        # ≥2 策略共識命中標明顯,讓 confluence 過濾後的「優等生」一眼看出
+        if n_signals >= 2:
+            parts.append(f"<strong>📊 {n_signals} 策略命中</strong>")
+        else:
+            parts.append(f"{n_signals} 策略命中")
     if risk_reward is not None and risk_reward == risk_reward:
         try:
             parts.append(f"R:R {float(risk_reward):.1f}")

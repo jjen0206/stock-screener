@@ -477,6 +477,21 @@ def _render_high_confidence_sidebar() -> None:
         "・其他 5 套策略不過濾(sample 太小或 audit 顯示無效)"
     )
 
+    # 🥇 共識過濾(confluence):多策略同時命中才算高品質訊號
+    st.sidebar.markdown("**📊 共識過濾(confluence)**")
+    st.sidebar.toggle(
+        "需多策略共識命中",
+        value=False,
+        help="只顯示同時被 ≥ N 個策略命中的 picks;雙重過濾把勝率再拉一階。",
+        key="confluence_filter_on",
+    )
+    st.sidebar.slider(
+        "最少命中策略數 N",
+        min_value=1, max_value=5, value=2, step=1,
+        help="該 pick 需被 N 個策略同時命中才顯示。N=1 等同關閉,N=2 預設。",
+        key="confluence_n",
+    )
+
 
 def _matched_strategies_for_sid(agg: dict[str, dict], sid: str) -> list[str]:
     """從 agg dict 拿某 sid 命中的全部 strategy_keys(英文 key,非中文 label)。
@@ -568,28 +583,30 @@ def _get_strategy_ml_model(strategy_name: str):
 
 
 def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
-    """套用「高信心模式」過濾到 row list — Stage 2A 改 per-strategy 模式。
+    """套用 picks 過濾鏈 — confluence(共識)+ confidence(ML 機率)雙層。
 
-    Args:
-        rows: list of pick dicts(必有 ml_prob;若 toggle on 則需 matched_strategies)
+    流程:
+    1. confluence(若 toggle on)— 過濾掉命中策略數 < N 的 picks
+    2. confidence(若 toggle on)— 套 per-strategy ML 門檻
 
-    Returns:
-        (filtered_rows, total_before): tuple
-        - filtered_rows:過濾後 list(toggle off 時 = rows 原樣)
-        - total_before:原 rows 長度(caller 顯「N/M 檔」caption)
-
-    過濾規則(per-strategy mode):
-    - toggle off → 全保留
-    - toggle on:
-      * 該 pick 命中策略對應的 STRATEGY_ML_THRESHOLDS 取最嚴格 threshold
-      * 該策略不在 dict(threshold None)→ 該 pick 不過濾(直接保留)
-      * threshold 存在但 ml_prob 為 None / NaN → 過濾掉(沒 ML 資料不算高信心)
-      * threshold 存在 + ml_prob >= threshold → 保留
-      * threshold 存在 + ml_prob < threshold → 過濾掉
+    回 (filtered, total_before):total 永遠是原 rows 長度,讓 caller 顯
+    「N/M 檔」caption 反映過濾前後對比。
     """
     total = len(rows)
     if not rows:
         return [], 0
+
+    # 1. Confluence(共識)過濾 — 命中策略數 < N → 砍掉
+    if st.session_state.get("confluence_filter_on", False):
+        n_required = int(st.session_state.get("confluence_n", 2))
+        rows = [
+            r for r in rows
+            if len(r.get("matched_strategies") or []) >= n_required
+        ]
+        if not rows:
+            return [], total
+
+    # 2. Confidence(ML 機率)per-strategy 過濾
     if not st.session_state.get("high_confidence_mode", True):
         return rows, total
 
