@@ -42,6 +42,11 @@ def mock_universe(monkeypatch):
         ("2330", "台積電"), ("2454", "聯發科"),
     ])
     monkeypatch.setattr(daily_fetch, "load_watchlist", lambda: [])
+    # 預設 FinMind 路徑回空 → 既有 tests fallback 走 TWSE bulk(它們已 mock)
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_via_finmind",
+        lambda sids, target_date, sleep_secs=0.0: pd.DataFrame(),
+    )
     return fake_universe
 
 
@@ -176,3 +181,117 @@ def test_run_fetches_90day_history_for_watchlist(tmp_db, mock_universe, monkeypa
     # 該對 watchlist 兩檔都抓
     assert "3680" in history_calls and "8069" in history_calls
     assert summary["watchlist_history_ok"] == 2
+
+
+# === Plan A: FinMind 主源 + TWSE fallback ===
+
+def test_fetch_daily_prices_uses_finmind_first(tmp_db, mock_universe, monkeypatch):
+    """FinMind 拿到 expected_date 就直接回,不打 TWSE bulk。"""
+    finmind_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-05-04", "open": 600, "high": 605,
+         "low": 595, "close": 600, "volume": 5000,
+         "trading_money": None, "trading_turnover": None, "spread": 5.0},
+        {"stock_id": "2454", "date": "2026-05-04", "open": 1200, "high": 1220,
+         "low": 1190, "close": 1210, "volume": 3000,
+         "trading_money": None, "trading_turnover": None, "spread": 10.0},
+    ])
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_via_finmind",
+        lambda sids, target_date, sleep_secs=0.0: finmind_df,
+    )
+    twse_called = []
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_bulk",
+        lambda: (twse_called.append(1), pd.DataFrame())[1],
+    )
+    monkeypatch.setattr(
+        daily_fetch, "fetch_institutional", lambda sid, s, e: None,
+    )
+
+    result_df = daily_fetch._fetch_with_finmind_then_twse_fallback(
+        ["2330", "2454"], expected_date="2026-05-04",
+    )
+    assert len(result_df) == 2
+    assert result_df["date"].max() == "2026-05-04"
+    assert twse_called == [], "FinMind 成功時 TWSE bulk 不該被叫"
+
+
+def test_fetch_daily_prices_falls_back_to_twse_when_finmind_fails(
+    tmp_db, mock_universe, monkeypatch,
+):
+    """FinMind 拋 Exception → fallback TWSE bulk。"""
+    def _finmind_boom(sids, target_date, sleep_secs=0.0):
+        raise RuntimeError("FinMind 429 quota exceeded")
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_via_finmind", _finmind_boom,
+    )
+    twse_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-04-30", "open": 600, "high": 605,
+         "low": 595, "close": 600, "volume": 5000,
+         "trading_money": None, "trading_turnover": None, "spread": 5.0},
+    ])
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_bulk", lambda: twse_df,
+    )
+
+    result_df = daily_fetch._fetch_with_finmind_then_twse_fallback(
+        ["2330"], expected_date="2026-05-04",
+    )
+    # fallback 走 TWSE,該回 twse_df 內容
+    assert len(result_df) == 1
+    assert result_df.iloc[0]["stock_id"] == "2330"
+
+
+def test_fetch_daily_prices_falls_back_when_finmind_returns_empty(
+    tmp_db, mock_universe, monkeypatch,
+):
+    """FinMind 回空(quota / 全失敗)→ fallback TWSE bulk。"""
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_via_finmind",
+        lambda sids, target_date, sleep_secs=0.0: pd.DataFrame(),
+    )
+    twse_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-04-30", "open": 600, "high": 605,
+         "low": 595, "close": 600, "volume": 5000,
+         "trading_money": None, "trading_turnover": None, "spread": 5.0},
+    ])
+    twse_called = []
+    def _twse(*a, **kw):
+        twse_called.append(1)
+        return twse_df
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk", _twse)
+
+    result_df = daily_fetch._fetch_with_finmind_then_twse_fallback(
+        ["2330"], expected_date="2026-05-04",
+    )
+    assert len(result_df) == 1
+    assert twse_called == [1], "FinMind 空時 TWSE bulk 該被叫一次"
+
+
+def test_fetch_daily_prices_falls_back_when_finmind_max_lt_expected(
+    tmp_db, mock_universe, monkeypatch,
+):
+    """FinMind 回有資料但 max < expected_date(只拿到舊資料)→ fallback TWSE。"""
+    stale_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-04-28",  # ← 比 expected 5/4 舊
+         "open": 600, "high": 605, "low": 595, "close": 600, "volume": 5000,
+         "trading_money": None, "trading_turnover": None, "spread": 5.0},
+    ])
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_via_finmind",
+        lambda sids, target_date, sleep_secs=0.0: stale_df,
+    )
+    fresh_df = pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-04-30",
+         "open": 610, "high": 615, "low": 605, "close": 610, "volume": 6000,
+         "trading_money": None, "trading_turnover": None, "spread": 5.0},
+    ])
+    monkeypatch.setattr(
+        daily_fetch, "fetch_all_daily_prices_bulk", lambda: fresh_df,
+    )
+
+    result_df = daily_fetch._fetch_with_finmind_then_twse_fallback(
+        ["2330"], expected_date="2026-05-04",
+    )
+    # fallback 後回 TWSE 的 4/30 而非 FinMind 的 4/28
+    assert result_df.iloc[0]["date"] == "2026-04-30"

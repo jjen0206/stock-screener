@@ -882,11 +882,58 @@ def validate_daily_price_sanity(df: pd.DataFrame) -> list[tuple[str, str]]:
     return issues
 
 
+def fetch_all_daily_prices_via_finmind(
+    stock_ids: list[str],
+    target_date: str,
+    sleep_secs: float = 0.05,
+) -> pd.DataFrame:
+    """用 FinMind TaiwanStockPrice 對 universe 各檔抓 target_date 的 OHLCV。
+
+    跟 TWSE bulk endpoint 比:
+      + FinMind publication 較準時(2026-05-04 事件:TWSE OpenAPI 還在服務 4/30
+        舊資料時 FinMind 已有 5/4 個股資料)
+      - 慢:每檔 1 次 API call,~2700 檔 × ~1s = ~45 分鐘
+      - 受 token quota 限制(600/hr 預設,有 token 1500/hr)
+
+    sleep_secs 在每檔之間 throttle,避免一次性燒太快。
+
+    重用 `fetch_daily_price` 的 cache 邏輯(sync_log)— 已撈過的日期 cache hit,
+    不重打 API。回 concat DataFrame(stock_id, date, OHLCV ...);全失敗 → 空。
+    """
+    import time as _time
+
+    rows: list[pd.DataFrame] = []
+    n = len(stock_ids)
+    for i, sid in enumerate(stock_ids, start=1):
+        try:
+            df = fetch_daily_price(sid, target_date, target_date)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "[FETCH-FINMIND] fetch_daily_price(%s) 失敗: %s", sid, e,
+            )
+            continue
+        if df is not None and not df.empty:
+            rows.append(df)
+        if i % 200 == 0:
+            print(
+                f"[FETCH-FINMIND]   {i}/{n} 完成"
+                f"({len(rows)} 檔有資料)",
+                flush=True,
+            )
+        if sleep_secs > 0:
+            _time.sleep(sleep_secs)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
+
+
 __all__ = [
     "FinMindAPIError",
     "list_tw_stocks",
     "ensure_stock_info",
     "fetch_all_daily_prices_bulk",
+    "fetch_all_daily_prices_via_finmind",
     "validate_daily_price_sanity",
     "fetch_daily_price",
     "fetch_institutional",

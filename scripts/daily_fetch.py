@@ -27,6 +27,7 @@ if str(_ROOT) not in sys.path:
 from src import config, database as db  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     fetch_all_daily_prices_bulk,
+    fetch_all_daily_prices_via_finmind,
     fetch_daily_price,
     fetch_institutional,
     validate_daily_price_sanity,
@@ -40,6 +41,59 @@ _MIN_BULK_ROWS_HEALTHY = 2000
 # 還沒 publish 今日資料,sleep 後 retry。最多 3 次,間隔 5 分鐘。
 _BULK_RETRY_MAX = 3
 _BULK_RETRY_WAIT_SECS = 300
+
+
+def _fetch_with_finmind_then_twse_fallback(
+    universe_sids: list[str], expected_date: str,
+) -> "object":
+    """先試 FinMind 抓 expected_date 全 universe,沒拿到 expected_date(空 / max
+    < expected)→ fallback TWSE bulk + freshness retry。
+
+    2026-05-04 事件後改主源 FinMind 因 TWSE OpenAPI publication lag 嚴重
+    (bulk endpoint 在 5/5 早上 8 點還在服務 4/30 資料)。FinMind 較準時但
+    每檔一次 API call,2700 檔 ~45 分鐘 — 比 TWSE bulk 慢但保證新鮮度。
+
+    Args:
+        universe_sids: 要 fetch 的 sids list(TWSE + TPEx 全 universe)
+        expected_date: 'YYYY-MM-DD',想拿到的最新交易日
+
+    Returns:
+        DataFrame(stock_id, date, OHLCV ...)— 跟 TWSE bulk 同 schema。
+        空 = 兩源都失敗或 expected_date 是非交易日。
+    """
+    import pandas as pd
+
+    print(
+        f"[FETCH] 嘗試 FinMind 抓 {len(universe_sids)} 檔 daily_prices "
+        f"(expected_date={expected_date},約 ~{len(universe_sids) * 0.05 / 60:.0f} 分鐘)...",
+        flush=True,
+    )
+    try:
+        df = fetch_all_daily_prices_via_finmind(universe_sids, expected_date)
+        if not df.empty:
+            got_max = str(df["date"].max())
+            if got_max >= expected_date:
+                print(
+                    f"[FETCH] FinMind ✅ max={got_max} >= expected={expected_date},"
+                    f"{len(df)} 行,跳過 TWSE fallback",
+                    flush=True,
+                )
+                return df
+            print(
+                f"[FETCH] FinMind max={got_max} < expected={expected_date},"
+                f"fallback TWSE bulk",
+                flush=True,
+            )
+        else:
+            print(f"[FETCH] FinMind 回空,fallback TWSE bulk", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[FETCH] FinMind 失敗 ({type(e).__name__}: {e}),fallback TWSE bulk",
+            flush=True,
+        )
+
+    # Fallback:TWSE bulk + freshness retry(原 systemic 修法仍套)
+    return _bulk_fetch_with_freshness_retry()
 
 
 def _bulk_fetch_with_freshness_retry() -> "object":
@@ -133,8 +187,11 @@ def run(institutional_days: int = 7) -> dict:
     print(f"[FETCH] universe = {len(universe_sids)} 檔(twse + tpex)", flush=True)
 
     # 2. Bulk 抓全市場 OHLCV(< 30 秒)+ freshness retry
-    print("[FETCH] bulk 抓全市場 daily_prices...", flush=True)
-    bulk_df = _bulk_fetch_with_freshness_retry()
+    # 主源 FinMind(較準時)→ fallback TWSE bulk(較快但 publication lag)
+    expected_date = date.today().isoformat()
+    bulk_df = _fetch_with_finmind_then_twse_fallback(
+        universe_sids, expected_date,
+    )
     sanity_issues: list[tuple[str, str]] = []
     if bulk_df.empty:
         print("[FETCH] WARN: bulk 完全失敗,跳過 daily_prices 寫入", flush=True)
