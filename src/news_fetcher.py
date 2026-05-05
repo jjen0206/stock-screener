@@ -50,6 +50,20 @@ IMPORTANT_ARTICLES: frozenset[str] = frozenset({
     "第23款", "第25款", "第30款", "第39款", "第41款",
 })
 
+# 條款 base score。手動股價 impact 排序:
+#   100 第3款 法律訴訟 / 95 第8款 重大契約 / 95 第10款 處分資產
+#   90  第11款 簽證會計師更換 / 85 第14款 董事會決議 / 90 第15款 現金增資
+#   85  第18款 庫藏股 / 80 第20款 資產購置 / 80 第22款 資金貸與
+#   80  第23款 背書保證 / 75 第25款 再融資 / 75 第30款 內部稽核
+#   60  第6款 一般 / 50 第12款 法說會預告(預告型噪音較大,基線壓低)
+ARTICLE_PRIORITY: dict[str, int] = {
+    "第3款": 100, "第8款": 95, "第10款": 95, "第11款": 90,
+    "第14款": 85, "第15款": 90, "第18款": 85, "第20款": 80,
+    "第22款": 80, "第23款": 80, "第25款": 75, "第30款": 75,
+    "第6款": 60, "第12款": 50,
+}
+_DEFAULT_ARTICLE_SCORE = 70  # 白名單內未列在 ARTICLE_PRIORITY 表的條款預設分數
+
 
 def _roc_to_iso(roc_date: str | int | None) -> str | None:
     """民國年 yyymmdd / yyyymmdd → 西元 YYYY-MM-DD;非法輸入回 None。
@@ -192,6 +206,65 @@ def fetch_and_store_news(
     return rows, inserted, skipped
 
 
+def get_watchlist_sids(db_path: str | Path | None = None) -> set[str]:
+    """讀 watchlist 表 → set of stock_id。空 / 表不存在 → 空 set。"""
+    try:
+        with db.get_conn(db_path) as conn:
+            rows = conn.execute("SELECT stock_id FROM watchlist").fetchall()
+    except Exception:  # noqa: BLE001
+        return set()
+    return {str(r["stock_id"]) for r in rows if r["stock_id"]}
+
+
+def get_today_picks_sids(
+    trade_date: str | None = None,
+    db_path: str | Path | None = None,
+    min_strategies: int = 2,
+) -> set[str]:
+    """讀今日 daily_picks → set of sid:命中策略 ≥ min_strategies(預設 2)。
+
+    無資料 / 表不存在 → 空 set。trade_date None 取今日 ISO。
+    """
+    from datetime import date as _date
+    if trade_date is None:
+        trade_date = _date.today().isoformat()
+    try:
+        with db.get_conn(db_path) as conn:
+            rows = conn.execute(
+                "SELECT sid, COUNT(DISTINCT strategy) AS n "
+                "FROM daily_picks WHERE trade_date=? GROUP BY sid",
+                (trade_date,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return set()
+    return {
+        str(r["sid"]) for r in rows
+        if r["sid"] and r["n"] is not None and r["n"] >= min_strategies
+    }
+
+
+def _priority_score(
+    news: dict,
+    watchlist_sids: set[str] | None = None,
+    picks_sids: set[str] | None = None,
+) -> int:
+    """組合分數:watchlist (+1000) > today picks (+500) > 條款 base (50-100)。
+
+    Tie-break 由 caller 用 publish_time ASC(舊的先推)補。
+    None → 視為空 set。
+    """
+    watchlist_sids = watchlist_sids or set()
+    picks_sids = picks_sids or set()
+    article = str(news.get("article_no") or "")
+    score = ARTICLE_PRIORITY.get(article, _DEFAULT_ARTICLE_SCORE)
+    sid = str(news.get("sid") or "")
+    if sid in watchlist_sids:
+        score += 1000
+    if sid in picks_sids:
+        score += 500
+    return score
+
+
 def list_unsent_important_news(
     channel: str = "telegram",
     db_path: str | Path | None = None,
@@ -201,7 +274,8 @@ def list_unsent_important_news(
     """撈尚未推到指定 channel 的重要新聞(條款在白名單內)。
 
     channel='telegram' / 'discord'。article_whitelist 預設 IMPORTANT_ARTICLES。
-    依 publish_date / publish_time 升序回(舊的先推,維持時間軸)。
+    排序:_priority_score DESC(watchlist 最優先 → today picks → 條款分數)→
+    publish_time ASC(同分舊的先推維持時間軸)→ publish_date ASC fallback。
     """
     if channel not in ("telegram", "discord"):
         raise ValueError(f"channel 只能 'telegram' / 'discord',got {channel}")
@@ -210,17 +284,29 @@ def list_unsent_important_news(
 
     sent_col = "sent_telegram" if channel == "telegram" else "sent_discord"
     placeholders = ",".join("?" * len(article_whitelist))
+    # 全撈再用 Python 排序 + cap by limit。SQLite 沒法直接表達 watchlist /
+    # picks 的 score(跨表),Python 端排序 ~10ms 數量級沒差。
     sql = (
         f"SELECT * FROM news "
         f"WHERE {sent_col} = 0 "
-        f"AND article_no IN ({placeholders}) "
-        f"ORDER BY publish_date ASC, publish_time ASC "
-        f"LIMIT ?"
+        f"AND article_no IN ({placeholders})"
     )
-    args = list(article_whitelist) + [limit]
+    args = list(article_whitelist)
     with db.get_conn(db_path) as conn:
         rows = conn.execute(sql, args).fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    if not items:
+        return []
+
+    watchlist_sids = get_watchlist_sids(db_path=db_path)
+    picks_sids = get_today_picks_sids(db_path=db_path)
+
+    items.sort(key=lambda n: (
+        -_priority_score(n, watchlist_sids, picks_sids),
+        str(n.get("publish_date") or ""),
+        str(n.get("publish_time") or ""),
+    ))
+    return items[:limit]
 
 
 def mark_news_sent(
@@ -246,10 +332,13 @@ def mark_news_sent(
 __all__ = [
     "TWSE_NEWS_URL",
     "IMPORTANT_ARTICLES",
+    "ARTICLE_PRIORITY",
     "fetch_twse_news_raw",
     "normalize_twse_news",
     "upsert_news",
     "fetch_and_store_news",
     "list_unsent_important_news",
     "mark_news_sent",
+    "get_watchlist_sids",
+    "get_today_picks_sids",
 ]
