@@ -3337,6 +3337,15 @@ def _bulk_add_form(key_prefix: str = "wl_bulk") -> None:
                 st.rerun()
 
 
+def _remove_watchlist_row(sid: str) -> None:
+    """表格列「🗑️ 移除」 button 的 callback — 移除 + 提示。
+
+    rerun 由 Streamlit on_click 機制自動觸發,不用手動 st.rerun()。
+    """
+    db.remove_from_watchlist(sid)
+    st.toast(f"已移除 {sid}", icon="🗑️")
+
+
 def _page_watchlist() -> None:
     st.header("⭐ 我的關注")
     db.init_db()
@@ -3484,6 +3493,7 @@ def _page_watchlist() -> None:
         render_picks_cards_paginated(
             cards, state_key="watchlist", page_size=10,
             show_signal=False, show_targets=True, show_change=True,
+            show_add_button=True,  # 關注頁的卡片直接顯「🗑️ 移除關注」 toggle
         )
     else:
         selection = st.dataframe(
@@ -3495,6 +3505,24 @@ def _page_watchlist() -> None:
             sid = items[idx]["stock_id"]
             st.session_state["query_stock_id"] = sid
             st.info(f"已選 **{sid}**。請點 sidebar 切到「個股查詢」頁查看詳細圖表。")
+
+        # 表格底下加 per-row 移除按鈕 — st.dataframe 不支援 cell button,
+        # 只好另外排一列。compact 兩欄 layout(代號名稱 + 按鈕),
+        # 跟下方 selectbox 編輯表單共存(快速 vs 帶備註場景分工)。
+        with st.expander("🗑️ 快速移除", expanded=False):
+            for it, r in zip(items, rows):
+                sid = it["stock_id"]
+                rcols = st.columns([4, 1])
+                rcols[0].markdown(
+                    f"**{sid}** {r['名稱']} · 收 {r['收盤']} · {r['漲跌%']}"
+                )
+                rcols[1].button(
+                    "🗑️ 移除",
+                    key=f"wl_row_remove_{sid}",
+                    on_click=_remove_watchlist_row,
+                    args=(sid,),
+                    use_container_width=True,
+                )
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")
