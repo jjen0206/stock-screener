@@ -1877,6 +1877,22 @@ def _has_long_data() -> bool:
 
 # === 個股查詢頁 ===
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_stock_options() -> list[str]:
+    """從 stocks 表組搜尋用 options:["{sid} {name}", ...]。
+
+    ttl 600s — stocks 表平均一天才會新增上市/櫃個股,5-10 分鐘 cache 充足。
+    Streamlit selectbox 內建 fuzzy filter,輸入「台積電」或「2330」都能命中。
+    """
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id, name FROM stocks "
+            "WHERE name IS NOT NULL AND name != '' "
+            "ORDER BY stock_id"
+        ).fetchall()
+    return [f"{r['stock_id']} {r['name']}" for r in rows]
+
+
 def _page_stock_query() -> None:
     st.header("🔍 個股查詢")
     db.init_db()
@@ -1885,10 +1901,24 @@ def _page_stock_query() -> None:
     default_stock = st.session_state.pop("query_stock_id", "2330")
 
     # 輸入區先(input 在 toggle 之前,toggle 拿到的就是最新值)
-    cols = st.columns([2, 2, 2, 1])
-    stock_id = cols[0].text_input(
-        "股票代碼", value=default_stock, help="例:2330(台積電)",
+    # 用 searchable selectbox:輸入股號或名稱都能 fuzzy filter
+    options = _load_stock_options()
+    default_label = next(
+        (o for o in options if o.split(" ", 1)[0] == default_stock), None,
     )
+    default_idx = options.index(default_label) if default_label else None
+
+    cols = st.columns([2, 2, 2, 1])
+    selected = cols[0].selectbox(
+        "🔍 股號 或 名稱",
+        options=options,
+        index=default_idx,
+        placeholder="輸入股號(如 2330)或名稱(如 台積電)...",
+        help="支援搜尋:打字會 filter 候選清單",
+    )
+    # selectbox 找不到 → 走進階輸入(下方 expander)的值;
+    # 兩者都空 → 退回 default_stock 維持週末/假日重新整理時的預設體驗
+    stock_id = selected.split(" ", 1)[0] if selected else default_stock
     # 用最後交易日當 anchor,週末/假日打開個股頁 K 線結束日 = today 沒交易資料
     # 會抓到空區間或部分區間。跟短線頁 / 回測頁同 _get_default_screen_date 邏輯。
     anchor = _get_default_screen_date()
@@ -1896,6 +1926,18 @@ def _page_stock_query() -> None:
     end = cols[2].date_input("結束日", value=anchor)
     cols[3].markdown("&nbsp;", unsafe_allow_html=True)
     submit = cols[3].button("查詢", use_container_width=True, type="primary")
+
+    # 進階輸入:新上市/櫃個股還沒收錄到 stocks 表 → selectbox 看不到,
+    # 在這裡直接輸入代號 override(輸完按 Enter / 點查詢)
+    with st.expander("🔧 進階:直接輸入代號(若 selectbox 找不到)", expanded=False):
+        raw_sid = st.text_input(
+            "代號 override",
+            value="",
+            key="stock_query_raw_sid",
+            help="例如新上市/櫃個股還沒進 stocks 表時用",
+        )
+        if raw_sid.strip():
+            stock_id = raw_sid.strip()
 
     # ⭐ Toggle 用「當下 input 的 stock_id」,不再卡在 page-load 時的舊值
     sid_clean = stock_id.strip()
