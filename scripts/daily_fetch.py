@@ -36,6 +36,79 @@ from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E
 # 健康警戒線:bulk daily_prices 抓到少於這數量視為異常 → exit 1 讓 GH Actions 標紅
 _MIN_BULK_ROWS_HEALTHY = 2000
 
+# Bulk fetch sanity retry(2026-05-04 事件後加)— 若 TWSE OpenData 在跑的時候
+# 還沒 publish 今日資料,sleep 後 retry。最多 3 次,間隔 5 分鐘。
+_BULK_RETRY_MAX = 3
+_BULK_RETRY_WAIT_SECS = 300
+
+
+def _bulk_fetch_with_freshness_retry() -> "object":
+    """Bulk fetch + sanity check:回傳 max(date) 必須比 SQLite 既有更新,否則 retry。
+
+    給 GH Actions schedule 在 TWSE OpenData publication 緩衝期內跑時用 —
+    2026-05-04 事件:fetch 5/5 00:11 台北跑時 TWSE OpenData 還在服務 4/30 舊
+    資料,寫入了 2360 筆但全是既有 4/30 資料的 UPSERT 重寫,5/4 資料 0 筆。
+    schedule 已從 22:13 改 02:30 台北給 publication 緩衝;sanity retry 是
+    第二層保險。
+
+    Cache TTL 60s < retry wait 300s,sleep 後再呼叫會 cache miss 真重抓。
+    """
+    import pandas as pd
+
+    # SQLite 既有 max(個股 only,TAIEX 走別的 endpoint 跟個股不同步,排除)
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(date) AS d FROM daily_prices WHERE stock_id != 'TAIEX'"
+        ).fetchone()
+    existing_max = row["d"] if row and row["d"] else None
+
+    last_df: "pd.DataFrame" = pd.DataFrame()
+    last_max: str | None = None
+    for attempt in range(1, _BULK_RETRY_MAX + 1):
+        df = fetch_all_daily_prices_bulk()
+        last_df = df
+        if df.empty:
+            # 空 = TWSE OpenData 完全沒回應(連線斷 / endpoint 掛)— retry 也
+            # 救不回來。直接回空,讓上層 caller 走 bulk_df.empty 既有 path。
+            print(
+                f"[FETCH] bulk attempt {attempt}/{_BULK_RETRY_MAX} 完全空,"
+                f"不 retry(空 = endpoint 異常,sleep 也救不回)",
+                flush=True,
+            )
+            return df
+
+        last_max = str(df["date"].max())
+        if existing_max is None or last_max > existing_max:
+            print(
+                f"[FETCH] bulk attempt {attempt}/{_BULK_RETRY_MAX}: "
+                f"max={last_max} > existing={existing_max} ✅ 拿到新資料",
+                flush=True,
+            )
+            return df
+
+        # 有資料但 max 沒新 → 唯一該 sleep retry 的情境(2026-05-04 systemic bug)
+        print(
+            f"[FETCH] bulk attempt {attempt}/{_BULK_RETRY_MAX}: "
+            f"max={last_max} <= existing={existing_max}(TWSE OpenData "
+            f"可能還沒 publish 今日)",
+            flush=True,
+        )
+        if attempt < _BULK_RETRY_MAX:
+            print(
+                f"[FETCH] sleep {_BULK_RETRY_WAIT_SECS}s 後 retry...",
+                flush=True,
+            )
+            time.sleep(_BULK_RETRY_WAIT_SECS)
+
+    # 全部 retry 完仍沒新資料 — 回最後一次 df 讓流程繼續(週末 / 假日 / TWSE
+    # 異常 都會走這裡,不該 raise 阻斷 nightly)
+    print(
+        f"[FETCH] WARN: bulk {_BULK_RETRY_MAX} 次嘗試 max={last_max} 仍 <= "
+        f"existing={existing_max} — 寫入既有 UPSERT(週末/假日/TWSE 異常)",
+        flush=True,
+    )
+    return last_df
+
 
 def run(institutional_days: int = 7) -> dict:
     """執行 daily 流程:全市場 bulk 價量 + 小批 institutional + watchlist 90 day。
@@ -59,9 +132,9 @@ def run(institutional_days: int = 7) -> dict:
     universe_sids = get_full_universe()
     print(f"[FETCH] universe = {len(universe_sids)} 檔(twse + tpex)", flush=True)
 
-    # 2. Bulk 抓全市場 OHLCV(< 30 秒)
+    # 2. Bulk 抓全市場 OHLCV(< 30 秒)+ freshness retry
     print("[FETCH] bulk 抓全市場 daily_prices...", flush=True)
-    bulk_df = fetch_all_daily_prices_bulk()
+    bulk_df = _bulk_fetch_with_freshness_retry()
     sanity_issues: list[tuple[str, str]] = []
     if bulk_df.empty:
         print("[FETCH] WARN: bulk 完全失敗,跳過 daily_prices 寫入", flush=True)

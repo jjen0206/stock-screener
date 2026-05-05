@@ -3,10 +3,12 @@ name: Daily Telegram Push
 # 排程 + 手動觸發
 on:
   schedule:
-    # 14:13 UTC = 22:13 Asia/Taipei (台股 13:30 收盤後 8 小時 43 分,法人 22:00 公布後)
-    # 週一到週五跑(週末台股不開)
-    # :13 是非整點,避開 GitHub Actions 全球高峰造成的排程延遲
-    - cron: "13 14 * * 1-5"
+    # 18:30 UTC = 02:30 隔日 Asia/Taipei(週一-五 UTC trigger;台股當日收盤後 13 小時)
+    # 改晚至凌晨 2:30 給 TWSE OpenData(STOCK_DAY_ALL endpoint)2.5 小時 publication
+    # 緩衝 — 之前 22:13 台北跑時 TWSE 還在服務前一交易日資料,造成全市場個股漏抓 5/4
+    # 的 systemic bug(2026-05-04 事件)。
+    # 週一到週五 UTC = 對應台北 週二-週六凌晨抓昨日盤後資料,週一收盤資料週二凌晨進。
+    - cron: "30 18 * * 1-5"
   workflow_dispatch:
     inputs:
       date:

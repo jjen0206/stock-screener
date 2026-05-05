@@ -1095,17 +1095,23 @@ def preload_snapshots(
 def get_latest_trading_date(
     db_path: str | Path | None = None,
 ) -> str | None:
-    """SQLite daily_prices 內最新一筆 date(ISO string,YYYY-MM-DD)。
+    """SQLite daily_prices 內最新一筆 date(個股,排除 TAIEX 大盤指數)。
 
     給 daily_notify / streamlit 用,週末 / 假日 today() 沒當日 close 時改用
     這個當篩選日期(避免「今日無入選」誤判)。
+
+    **排除 TAIEX**:TAIEX 走 fetch_taiex 跟個股 STOCK_DAY_ALL 不同 endpoint,
+    publication 時程也不同步。2026-05-04 事件後發現:fetch 早跑時個股還沒新
+    資料但 TAIEX 已有 → MAX(date) 回 5/4 但個股 max=4/30 → 9 個策略
+    `df.date.iloc[-1] == period_end` 全 fail。改用個股 MAX 避免不一致。
 
     daily_prices 空 → 回 None,caller 自己 fallback today。
     """
     with get_conn(db_path) as conn:
         try:
             row = conn.execute(
-                "SELECT MAX(date) AS d FROM daily_prices"
+                "SELECT MAX(date) AS d FROM daily_prices "
+                "WHERE stock_id != 'TAIEX'"
             ).fetchone()
         except sqlite3.OperationalError:
             return None
