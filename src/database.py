@@ -997,7 +997,7 @@ def preload_snapshots(
             upsert_institutional(records, db_path=db_path)
             counts["institutional"] = len(records)
 
-    # 6. TAIEX(獨立 csv,from weekly_market_update)
+    # 6. TAIEX(獨立 csv,from daily_market_update)
     taiex_csv = snapshot_dir / "taiex.csv"
     if taiex_csv.exists():
         df = pd.read_csv(taiex_csv, dtype={"stock_id": str})

@@ -1,6 +1,6 @@
 """排程入口:預跑 default params 全策略 × 多 universe,結果寫 daily_picks 表。
 
-跑時機:nightly workflow 內(daily-notify.yml)放在 weekly_market_update 之後、
+跑時機:nightly workflow 內(daily-notify.yml)放在 daily_market_update 之後、
 daily_notify 之前。雲端 Streamlit Cloud 容器 boot 時透過 snapshot CSV preload
 拿到結果,App 端 _run_all_strategies_cached 命中即 0ms 回。
 

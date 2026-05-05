@@ -1,11 +1,16 @@
-"""排程入口:每週日抓 TWSE 全市場資料,dump 成 CSV commit 進 repo。
+"""排程入口:每天抓 TWSE 全市場財報資料,dump 成 CSV commit 進 repo。
+
+(原 weekly_market_update.py — 名稱誤導,實際被 daily-notify.yml 每天呼叫。
+2026-05-05 主公拍板更名為 daily_market_update + universe 從 TW_TOP_50 50 檔
+擴到 pure_stock_universe ~2060 檔長線涵蓋全市場。)
 
 背景:Streamlit Cloud 的 IP 會被 TWSE OpenAPI 擋(回空 body 觸發 JSONDecodeError),
 但 GitHub Actions runner (Azure / Linux) 不被擋。
 
 Workaround 流程:
-  1. 每週六 23:00 UTC (週日 07:00 台北) workflow 跑此腳本
-  2. 此腳本呼叫 update_long_term_data_free(TW_TOP_50) 抓 TWSE
+  1. 每工作日 14:13 UTC (22:13 台北) daily-notify.yml workflow 跑此腳本
+  2. 此腳本呼叫 update_long_term_data_free(pure_stock_universe) 抓 TWSE
+     全市場(~2060 檔,從 TW_TOP_50 50 檔擴大),~30 分鐘
   3. 把 daily_metrics / financials.quarterly / stocks 三張表 dump 成 CSV
   4. 寫到 data/twse_snapshot/ 路徑(.gitignore 不排除 CSV)
   5. workflow 自動 git commit + push 這些 CSV
@@ -33,7 +38,7 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.data_fetcher import fetch_daily_price  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
-from src.universe import TW_TOP_50  # noqa: E402
+from src.universe import TW_TOP_50, pure_stock_universe  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
 
@@ -42,22 +47,32 @@ _TAIEX_BACKFILL_DAYS = 200
 
 
 def main() -> int:
-    sids = [s for s, _ in TW_TOP_50]
     db.init_db()
 
-    # 確保 universe 在 stocks 表
+    # universe 從 TW_TOP_50(50 檔)擴到 pure_stock_universe(~2060 檔)
+    # — 主公拍板長線涵蓋全市場。fallback TW_TOP_50 給首次部署 / SQLite 空時用。
+    sids = pure_stock_universe(min_history=20)
+    if len(sids) < 50:
+        print(
+            f"[DAILY] pure_stock universe 只 {len(sids)} 檔(可能 fresh "
+            f"container),fallback TW_TOP_50",
+            flush=True,
+        )
+        sids = [s for s, _ in TW_TOP_50]
+
+    # 確保 TW_TOP_50 永遠在 stocks 表(若 universe 從 SQLite 撈,TOP_50 通常已在)
     db.upsert_stocks([
         {"stock_id": sid, "name": name, "market": "TW"}
         for sid, name in TW_TOP_50
     ])
 
     print(
-        f"[WEEKLY] 跑 update_long_term_data_free, {len(sids)} 檔 TWSE 大型股...",
+        f"[DAILY] 跑 update_long_term_data_free, {len(sids)} 檔(全市場)...",
         flush=True,
     )
     result = update_long_term_data_free(sids)
     print(
-        f"[WEEKLY] daily_metrics: {len(result['success_metrics'])}/{len(sids)}, "
+        f"[DAILY] daily_metrics: {len(result['success_metrics'])}/{len(sids)}, "
         f"EPS: {len(result['success_eps'])}/{len(sids)}, "
         f"failed: {len(result['failed'])}",
         flush=True,
@@ -66,7 +81,7 @@ def main() -> int:
     if not result["success_metrics"]:
         err = result.get("error")
         print(
-            f"[WEEKLY] 全部 fail,不寫 CSV。"
+            f"[DAILY] 全部 fail,不寫 CSV。"
             f"error={type(err).__name__ if err else 'unknown'}: {str(err)[:200]}",
             flush=True,
         )
@@ -79,7 +94,7 @@ def main() -> int:
         df = pd.read_sql("SELECT * FROM daily_metrics ORDER BY stock_id", conn)
         path = SNAPSHOT_DIR / "daily_metrics.csv"
         df.to_csv(path, index=False)
-        print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
+        print(f"[DAILY] 寫 {path.name}: {len(df)} 行", flush=True)
 
         # 2. financials.quarterly(EPS / ROE,長線選股用)
         df = pd.read_sql(
@@ -89,7 +104,7 @@ def main() -> int:
         )
         path = SNAPSHOT_DIR / "financials_quarterly.csv"
         df.to_csv(path, index=False)
-        print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
+        print(f"[DAILY] 寫 {path.name}: {len(df)} 行", flush=True)
 
         # 3. stocks(包含 industry,長線清單顯示用)
         df = pd.read_sql(
@@ -99,12 +114,12 @@ def main() -> int:
         )
         path = SNAPSHOT_DIR / "stocks.csv"
         df.to_csv(path, index=False)
-        print(f"[WEEKLY] 寫 {path.name}: {len(df)} 行", flush=True)
+        print(f"[DAILY] 寫 {path.name}: {len(df)} 行", flush=True)
 
     # 4. TAIEX 加權指數 200 天歷史(大盤頁的 K 線 + 多週期 + 技術總覽都需要)
     # 走 fetch_daily_price 走 SQLite cache,差的範圍才打 FinMind。
     from datetime import date as _date, timedelta as _td
-    print(f"[WEEKLY] TAIEX {_TAIEX_BACKFILL_DAYS} 天 backfill...", flush=True)
+    print(f"[DAILY] TAIEX {_TAIEX_BACKFILL_DAYS} 天 backfill...", flush=True)
     taiex_rows = 0
     try:
         today_iso = _date.today().isoformat()
@@ -120,11 +135,11 @@ def main() -> int:
             path = SNAPSHOT_DIR / "taiex.csv"
             df.to_csv(path, index=False)
             taiex_rows = len(df)
-            print(f"[WEEKLY] 寫 {path.name}: {taiex_rows} 行", flush=True)
+            print(f"[DAILY] 寫 {path.name}: {taiex_rows} 行", flush=True)
         else:
-            print("[WEEKLY] TAIEX 抓不到資料,跳過 dump", flush=True)
+            print("[DAILY] TAIEX 抓不到資料,跳過 dump", flush=True)
     except Exception as e:  # noqa: BLE001
-        print(f"[WEEKLY] TAIEX 抓取 fail (繼續):{type(e).__name__}: {e}", flush=True)
+        print(f"[DAILY] TAIEX 抓取 fail (繼續):{type(e).__name__}: {e}", flush=True)
 
     # watchlist.csv 不再由 weekly 維護;改由雲端 app 推到 watchlist-sync 分支
     # (見 src/github_sync.py)。main 上的 watchlist.csv 保留為 seed。
@@ -141,9 +156,9 @@ def main() -> int:
         f"taiex_rows={taiex_rows}\n",
         encoding="utf-8",
     )
-    print("[WEEKLY] 寫 last_update.txt", flush=True)
+    print("[DAILY] 寫 last_update.txt", flush=True)
 
-    print("[WEEKLY] 完成", flush=True)
+    print("[DAILY] 完成", flush=True)
     return 0
 
 

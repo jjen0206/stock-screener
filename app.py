@@ -3347,11 +3347,11 @@ def _page_watchlist() -> None:
             "**雲端關注清單儲存方式**:\n"
             "- 雲端 SQLite 在容器重啟時會被清光 → 只有 "
             "`data/twse_snapshot/watchlist.csv` (commit 進 repo) 會被保留\n"
-            "- 雲端 UI 加的關注是**暫時的**,直到下次 `weekly_market_update` "
+            "- 雲端 UI 加的關注是**暫時的**,直到下次 `daily_market_update` "
             "或 `backfill_history` workflow 跑完(會 dump 到 CSV 並 commit)\n"
             "- **永久保存的方法**:\n"
             "  1. 本機 git pull → 跑 streamlit → 加股票 → 跑 "
-            "`python scripts/weekly_market_update.py` → push commit\n"
+            "`python scripts/daily_market_update.py` → push commit\n"
             "  2. 或直接在 GitHub 網頁編 "
             "`data/twse_snapshot/watchlist.csv`(stock_id 一欄即可)"
         )

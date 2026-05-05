@@ -1,4 +1,4 @@
-"""scripts/weekly_market_update.py 單元測試。
+"""scripts/daily_market_update.py 單元測試(原 weekly_market_update.py)。
 
 測試 dump CSV 流程是否正確,**不打 TWSE 真網路**(mock update_long_term_data_free)。
 """
@@ -15,9 +15,9 @@ from src import config, database as db
 
 _SCRIPT = (
     Path(__file__).resolve().parent.parent
-    / "scripts" / "weekly_market_update.py"
+    / "scripts" / "daily_market_update.py"
 )
-_spec = importlib.util.spec_from_file_location("weekly_market_update", _SCRIPT)
+_spec = importlib.util.spec_from_file_location("daily_market_update", _SCRIPT)
 weekly = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(weekly)
 

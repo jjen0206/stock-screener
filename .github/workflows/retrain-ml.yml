@@ -1,14 +1,15 @@
 name: Weekly ML Retrain
 
-# 每週日 18:00 UTC = 週一 02:00 台北時區(凌晨,雲端閒置時段)
+# 每週日 14:13 UTC = 週日 22:13 台北時區(統一所有 workflow 排程 — 主公拍板)
 # 跑 scripts/train_ml_model.py 訓練通用模型 + scripts/train_per_strategy_ml.py
 # 訓練 11 個 per-strategy 模型,dump pkl + meta.json。
 # 加 accuracy 退化檢查:通用 model >5pp 退化 → 不 commit(避免推爛模型)
 # per-strategy 模型 fallback 機制(< MIN_TRAIN_SAMPLES → 不 dump pkl,只 dump
 # meta with status="fallback"),不需要退化檢查 — inference 端 fallback 通用。
+# 跟 daily_market_update.yml 同 22:13 觸發 — GH Actions parallel 不互相 block。
 on:
   schedule:
-    - cron: "0 18 * * 0"
+    - cron: "13 14 * * 0"
   workflow_dispatch:  # 手動觸發,給主公急用 / 改完 features 想立刻重訓
     inputs:
       force_commit:

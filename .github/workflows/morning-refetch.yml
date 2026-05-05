@@ -1,0 +1,70 @@
+name: Morning Refetch
+
+# 早 09:30 台北 (= 01:30 UTC) 補抓 — 主公 22:13 主推那輪 TWSE 還沒 publish
+# 當日個股資料,過 11 小時(隔日早上)再抓一次補資料完整性。
+# 週二-週六 UTC = 台北週二-週六(對應週一-週五的 trading day 隔日早上)。
+# 對應 daily-notify.yml 22:13 主推 cron;morning refetch 不重 notify,只 fetch。
+
+on:
+  schedule:
+    - cron: "30 1 * * 2-6"
+  workflow_dispatch:
+
+# 跟 daily-notify 同一個 commit/push 路徑,避免重疊
+concurrency:
+  group: market-data-update
+  cancel-in-progress: false
+
+jobs:
+  refetch:
+    runs-on: ubuntu-latest
+    # daily_fetch ~5 分 + daily_market_update 全市場 ~30 分 + 緩衝
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch daily prices (TWSE bulk + institutional TOP_50)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+        continue-on-error: true
+
+      - name: Fetch market update (financials / daily_metrics / TAIEX)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_market_update.py
+        continue-on-error: true
+
+      - name: Commit snapshot CSV if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/ || true
+          if git diff --staged --quiet; then
+            echo "[REFETCH] no snapshot changes"
+            exit 0
+          fi
+          git commit -m "chore(refetch): morning TWSE market data refresh [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[REFETCH] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::push 失敗 5 次,放棄(下個 cron 會再 commit)"

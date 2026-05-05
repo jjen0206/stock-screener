@@ -1,17 +1,19 @@
 name: Weekly TWSE Market Update
 
-# 每週六 23:00 UTC = 週日 07:00 台北時區
+# 每週日 14:13 UTC = 週日 22:13 台北時區(主公拍板統一所有 workflow 到 22:13)
 # 用 GitHub Actions runner (Azure IP) 抓 TWSE,避開 Streamlit Cloud IP 被擋
 # 抓完把 CSV commit 進 repo,Streamlit Cloud app startup 時讀 CSV 灌進 SQLite
+# 跟 retrain-ml.yml 同 22:13 觸發 — GH Actions parallel 不互相 block。
 on:
   schedule:
-    - cron: "0 23 * * 6"
+    - cron: "13 14 * * 0"
   workflow_dispatch:  # 手動觸發,急用時可立刻跑
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 全市場 ~2060 檔 × ~1 秒 ≈ 30 分,留 60 緩衝(從 TW_TOP_50 50 檔擴大)
+    timeout-minutes: 60
     permissions:
       contents: write  # 需要寫 git push
     steps:
@@ -30,7 +32,7 @@ jobs:
       - name: Run weekly TWSE market update
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python scripts/weekly_market_update.py
+        run: python scripts/daily_market_update.py
 
       - name: Commit & push snapshot CSVs (if changed)
         run: |
