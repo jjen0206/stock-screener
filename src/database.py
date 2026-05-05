@@ -1010,7 +1010,40 @@ def preload_snapshots(
             upsert_daily_prices(records, db_path=db_path)
             counts["taiex"] = len(records)
 
-    # 7. trades(P&L 紀錄)— delegate 給 portfolio_snapshot,只在表空時灌
+    # 7. dividend(年度配息,from backfill-dividend.yml weekly 8-shard)
+    div_csv = snapshot_dir / "dividend.csv"
+    if div_csv.exists():
+        df = pd.read_csv(div_csv, dtype={"stock_id": str})
+        rows = []
+        for _, r in df.iterrows():
+            year_v = r.get("year")
+            try:
+                year_int = int(year_v) if pd.notna(year_v) else None
+            except (TypeError, ValueError):
+                year_int = None
+            if year_int is None:
+                continue
+            rows.append({
+                "stock_id": str(r["stock_id"]),
+                "year": year_int,
+                "cash_dividend": (
+                    float(r["cash_dividend"])
+                    if pd.notna(r.get("cash_dividend")) else 0
+                ),
+                "stock_dividend": (
+                    float(r["stock_dividend"])
+                    if pd.notna(r.get("stock_dividend")) else 0
+                ),
+                "ex_dividend_date": (
+                    str(r["ex_dividend_date"])
+                    if pd.notna(r.get("ex_dividend_date")) else None
+                ),
+            })
+        if rows:
+            upsert_dividend(rows, db_path=db_path)
+            counts["dividend"] = len(rows)
+
+    # 8. trades(P&L 紀錄)— delegate 給 portfolio_snapshot,只在表空時灌
     # 避免覆蓋本機使用者新加的交易
     try:
         from src.portfolio_snapshot import load_from_csv as _load_trades
@@ -1020,7 +1053,7 @@ def preload_snapshots(
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] trades load 失敗:%s", e)
 
-    # 8. daily_picks(precompute 預跑結果)— nightly workflow dump 進 repo,
+    # 9. daily_picks(precompute 預跑結果)— nightly workflow dump 進 repo,
     # Cloud 容器 git pull 拿到 CSV → 這裡灌進 SQLite,App 端 _run_all_strategies_cached
     # 命中 → 0ms 回。CSV 沒有就跳過(precompute step 失敗 / 第一次部署沒檔)。
     picks_csv = snapshot_dir / "daily_picks.csv"

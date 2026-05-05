@@ -1,0 +1,157 @@
+name: Backfill Dividend (weekly 8-shard)
+
+# 每週日 14:13 UTC = 22:13 台北 跑全市場 dividend 補漏(年級資料,週跑一次夠)。
+# 8-way matrix shard parallel,每 shard ~250 檔。runner 用量 ~40 min,看時鐘 ~5 min。
+#
+# 解決長線「universe 動態但 dividend 表只 TW_TOP_50」的 bottleneck — daily_market_update
+# 沒抓 dividend(它只抓 PE/PB/EPS/ROE),所以新加 weekly backfill 補。
+
+on:
+  schedule:
+    - cron: "13 14 * * 0"
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "抓近幾年配息(預設 5)"
+        required: false
+        default: "5"
+      limit:
+        description: "每個 shard 只跑前 N 檔(debug 用,留空 = 全跑)"
+        required: false
+        default: ""
+
+# 同 group 同時最多 1 個,已在跑的不被新觸發 supersede
+concurrency:
+  group: backfill-dividend
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: "shard ${{ matrix.shard }}/8"
+    runs-on: ubuntu-latest
+    # 每 shard ~250 檔 × ~1 秒 ≈ 5 分,留 60 緩衝(撞 FinMind 限額時 retry 久)
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Init universe (確保 stocks 表完整 + universe 可建)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+        continue-on-error: true
+
+      - name: Run dividend backfill (shard ${{ matrix.shard }}/8)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FINMIND_LONG_BACKOFF: "1"
+        run: |
+          ARGS="--shard ${{ matrix.shard }} --total-shards 8"
+          ARGS="$ARGS --years ${{ inputs.years || '5' }}"
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          echo "Running: python scripts/backfill_dividend.py $ARGS"
+          python scripts/backfill_dividend.py $ARGS
+
+      - name: Commit & push shard CSV
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/dividend_shard_${{ matrix.shard }}.csv \
+                  data/twse_snapshot/last_dividend_shard_${{ matrix.shard }}.txt 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to dividend shard ${{ matrix.shard }}"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): dividend shard ${{ matrix.shard }}/8 [skip ci]"
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "shard ${{ matrix.shard }} push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "shard ${{ matrix.shard }} push failed after 10 retries"
+          exit 1
+
+  aggregate:
+    name: aggregate dividend shards
+    needs: backfill
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Aggregate dividend shard CSVs
+        run: python scripts/aggregate_dividend_shards.py --total-shards 8
+
+      - name: Commit & push aggregated dividend.csv
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # -A 才會 stage cleanup 的 unlink
+          git add -A data/twse_snapshot/
+          if git diff --staged --quiet; then
+            echo "No changes to aggregated dividend.csv"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): dividend aggregated 8-shard [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "aggregate push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "aggregate push failed after 5 retries"
+          exit 1
