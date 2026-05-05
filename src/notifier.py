@@ -125,6 +125,307 @@ def _empty_pick_suffix() -> str:
     return suffix
 
 
+_SEPARATOR = "━" * 16
+
+
+def _bold(text: str, channel: str) -> str:
+    """**bold**(Discord)/ *bold*(Telegram Markdown legacy)。"""
+    return f"**{text}**" if channel == "discord" else f"*{text}*"
+
+
+def _select_top_picks(
+    date: str,
+    top_n: int = 5,
+    confluence_n: int = 2,
+    params: dict | None = None,
+    universe: list[str] | None = None,
+) -> list[dict]:
+    """跑全 universe 策略 → confluence ≥ N + per-strategy ML 雙層過濾 → top by ml_prob。
+
+    回 list[dict],每筆含格式化所需欄位(sid / name / close / pct_change /
+    matched_strategies / matched_labels / ml_prob / target_low/high / stop /
+    ev / risk_reward)。沒過濾出來 → 空 list。
+    """
+    from collections import defaultdict
+    from src import config
+    from src.ml_predictor import (
+        load_model, load_strategy_model, predict_for_strategy,
+    )
+    from src.strategies import (
+        STRATEGY_LABELS, STRATEGY_ML_THRESHOLDS, run_all_strategies,
+    )
+    from src.universe import pure_stock_universe
+
+    if universe is None:
+        universe = pure_stock_universe(min_history=20)
+    if not universe:
+        return []
+    agg = run_all_strategies(date, params=params, stock_ids=universe)
+    if not agg:
+        return []
+
+    # Per-pick ML routing(取最嚴格 threshold strategy 對應的 model)
+    def _routing(matched: list[str]) -> str | None:
+        cands = [
+            (s, STRATEGY_ML_THRESHOLDS[s]) for s in matched
+            if STRATEGY_ML_THRESHOLDS.get(s) is not None
+        ]
+        if not cands:
+            return None
+        return max(cands, key=lambda kv: kv[1])[0]
+
+    def _strict_thr(matched: list[str]) -> float | None:
+        ths = [
+            STRATEGY_ML_THRESHOLDS[s] for s in matched
+            if STRATEGY_ML_THRESHOLDS.get(s) is not None
+        ]
+        return max(ths) if ths else None
+
+    general_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+    general_model = load_model(general_path) if general_path.exists() else None
+    sid_to_chosen: dict[str, str | None] = {}
+    for sid, info in agg.items():
+        sid_to_chosen[sid] = _routing(
+            list((info.get("details") or {}).keys())
+        )
+    groups: dict[str | None, list[str]] = defaultdict(list)
+    for sid, chosen in sid_to_chosen.items():
+        groups[chosen].append(sid)
+    strategy_models: dict[str, object] = {}
+    ml_probs: dict[str, float | None] = {}
+    for chosen, sids in groups.items():
+        sm = None
+        if chosen:
+            if chosen not in strategy_models:
+                strategy_models[chosen] = load_strategy_model(chosen)
+            sm = strategy_models[chosen]
+        try:
+            probs = predict_for_strategy(
+                strategy_name=chosen, stock_ids=sids, target_date=date,
+                fallback_model=general_model, strategy_model=sm,
+            )
+            ml_probs.update(probs)
+        except Exception:  # noqa: BLE001
+            ml_probs.update({s: None for s in sids})
+
+    # 撈每檔 prev_close 算漲跌(批量 SQL)
+    prev_close_map: dict[str, float] = {}
+    if agg:
+        with db.get_conn() as conn:
+            for sid in agg.keys():
+                row = conn.execute(
+                    "SELECT close FROM daily_prices "
+                    "WHERE stock_id=? AND date < ? "
+                    "ORDER BY date DESC LIMIT 1",
+                    (sid, date),
+                ).fetchone()
+                if row and row["close"]:
+                    prev_close_map[sid] = float(row["close"])
+
+    qualified: list[dict] = []
+    for sid, info in agg.items():
+        matched = list((info.get("details") or {}).keys())
+        if len(matched) < confluence_n:
+            continue  # confluence
+        thr = _strict_thr(matched)
+        prob = ml_probs.get(sid)
+        if thr is not None and (prob is None or prob < thr):
+            continue  # confidence
+
+        details = info.get("details") or {}
+        close = target_low = target_high = stop = rr = None
+        for d in details.values():
+            if not isinstance(d, dict):
+                continue
+            if close is None and d.get("close"):
+                close = float(d["close"])
+            if target_low is None and d.get("target_low"):
+                target_low = float(d.get("target_low"))
+                target_high = float(d.get("target_high"))
+                stop = float(d.get("stop_loss")) if d.get("stop_loss") else None
+                rr = d.get("risk_reward")
+        if close is None:
+            continue
+        prev_close = prev_close_map.get(sid)
+        pct_change = (
+            (close - prev_close) / prev_close * 100
+            if prev_close and prev_close > 0 else None
+        )
+        # EV 估算:固定 5% target / 3% stop × ml_prob 期望
+        ev = (
+            prob * 0.05 - (1 - prob) * 0.03
+            if prob is not None else None
+        )
+        qualified.append({
+            "rank": 0,  # caller fills
+            "sid": sid,
+            "name": info.get("name", ""),
+            "close": close,
+            "pct_change": pct_change,
+            "matched_strategies": matched,
+            "matched_labels": [STRATEGY_LABELS.get(s, s) for s in matched],
+            "ml_prob": prob,
+            "target_low": target_low,
+            "target_high": target_high,
+            "stop": stop,
+            "ev": ev,
+            "risk_reward": float(rr) if rr else None,
+        })
+
+    # 排序:ml_prob desc → 命中策略多 desc → sid asc
+    qualified.sort(key=lambda p: (
+        -(p["ml_prob"] or 0.0),
+        -len(p["matched_strategies"]),
+        p["sid"],
+    ))
+    out = qualified[:top_n]
+    for i, p in enumerate(out, start=1):
+        p["rank"] = i
+    return out
+
+
+def format_pick_block(pick: dict, channel: str = "telegram") -> str:
+    """組單張 pick 的訊息區塊。Telegram(Markdown legacy)+ Discord(Markdown)共用排版。
+
+    輸入 pick dict 由 _select_top_picks 產;channel 控制 bold 語法。
+    """
+    b = _bold
+    rank = pick.get("rank", 0)
+    sid = pick.get("sid", "")
+    name = pick.get("name", "")
+    close = pick.get("close")
+    pct_change = pick.get("pct_change")
+    matched_labels = pick.get("matched_labels") or []
+    ml_prob = pick.get("ml_prob")
+    target_low = pick.get("target_low")
+    target_high = pick.get("target_high")
+    stop = pick.get("stop")
+    ev = pick.get("ev")
+    rr = pick.get("risk_reward")
+
+    lines = [f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"]
+    # 收盤 + 漲跌
+    if close is not None:
+        if pct_change is not None:
+            arrow = "↑" if pct_change > 0 else ("↓" if pct_change < 0 else "→")
+            pct_str = f" ({arrow}{abs(pct_change):.1f}%)"
+        else:
+            pct_str = ""
+        lines.append(f"   收盤 {close:.2f}{pct_str}")
+    # 命中策略
+    n = len(matched_labels)
+    if n > 0:
+        lines.append(f"   📊 命中 {n} 策略")
+        for label in matched_labels:
+            lines.append(f"       · {label}")
+    # ML 機率
+    if ml_prob is not None:
+        lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
+    # 目標 / 停損
+    if target_low and target_high and stop:
+        lines.append(
+            f"   🎯 保守 {target_low:.0f} / 積極 {target_high:.0f} / 停損 {stop:.0f}"
+        )
+    # 期望值 + R:R
+    if ev is not None:
+        rr_str = f"  (R:R {rr:.1f}:1)" if rr else ""
+        sign = "+" if ev >= 0 else ""
+        lines.append(f"   📈 期望值 {sign}{ev * 100:.1f}%{rr_str}")
+    return "\n".join(lines)
+
+
+def format_top_picks_message(
+    picks: list[dict], date: str, channel: str = "telegram",
+) -> str:
+    """組完整訊息:header → picks(各 _SEPARATOR 隔開)→ 統計 + 警語。
+
+    picks 空時走 empty fallback 文字(配 _weekend_hint / _empty_pick_suffix)。
+    """
+    b = _bold
+    try:
+        d = _date.fromisoformat(date)
+        week_zh = ["一", "二", "三", "四", "五", "六", "日"][d.weekday()]
+        date_label = f"{date}(週{week_zh})"
+    except Exception:  # noqa: BLE001
+        date_label = date
+
+    lines = [
+        f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
+        _SEPARATOR,
+        "",
+    ]
+    if not picks:
+        lines.append(
+            "📭 今日無符合「高信心 + 共識 ≥2」的 picks(過濾條件嚴,留空算正常)"
+            f"{_empty_pick_suffix()}"
+        )
+        lines.append("")
+        lines.append("⚠️ 僅供研究,非投資建議。")
+        return "\n".join(lines)
+
+    for p in picks:
+        lines.append(format_pick_block(p, channel=channel))
+        lines.append("")
+        lines.append(_SEPARATOR)
+        lines.append("")
+
+    # Footer 統計
+    n = len(picks)
+    probs = [p["ml_prob"] for p in picks if p.get("ml_prob") is not None]
+    evs = [p["ev"] for p in picks if p.get("ev") is not None]
+    avg_ml = (sum(probs) / len(probs)) if probs else 0.0
+    avg_ev = (sum(evs) / len(evs)) if evs else 0.0
+    lines.append(f"📊 {b('今日 picks 統計', channel)}")
+    lines.append(f"   高信心 + ≥2 策略:  {n} 張")
+    if probs:
+        lines.append(f"   平均 ML 機率:    {avg_ml * 100:.0f}%")
+    if evs:
+        sign = "+" if avg_ev >= 0 else ""
+        lines.append(f"   平均期望值:      {sign}{avg_ev * 100:.1f}%")
+    lines.append("")
+    lines.append("⚠️ 僅供研究,非投資建議。目標價為 ATR 統計參考,非實際預測。")
+    return "\n".join(lines)
+
+
+def notify_top_picks(
+    date: str | None = None,
+    params: dict | None = None,
+    top_n: int = 5,
+    confluence_n: int = 2,
+    send_telegram: bool = True,
+    send_discord: bool = True,
+    dry_run: bool = False,
+) -> dict[str, bool]:
+    """跑高信心 + 共識過濾 → top N picks → 並行送 Telegram + Discord。
+
+    dry_run=True 時不送 channel,只 print 訊息到 stdout。
+    回 {'telegram': bool, 'discord': bool} — 只包含實際送的通道(dry_run 時皆 True)。
+    """
+    if date is None:
+        date = _date.today().isoformat()
+    picks = _select_top_picks(
+        date, top_n=top_n, confluence_n=confluence_n, params=params,
+    )
+
+    results: dict[str, bool] = {}
+    tg_msg = format_top_picks_message(picks, date, channel="telegram")
+    dc_msg = format_top_picks_message(picks, date, channel="discord")
+
+    if dry_run:
+        print("\n=== Telegram (Markdown legacy) ===\n", flush=True)
+        print(tg_msg, flush=True)
+        print("\n=== Discord ===\n", flush=True)
+        print(dc_msg, flush=True)
+        return {"telegram": True, "discord": True}
+
+    if send_telegram and config.TELEGRAM_BOT_TOKEN:
+        results["telegram"] = send_telegram_message(tg_msg)
+    if send_discord and config.DISCORD_WEBHOOK_URL:
+        from src.discord_notifier import send_discord_message
+        results["discord"] = send_discord_message(dc_msg)
+    return results
+
+
 def format_short_picks(picks: pd.DataFrame, date: str) -> str:
     """把短線選股結果包成 Telegram Markdown 訊息。
 

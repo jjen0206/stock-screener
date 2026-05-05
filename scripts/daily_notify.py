@@ -31,12 +31,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
-from src.notifier import notify_multi_strategy  # noqa: E402
+from src.notifier import notify_top_picks  # noqa: E402
 
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="每日短線選股 → Telegram + Discord 並行推播",
+        description="每日短線精選(高信心+共識≥2)→ Telegram + Discord 並行推播",
     )
     p.add_argument(
         "--date", default=None,
@@ -47,12 +47,24 @@ def main() -> int:
         help='短線參數 JSON,例 \'{"volume_multiplier": 1.8}\'',
     )
     p.add_argument(
+        "--top-n", type=int, default=5,
+        help="推播幾張 picks(default 5,by ml_prob desc)",
+    )
+    p.add_argument(
+        "--confluence-n", type=int, default=2,
+        help="confluence 最少命中策略數(default 2)",
+    )
+    p.add_argument(
         "--no-telegram", action="store_true",
         help="跳過 Telegram 推播",
     )
     p.add_argument(
         "--no-discord", action="store_true",
         help="跳過 Discord 推播",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="不真的送,只 print 訊息到 stdout(看排版用)",
     )
     args = p.parse_args()
 
@@ -83,11 +95,14 @@ def main() -> int:
 
     params = json.loads(args.params_json) if args.params_json else None
 
-    results = notify_multi_strategy(
+    results = notify_top_picks(
         date=target_date,
         params=params,
+        top_n=args.top_n,
+        confluence_n=args.confluence_n,
         send_telegram=not args.no_telegram,
         send_discord=not args.no_discord,
+        dry_run=args.dry_run,
     )
 
     # Summary 列印每個通道的結果

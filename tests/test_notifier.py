@@ -391,3 +391,122 @@ def test_notify_short_picks_both_channels_when_both_configured(
     urls = [c.args[0] for c in m.call_args_list]
     assert any("telegram" in u for u in urls)
     assert any("discord" in u for u in urls)
+
+
+# === Top picks(高信心 + confluence ≥2)推播 ===
+
+def _make_top_pick(
+    rank: int = 1, sid: str = "2330", name: str = "台積電",
+    close: float = 850.0, pct_change: float = 1.2,
+    matched: list[str] | None = None,
+    ml_prob: float | None = 0.72,
+    target_low: float = 893.0, target_high: float = 935.0, stop: float = 825.0,
+    rr: float = 2.0,
+) -> dict:
+    if matched is None:
+        matched = ["macd_golden", "ma_alignment", "volume_breakout"]
+    from src.strategies import STRATEGY_LABELS
+    return {
+        "rank": rank, "sid": sid, "name": name,
+        "close": close, "pct_change": pct_change,
+        "matched_strategies": matched,
+        "matched_labels": [STRATEGY_LABELS.get(s, s) for s in matched],
+        "ml_prob": ml_prob,
+        "target_low": target_low, "target_high": target_high, "stop": stop,
+        "ev": (ml_prob * 0.05 - (1 - ml_prob) * 0.03) if ml_prob else None,
+        "risk_reward": rr,
+    }
+
+
+def test_format_pick_block_telegram_includes_all_fields():
+    """單張 pick 區塊含 sid 名 / 收盤 / 命中策略 list / ML / 目標 / 期望值。"""
+    pick = _make_top_pick()
+    block = notifier.format_pick_block(pick, channel="telegram")
+
+    assert "#1" in block
+    assert "2330 台積電" in block
+    assert "850.00" in block          # 收盤
+    assert "↑1.2%" in block           # 漲跌方向
+    assert "命中 3 策略" in block
+    assert "MACD 黃金交叉" in block   # 中文 label 不是 key
+    assert "多頭排列" in block
+    assert "量爆突破" in block
+    assert "ML 機率 72%" in block
+    assert "保守 893" in block
+    assert "停損 825" in block
+    assert "期望值" in block
+    assert "R:R 2.0:1" in block
+    # Telegram bold = single asterisk
+    assert "*#1*" in block
+
+
+def test_format_pick_block_discord_uses_double_asterisk():
+    """Discord 用 **bold**(Telegram 用 *bold*)。"""
+    pick = _make_top_pick()
+    block = notifier.format_pick_block(pick, channel="discord")
+    assert "**#1**" in block
+    assert "*#1*" not in block.replace("**#1**", "")
+
+
+def test_format_pick_block_negative_change_shows_down_arrow():
+    pick = _make_top_pick(pct_change=-2.5)
+    block = notifier.format_pick_block(pick)
+    assert "↓2.5%" in block
+
+
+def test_format_pick_block_no_ml_prob_skips_line():
+    pick = _make_top_pick(ml_prob=None)
+    block = notifier.format_pick_block(pick)
+    assert "ML 機率" not in block
+    assert "期望值" not in block  # ev 也算不出
+
+
+def test_format_top_picks_message_includes_separator_and_stats():
+    picks = [_make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)]
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-05", channel="telegram",
+    )
+    # 標題
+    assert "短線精選" in msg
+    assert "2026-05-05" in msg
+    # 分隔線(出現在 picks 之間 + 結尾)
+    assert "━━━━━━━━━━━━━━━━" in msg
+    # 統計區塊
+    assert "今日 picks 統計" in msg
+    assert "高信心 + ≥2 策略:  3 張" in msg
+    assert "平均 ML 機率" in msg
+    assert "平均期望值" in msg
+    # 警語
+    assert "僅供研究" in msg
+
+
+def test_format_top_picks_message_empty_shows_friendly_msg():
+    msg = notifier.format_top_picks_message(
+        [], "2026-05-05", channel="telegram",
+    )
+    assert "無符合" in msg or "0" in msg
+    assert "僅供研究" in msg
+    # 不該有 picks 統計區
+    assert "高信心 + ≥2 策略:" not in msg
+
+
+def test_notify_top_picks_dry_run_prints_to_stdout(monkeypatch, capsys):
+    """dry_run=True 不打 channel API,只 print 兩 channel 訊息。"""
+    monkeypatch.setattr(
+        notifier, "_select_top_picks",
+        lambda d, top_n=5, confluence_n=2, params=None, universe=None: [
+            _make_top_pick(rank=1, sid="2330", name="台積電"),
+        ],
+    )
+    # network 也 mock 防漏網
+    with patch("requests.post") as m:
+        results = notifier.notify_top_picks(
+            date="2026-05-05", dry_run=True,
+        )
+    assert results == {"telegram": True, "discord": True}
+    assert m.call_count == 0  # dry_run 不送
+
+    captured = capsys.readouterr()
+    assert "Telegram" in captured.out
+    assert "Discord" in captured.out
+    assert "2330 台積電" in captured.out
