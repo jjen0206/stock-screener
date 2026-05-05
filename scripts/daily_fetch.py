@@ -43,57 +43,92 @@ _BULK_RETRY_MAX = 3
 _BULK_RETRY_WAIT_SECS = 300
 
 
-def _fetch_with_finmind_then_twse_fallback(
+def _fetch_with_twse_then_finmind_topup(
     universe_sids: list[str], expected_date: str,
 ) -> "object":
-    """先試 FinMind 抓 expected_date 全 universe,沒拿到 expected_date(空 / max
-    < expected)→ fallback TWSE bulk + freshness retry。
+    """TWSE bulk 主源(快,30 秒)→ 對沒拿到 expected_date 的 sids 用 FinMind 補。
 
-    2026-05-04 事件後改主源 FinMind 因 TWSE OpenAPI publication lag 嚴重
-    (bulk endpoint 在 5/5 早上 8 點還在服務 4/30 資料)。FinMind 較準時但
-    每檔一次 API call,2700 檔 ~45 分鐘 — 比 TWSE bulk 慢但保證新鮮度。
+    取代原 FinMind-first 設計。原因:FinMind 對 GH Actions Azure IP 大量 ban
+    (2026-05-05 事件:全市場 FinMind fetch 30 分跑不完 600 檔,每張 403 ip
+    banned + retry 3 次 = 3-4 秒/張)。改 TWSE 大宗 + FinMind 補漏:
+      - TWSE OpenAPI 30 秒回 ~2360 檔(可能有 publication lag,服務舊資料)
+      - 對缺 expected_date 的 sids(< 500 檔)走 FinMind topup
+      - FinMind 部分撞 ban 走 try/except 容錯,只回 TWSE 結果不阻斷流程
+
+    總時間 < 10 分鐘,30 分 timeout 綽綽有餘。
 
     Args:
         universe_sids: 要 fetch 的 sids list(TWSE + TPEx 全 universe)
         expected_date: 'YYYY-MM-DD',想拿到的最新交易日
 
     Returns:
-        DataFrame(stock_id, date, OHLCV ...)— 跟 TWSE bulk 同 schema。
-        空 = 兩源都失敗或 expected_date 是非交易日。
+        DataFrame(stock_id, date, OHLCV ...)— TWSE + FinMind 合併去重。
     """
     import pandas as pd
 
+    # Step 1: TWSE bulk(快,可能有 publication lag)
     print(
-        f"[FETCH] 嘗試 FinMind 抓 {len(universe_sids)} 檔 daily_prices "
-        f"(expected_date={expected_date},約 ~{len(universe_sids) * 0.05 / 60:.0f} 分鐘)...",
+        f"[FETCH] step 1/2: TWSE bulk 抓全市場(expected_date={expected_date})...",
         flush=True,
     )
-    try:
-        df = fetch_all_daily_prices_via_finmind(universe_sids, expected_date)
-        if not df.empty:
-            got_max = str(df["date"].max())
-            if got_max >= expected_date:
-                print(
-                    f"[FETCH] FinMind ✅ max={got_max} >= expected={expected_date},"
-                    f"{len(df)} 行,跳過 TWSE fallback",
-                    flush=True,
-                )
-                return df
-            print(
-                f"[FETCH] FinMind max={got_max} < expected={expected_date},"
-                f"fallback TWSE bulk",
-                flush=True,
-            )
-        else:
-            print(f"[FETCH] FinMind 回空,fallback TWSE bulk", flush=True)
-    except Exception as e:  # noqa: BLE001
+    df_twse = fetch_all_daily_prices_bulk()
+    if df_twse.empty:
         print(
-            f"[FETCH] FinMind 失敗 ({type(e).__name__}: {e}),fallback TWSE bulk",
+            "[FETCH] TWSE bulk 回空 — 全 universe 走 FinMind topup",
+            flush=True,
+        )
+        sids_with_expected: set[str] = set()
+    else:
+        with_expected_df = df_twse[df_twse["date"] == expected_date]
+        sids_with_expected = set(
+            str(s) for s in with_expected_df["stock_id"].tolist()
+        )
+        print(
+            f"[FETCH] TWSE: {len(df_twse)} 行,其中 {len(sids_with_expected)} "
+            f"檔有 {expected_date} 資料",
             flush=True,
         )
 
-    # Fallback:TWSE bulk + freshness retry(原 systemic 修法仍套)
-    return _bulk_fetch_with_freshness_retry()
+    sids_missing = [
+        s for s in universe_sids if str(s) not in sids_with_expected
+    ]
+    if not sids_missing:
+        print("[FETCH] 全 universe 都有 expected_date,跳過 FinMind", flush=True)
+        return df_twse
+
+    # Step 2: FinMind topup(只對缺 expected_date 的個股)
+    n_topup = len(sids_missing)
+    print(
+        f"[FETCH] step 2/2: FinMind topup {n_topup} 檔(預估 ~{n_topup * 0.05 / 60:.1f} 分,"
+        f"撞 IP ban 也 try/except 容錯)...",
+        flush=True,
+    )
+    try:
+        df_finmind = fetch_all_daily_prices_via_finmind(
+            sids_missing, expected_date, sleep_secs=0.05,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[FETCH] FinMind topup 整個失敗 ({type(e).__name__}: {e}),"
+            f"只回 TWSE 結果",
+            flush=True,
+        )
+        return df_twse
+
+    if df_finmind.empty:
+        print("[FETCH] FinMind topup 回空(可能全撞 ban),只回 TWSE 結果", flush=True)
+        return df_twse
+
+    print(
+        f"[FETCH] FinMind 補回 {len(df_finmind)} 行,合併 TWSE 結果",
+        flush=True,
+    )
+    if df_twse.empty:
+        return df_finmind
+    # 合併並對 (stock_id, date) 去重(若同 sid 同日 TWSE+FinMind 都有,留 FinMind)
+    return pd.concat(
+        [df_twse, df_finmind], ignore_index=True,
+    ).drop_duplicates(subset=["stock_id", "date"], keep="last")
 
 
 def _bulk_fetch_with_freshness_retry() -> "object":
@@ -187,9 +222,9 @@ def run(institutional_days: int = 7) -> dict:
     print(f"[FETCH] universe = {len(universe_sids)} 檔(twse + tpex)", flush=True)
 
     # 2. Bulk 抓全市場 OHLCV(< 30 秒)+ freshness retry
-    # 主源 FinMind(較準時)→ fallback TWSE bulk(較快但 publication lag)
+    # TWSE bulk(快)→ 對缺 expected_date 的 sids 用 FinMind topup 補漏
     expected_date = date.today().isoformat()
-    bulk_df = _fetch_with_finmind_then_twse_fallback(
+    bulk_df = _fetch_with_twse_then_finmind_topup(
         universe_sids, expected_date,
     )
     sanity_issues: list[tuple[str, str]] = []
