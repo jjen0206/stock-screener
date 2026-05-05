@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import date as _date
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -426,6 +427,17 @@ def notify_top_picks(
     return results
 
 
+def _build_news_search_url(news: dict) -> str:
+    """組 Google News 搜尋 URL(query = 公司名 + subject 前 30 字)。
+
+    TWSE OpenAPI 沒給原始公告 URL,Google News 搜尋當替代深連結。
+    """
+    name = str(news.get("company_name") or "")
+    subject = str(news.get("subject") or "")
+    query = f"{name} {subject[:30]}".strip()
+    return f"https://www.google.com/search?q={quote_plus(query)}&tbm=nws"
+
+
 def format_news_block(news: dict, channel: str = "telegram") -> str:
     """組單則重大訊息的訊息區塊。Telegram(*bold*)+ Discord(**bold**)共用。
 
@@ -436,6 +448,7 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
         🔔 *公司名 (sid)*        ⏰ HH:MM
         📋 *第 N 款 · 條款說明簡稱*
         📰 主旨...
+        🔗 [Google 新聞搜尋](url)
     """
     b = _bold
     sid = str(news.get("sid") or "")
@@ -467,6 +480,9 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
         # subject 太長截斷(訊息整體要顧 4096 / 2000 字限制)
         subj_display = subject if len(subject) <= 200 else subject[:197] + "..."
         lines.append(f"📰 {subj_display}")
+    # Google News 深連結 — TWSE OpenAPI 無原文 URL,搜尋當替代
+    url = _build_news_search_url(news)
+    lines.append(f"🔗 [Google 新聞搜尋]({url})")
     return "\n".join(lines)
 
 
