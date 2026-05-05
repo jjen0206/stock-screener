@@ -19,6 +19,9 @@ def tmp_db(monkeypatch, tmp_path):
     db_file = tmp_path / "news.db"
     monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
     db._reset_path_cache()
+    # 防 preload_snapshots 從 data/twse_snapshot/news.csv(workflow auto-commit
+    # 進 repo)灌真實資料污染 tmp DB → 測試行為跟現實 news.csv 內容耦合
+    monkeypatch.setattr(db, "preload_snapshots", lambda *a, **kw: {})
     db.init_db()
     yield db_file
     db._reset_path_cache()
