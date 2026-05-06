@@ -365,6 +365,33 @@ def _is_precompute_eligible(
     return params_key == _canonical_default_params_key()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_intraday_cached(sids_tuple: tuple[str, ...]) -> dict:
+    """5 分鐘 cache 的盤中即時報價 batch fetcher。
+
+    sids 是 tuple(hashable for cache key)。回 {sid: quote_dict | None}。
+    非交易時段不應呼叫(caller 用 is_market_hours() 守住),避免抓 stale 浪費 quota。
+    """
+    from src.intraday import get_intraday_quote
+    return get_intraday_quote(list(sids_tuple))
+
+
+def _inject_intraday_quotes(rows: list[dict], sids: list[str]) -> list[dict]:
+    """對 rows(每筆有 stock_id)注入 intraday_quote;非交易時段直接回原 rows。
+
+    給 _page_short / _page_watchlist 共用 — render_pick_card 才會看 row['intraday_quote']。
+    """
+    from src.intraday import is_market_hours
+    if not is_market_hours():
+        return rows
+    quotes = _get_intraday_cached(tuple(sorted(set(sids))))
+    for r in rows:
+        sid = r.get("stock_id")
+        if sid:
+            r["intraday_quote"] = quotes.get(str(sid))
+    return rows
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _run_all_strategies_runtime(
     trade_date: str,
@@ -1643,6 +1670,11 @@ def _page_short() -> None:
             filtered_all, total_all = _apply_confidence_filter(all_rows)
             if st.session_state.get("high_confidence_mode", True):
                 st.caption(f"🎯 高信心:{len(filtered_all)}/{total_all} 檔顯示")
+            # 盤中行情注入(非交易時段 no-op)
+            filtered_all = _inject_intraday_quotes(
+                filtered_all,
+                [str(r.get("stock_id")) for r in filtered_all if r.get("stock_id")],
+            )
             render_picks_cards_paginated(
                 filtered_all,
                 state_key="short_全部",
@@ -3561,6 +3593,10 @@ def _page_watchlist() -> None:
                     "risk_reward": tp.get("risk_reward"),
                 })
             cards.append(card)
+        # 盤中行情注入(非交易時段 no-op)— watchlist 範圍小,不會撞 yfinance rate
+        cards = _inject_intraday_quotes(
+            cards, [str(c["stock_id"]) for c in cards if c.get("stock_id")],
+        )
         render_picks_cards_paginated(
             cards, state_key="watchlist", page_size=10,
             show_signal=False, show_targets=True, show_change=True,

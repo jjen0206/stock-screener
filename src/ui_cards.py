@@ -251,6 +251,23 @@ def render_pick_card(
             unsafe_allow_html=True,
         )
 
+        # 盤中即時行(caller 注入 row["intraday_quote"] 時才顯)— 漲紅跌綠
+        intra = row.get("intraday_quote")
+        if intra and intra.get("current") is not None:
+            from src.ui_format import color_for
+            cur = float(intra["current"])
+            cp = intra.get("change_pct")
+            if cp is not None:
+                arrow = "↑" if cp > 0 else ("↓" if cp < 0 else "→")
+                _color = color_for(cp)
+                st.markdown(
+                    f"<span style='color:{_color}'>📡 {cur:.2f} "
+                    f"({arrow}{abs(cp):.1f}%)</span>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(f"📡 {cur:.2f}")
+
         # P&L 行(if 該股在 trades 表有持倉)— 漲紅跌綠
         try:
             from src import database as _db
