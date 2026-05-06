@@ -23,6 +23,13 @@ import sys
 import time
 from pathlib import Path
 
+# Windows cp950 console 不支援部分 emoji(🏠 / 🔥 等),強制 stdout 走 utf-8
+# 讓 page label 含 emoji 的 phase title 正常 print(2026-05-06 修)。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):
+    pass
+
 # 讓 AppTest run app.py 時找得到 src/(以本檔的 parent.parent 為 project root)
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:

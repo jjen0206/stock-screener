@@ -45,7 +45,6 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src import config, database as db, indicators as ind
-from src.backtester import backtest_short
 from src.cache_utils import clear_all_caches
 from src.data_fetcher import (
     FinMindAPIError,
@@ -55,7 +54,6 @@ from src.data_fetcher import (
     fetch_dividend,
     fetch_institutional,
 )
-from src.financial_fetcher_free import update_long_term_data_free
 from src.individual_sections import (
     _compute_main_force_signal,  # noqa: F401  個股頁不直接用,e2e test 從 app namespace 拿
     _load_recent_ohlc,
@@ -71,8 +69,14 @@ from src.market_sentiment import (
     fetch_taiex,
     fetch_vix,
 )
-from src.screener_long import screen_long
 from src.screener_short import DEFAULT_SHORT_PARAMS
+
+# 以下 3 個只在特定頁 / 特定按鈕用,改 lazy import 省 cold load ~290ms:
+#   src.backtester.backtest_short        — 只 _page_backtest
+#   src.screener_long.screen_long        — 只 _page_long
+#   src.financial_fetcher_free.update_long_term_data_free — 只系統頁 re-fetch button
+# 2026-05-06 主公拍板:盡量減少 cold load 不用到的 module import,主要拿
+# src.backtester ~289ms 跟 src.screener_long / financial_fetcher_free 數十 ms。
 from src.ui_cards import (
     render_picks_cards, render_picks_cards_paginated, view_mode_toggle,
 )
@@ -1875,6 +1879,7 @@ def _page_long() -> None:
     )
 
     if test_btn:
+        from src.screener_long import screen_long  # lazy
         with st.spinner("執行長線選股 (資料缺會自動從 TWSE 補)..."):
             result = screen_long()
         if result.empty:
@@ -3158,6 +3163,7 @@ def _page_backtest() -> None:
 
     with st.spinner("執行回測..."):
         try:
+            from src.backtester import backtest_short  # lazy(此 module ~290ms cold)
             # 單一 volume_kd 走舊路徑(向下相容);多選 / 非預設走聚合路徑
             use_multi = (
                 len(enabled) > 1 or (len(enabled) == 1 and enabled[0] != "volume_kd")
@@ -5061,6 +5067,7 @@ def _run_update_long_term_free() -> None:
         )
 
     # Step 1: TWSE OpenAPI(PE/PB/殖利率/EPS + PB 反推 ROE)
+    from src.financial_fetcher_free import update_long_term_data_free  # lazy
     result = update_long_term_data_free(sids, on_progress=on_progress)
     n_metrics = len(result["success_metrics"])
     n_eps = len(result["success_eps"])
