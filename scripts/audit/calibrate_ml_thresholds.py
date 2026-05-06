@@ -29,7 +29,6 @@ import sys
 import time
 from pathlib import Path
 
-import pandas as pd
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:

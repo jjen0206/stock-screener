@@ -15,6 +15,8 @@
 注意:本 script 跑的是 streamlit AppTest(headless),不會開瀏覽器。
 測 wallclock 跟用戶實際體感接近,但少了 browser render / network round-trip。
 """
+# ruff: noqa: E402
+# E402:必須先 sys.path.insert root 才能 import streamlit AppTest 找到 src/
 from __future__ import annotations
 
 import sys
@@ -87,10 +89,6 @@ def main() -> None:
 
     # === Phase 3: submit 執行選股 ===
     # 走「快速:50 檔大型股」universe,免依賴 SQLite 歷史
-    try:
-        sb = at.selectbox(key=None)  # universe selectbox 沒 key,只能 by index
-    except Exception:
-        sb = None
     # 找 universe selectbox(label = "選股範圍")
     universe_sb = None
     for s in at.selectbox:

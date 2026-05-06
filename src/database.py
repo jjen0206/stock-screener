@@ -32,9 +32,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
-logger = logging.getLogger(__name__)
-
 from src import config
+
+logger = logging.getLogger(__name__)
 
 
 # === 連線與初始化 ===

@@ -11,7 +11,6 @@ regime 分類:
 """
 from __future__ import annotations
 
-from datetime import date as _date
 from typing import TypedDict
 
 from src import database as db

@@ -120,7 +120,8 @@ def _print_comparison_table(
     f2, w2, wr2 = _agg(mode2)
     f3, w3, wr3 = _agg(mode3)
     f4, w4, wr4 = _agg(mode4)
-    cell_summary = lambda f, wr: f"{wr * 100:5.1f}% ({f})"
+    def cell_summary(f: int, wr: float) -> str:
+        return f"{wr * 100:5.1f}% ({f})"
     print(
         f"{'TOTAL (weighted)':<22s}"
         f" {cell_summary(f1, wr1):>15s} {cell_summary(f2, wr2):>15s}"

@@ -492,7 +492,6 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     b = _bold
     sid = str(news.get("sid") or "")
     name = str(news.get("company_name") or "")
-    date_iso = str(news.get("publish_date") or "")
     time_str = str(news.get("publish_time") or "")
     subject = str(news.get("subject") or "")
     article = str(news.get("article_no") or "")

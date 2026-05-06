@@ -143,7 +143,7 @@ def main() -> int:
         # dry-run 也順便印整體分布給主公看
         from collections import Counter
         articles = Counter(r.get("article_no") or "" for r in rows)
-        print(f"\n[NEWS] 本輪條款分布(top 15):", flush=True)
+        print("\n[NEWS] 本輪條款分布(top 15):", flush=True)
         for art, cnt in articles.most_common(15):
             mark = "✅" if art in IMPORTANT_ARTICLES else "❌"
             print(f"  {mark} {art:<10s}: {cnt}", flush=True)

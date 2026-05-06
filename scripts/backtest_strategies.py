@@ -221,8 +221,8 @@ def main() -> int:
     else:
         n_inserted = len(rows)
         print(
-            f"[BACKTEST] ad-hoc mode (ML filter): 不寫 strategy_backtest 表"
-            f"(只印 summary 給對比)",
+            "[BACKTEST] ad-hoc mode (ML filter): 不寫 strategy_backtest 表"
+            "(只印 summary 給對比)",
             flush=True,
         )
 

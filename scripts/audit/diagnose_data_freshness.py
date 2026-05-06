@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
-from datetime import date as _date
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -96,7 +95,7 @@ def _audit_table(
         f"latest in {table}: {table_latest}",
         flush=True,
     )
-    print(f"\n交易日落差分桶:", flush=True)
+    print("\n交易日落差分桶:", flush=True)
     print(
         f"  ✅ 完整(0 交易日)        {bucket['fresh']:>5d} 檔  "
         f"({bucket['fresh']/total*100:.1f}%)",
@@ -126,7 +125,7 @@ def _audit_table(
         return (-99999 if g is None else -g)
 
     rows_with_gap.sort(key=_sort_key)
-    print(f"\nTOP 30 落差最大 / 沒資料的:", flush=True)
+    print("\nTOP 30 落差最大 / 沒資料的:", flush=True)
     print(
         f"  {'SID':<7} {'Name':<20} {'Latest':<12} {'交易日落差':<10}",
         flush=True,

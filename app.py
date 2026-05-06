@@ -4,6 +4,9 @@ Stock Screener — Streamlit 入口。
 T4-A 完成:sidebar 路由 + 個股查詢頁 + 設定頁
 T4-B 完成:短線推薦頁 + 長線占位頁 + sidebar「更新今日資料」按鈕
 """
+# ruff: noqa: E402
+# E402:profiling helpers (_tic / _toc / _TIMING_START) 必須在 heavy imports
+# (pandas / plotly / streamlit ~1s)前定義,讓 timing capture cold-load 全程
 from __future__ import annotations
 
 import os
@@ -54,9 +57,7 @@ from src.data_fetcher import (
 )
 from src.financial_fetcher_free import update_long_term_data_free
 from src.individual_sections import (
-    _compute_key_levels,
     _compute_main_force_signal,  # noqa: F401  個股頁不直接用,e2e test 從 app namespace 拿
-    _compute_technical_summary,
     _load_recent_ohlc,
     _render_action_suggestion,
     _render_key_levels,
@@ -1117,7 +1118,7 @@ def _render_manual_push_button(picks_df: "pd.DataFrame") -> None:
         help="把當前頁面的推薦結果(限前 7 檔)即時推到 Telegram + Discord",
     )
     cols[1].caption(
-        f"上限 7 檔 / 30 秒內只能推一次 / footer 會標『雲端 App 手動推播』。"
+        "上限 7 檔 / 30 秒內只能推一次 / footer 會標『雲端 App 手動推播』。"
     )
     if clicked:
         try:
@@ -1727,7 +1728,7 @@ def _page_short() -> None:
         with tab_obj:
             sub_agg = _filter_agg_by_category(agg, cat)
             if not sub_agg:
-                st.info(f"📭 此分類本日無入選。")
+                st.info("📭 此分類本日無入選。")
                 continue
             sub_df = _enrich_df_with_matched_strategies(
                 _enrich_df_with_ml_prob(

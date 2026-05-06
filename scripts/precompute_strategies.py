@@ -35,7 +35,7 @@ if str(_ROOT) not in sys.path:
 from src import config, database as db  # noqa: E402
 from src.strategies import run_all_strategies  # noqa: E402
 from src.universe import (  # noqa: E402
-    TW_TOP_50, is_pure_stock, pure_stock_universe,
+    TW_TOP_50, pure_stock_universe,
 )
 
 
@@ -79,7 +79,7 @@ def _compute_ml_probs(
     if general_model is None and not agg:
         # 沒通用 model + 沒 agg → 沒法路由,全 NULL
         print(
-            f"[PRECOMPUTE] general model 不可用 + 沒 agg → ml_prob 全 NULL",
+            "[PRECOMPUTE] general model 不可用 + 沒 agg → ml_prob 全 NULL",
             flush=True,
         )
         return {}

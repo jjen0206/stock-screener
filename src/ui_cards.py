@@ -428,7 +428,7 @@ def _render_card_metadata(
         if ml_html:
             text_parts.append(ml_html)
         st.markdown(
-            f"<div style='font-size:11px;color:#888'>"
+            "<div style='font-size:11px;color:#888'>"
             + " · ".join(text_parts)
             + "</div>",
             unsafe_allow_html=True,

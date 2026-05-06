@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from datetime import date as _date, datetime, timezone
+from datetime import date as _date
 from pathlib import Path
 from typing import TypedDict
 

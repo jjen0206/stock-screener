@@ -23,10 +23,10 @@ from src.ml_predictor import (  # noqa: E402
     MIN_HISTORY_DAYS, load_model, load_strategy_model, predict_for_strategy,
 )
 from src.strategies import (  # noqa: E402
-    ALL_STRATEGIES, STRATEGY_LABELS, STRATEGY_ML_THRESHOLDS,
+    STRATEGY_LABELS, STRATEGY_ML_THRESHOLDS,
     run_all_strategies,
 )
-from src.universe import pure_stock_universe
+from src.universe import pure_stock_universe  # noqa: E402
 
 
 SIDS_TO_DIAGNOSE = ["3680", "3711"]
@@ -101,12 +101,12 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
 
     # 1. universe 檢查
     in_universe = sid in set(universe)
-    print(f"\n[1] 是否在 default universe(pure_stock, ≥20 天歷史)?", flush=True)
+    print("\n[1] 是否在 default universe(pure_stock, ≥20 天歷史)?", flush=True)
     print(f"    → {'✅ 是' if in_universe else '❌ 否'}", flush=True)
 
     # 2. 資料涵蓋
     cov = _check_data_coverage(sid, period_end)
-    print(f"\n[2] daily_prices 涵蓋:", flush=True)
+    print("\n[2] daily_prices 涵蓋:", flush=True)
     print(
         f"    → rows={cov['n']}, range={cov['earliest']} → {cov['latest']}, "
         f"min_required(ML)={cov['min_required']} "
@@ -147,8 +147,8 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
             flush=True,
         )
         print(
-            f"     → 11 策略中 9 個要求 df.date.iloc[-1] == period_end "
-            f"(精確當日)否則直接 return None,所以全沒 fire。",
+            "     → 11 策略中 9 個要求 df.date.iloc[-1] == period_end "
+            "(精確當日)否則直接 return None,所以全沒 fire。",
             flush=True,
         )
         print(
@@ -163,7 +163,7 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
     agg = run_all_strategies(period_end, stock_ids=[sid])
     sid_info = agg.get(sid)
     if not sid_info:
-        print(f"    → ❌ 沒任何策略 fire", flush=True)
+        print("    → ❌ 沒任何策略 fire", flush=True)
         print(
             f"\n  ⛔ 結論:{sid} {name} 在 universe 但 11 策略全沒 fire → "
             "選股條件都不符合。",
@@ -177,7 +177,7 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
         print(f"       - {s} ({STRATEGY_LABELS.get(s, s)})", flush=True)
 
     # 4. ML filter:routing strategy + ml_prob + threshold
-    print(f"\n[4] ML 過濾(高信心模式)診斷:", flush=True)
+    print("\n[4] ML 過濾(高信心模式)診斷:", flush=True)
     routing = _routing_strategy(matched)
     threshold = _strictest_threshold(matched)
 
@@ -188,7 +188,7 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
             flush=True,
         )
         print(
-            f"    → 高信心模式不過濾 → 該 pick 應該會出現!",
+            "    → 高信心模式不過濾 → 該 pick 應該會出現!",
             flush=True,
         )
         print(
@@ -218,7 +218,7 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
     )
     if ml_prob is None:
         print(
-            f"    → ml_prob = None ❌(features 不足或 predict 失敗)",
+            "    → ml_prob = None ❌(features 不足或 predict 失敗)",
             flush=True,
         )
         print(
@@ -241,7 +241,7 @@ def diagnose(sid: str, period_end: str, universe: list[str], general_model) -> N
             flush=True,
         )
         # 同時印每個 fired strategy 各自門檻給對照
-        print(f"    → 各策略門檻對照:", flush=True)
+        print("    → 各策略門檻對照:", flush=True)
         for s in matched:
             t = STRATEGY_ML_THRESHOLDS.get(s)
             t_str = f"{t:.2f}" if t is not None else "(無)"
