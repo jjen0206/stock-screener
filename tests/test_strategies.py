@@ -307,6 +307,76 @@ def test_aggregated_to_dataframe_sorted_by_signal_count(tmp_db, monkeypatch):
     assert df.iloc[1]["stock_id"] == "A"
 
 
+# === 產業分類 enrich(2026-05-06 主公拍板加) ===
+
+def test_enrich_industry_heat_counts_per_industry(tmp_db):
+    """同產業 fire 多檔 → industry_heat 對所有同產業 row = 該產業 count。"""
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW", "industry": "半導體業"},
+        {"stock_id": "2454", "name": "聯發科", "market": "TW", "industry": "半導體業"},
+        {"stock_id": "3711", "name": "日月光", "market": "TW", "industry": "半導體業"},
+        {"stock_id": "1101", "name": "台泥", "market": "TW", "industry": "水泥工業"},
+    ])
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "信號數": 2},
+        {"stock_id": "2454", "name": "聯發科", "信號數": 2},
+        {"stock_id": "3711", "name": "日月光", "信號數": 1},
+        {"stock_id": "1101", "name": "台泥", "信號數": 1},
+    ])
+    out = strat.enrich_with_industry_heat(df)
+    # 半導體業 3 檔 fire → 該 3 row 都 industry_heat=3
+    semi = out[out["industry"] == "半導體業"]
+    assert len(semi) == 3
+    assert (semi["industry_heat"] == 3).all()
+    # 水泥業 1 檔 → industry_heat=1
+    cement = out[out["industry"] == "水泥工業"]
+    assert len(cement) == 1
+    assert cement.iloc[0]["industry_heat"] == 1
+
+
+def test_enrich_industry_heat_handles_unknown_industry(tmp_db):
+    """stocks 表 industry IS NULL / 個股不在表 → industry=NaN, heat=0,不影響其他。"""
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW", "industry": "半導體業"},
+        # 9999 不在 stocks 表
+        # 1234 在表但 industry=None
+        {"stock_id": "1234", "name": "Unknown", "market": "TW", "industry": None},
+    ])
+    df = pd.DataFrame([
+        {"stock_id": "2330", "name": "台積電", "信號數": 2},
+        {"stock_id": "9999", "name": "未知", "信號數": 1},
+        {"stock_id": "1234", "name": "Unknown", "信號數": 1},
+    ])
+    out = strat.enrich_with_industry_heat(df)
+    assert out[out["stock_id"] == "2330"].iloc[0]["industry"] == "半導體業"
+    assert out[out["stock_id"] == "2330"].iloc[0]["industry_heat"] == 1  # 只 2330 一檔半導體
+    # 9999 / 1234 沒 industry → heat=0
+    nan_rows = out[out["industry"].isna()]
+    assert len(nan_rows) == 2
+    assert (nan_rows["industry_heat"] == 0).all()
+
+
+def test_aggregated_to_dataframe_sorts_by_industry_heat_within_signal_tier(tmp_db):
+    """同信號數 → industry_heat 高的排前(熱門類股加分)。"""
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW", "industry": "半導體業"},
+        {"stock_id": "2454", "name": "聯發科", "market": "TW", "industry": "半導體業"},
+        {"stock_id": "1101", "name": "台泥", "market": "TW", "industry": "水泥工業"},
+    ])
+    agg = {
+        "2330": {"name": "台積電", "signals": ["A"], "details": {"A": {"close": 600}}},
+        "2454": {"name": "聯發科", "signals": ["A"], "details": {"A": {"close": 1000}}},
+        "1101": {"name": "台泥", "signals": ["A"], "details": {"A": {"close": 50}}},
+    }
+    df = strat.aggregated_to_dataframe(agg)
+    # 全部信號數 = 1。半導體 2 檔 → heat=2;水泥 1 檔 → heat=1
+    # 排序:heat 高的(半導體 2330 / 2454)排在 1101 之前
+    sids_in_order = df["stock_id"].tolist()
+    assert sids_in_order[0] in ("2330", "2454")
+    assert sids_in_order[1] in ("2330", "2454")
+    assert sids_in_order[2] == "1101"
+
+
 def test_aggregated_to_dataframe_includes_target_columns():
     """DataFrame 要含 target_low / target_high / stop_loss / risk_reward / atr14。"""
     agg = {

@@ -68,6 +68,8 @@ def _build_card_html(
     win_rate: float | None,
     risk_reward: float | None,
     n_signals: int,
+    industry: str | None = None,
+    industry_heat: int = 0,
 ) -> str:
     """組整張卡片的 HTML(row 1 + row 2 + 右側 metadata)— 給 st.markdown
     一次吐出,省 streamlit widget 開銷。row 3 的「加入關注」/「展開詳細」
@@ -77,11 +79,29 @@ def _build_card_html(
     """
     from src.ui_format import color_for, arrow_for, COLOR_FLAT
 
+    # 產業 badge:industry_heat ≥ 3 → 🔥 紅色加粗(熱門類股輪動);
+    # 否則 🏭 灰色 secondary;industry None / 空 → 不顯
+    industry_html = ""
+    if industry:
+        ind_str = str(industry).strip()
+        if ind_str:
+            if industry_heat and industry_heat >= 3:
+                industry_html = (
+                    f"<div style='font-size:11px;color:#d62728;font-weight:500'>"
+                    f"🔥 {ind_str} ({int(industry_heat)})</div>"
+                )
+            else:
+                industry_html = (
+                    f"<div style='font-size:11px;color:#888'>"
+                    f"🏭 {ind_str}</div>"
+                )
+
     # row 1 / 股號 + 名稱(股名為主視覺:18px 500;股號 13px secondary 化為 label)
     sid_block = (
         f"<div><div style='font-size:11px;color:#888'>股號</div>"
         f"<div style='font-size:13px;font-weight:400;color:#888'>{sid}</div>"
-        f"<div style='font-size:18px;font-weight:500'>{name}</div></div>"
+        f"<div style='font-size:18px;font-weight:500'>{name}</div>"
+        f"{industry_html}</div>"
     )
 
     # row 1 / 股價 + 漲跌(股價數字 18px + 依漲跌染色)
@@ -232,6 +252,19 @@ def render_pick_card(
     win_rate = row.get("win_rate")  # Phase B 加;Phase A 通常 None
     ml_prob = row.get("ml_prob")    # Stage 1 加;雲端 enrich 後有值
 
+    # 產業 badge(2026-05-06 加):caller 傳 row['industry'] / row['industry_heat']
+    # 才顯;沒傳該欄(舊 caller) → 不影響 layout
+    industry_raw = row.get("industry")
+    industry = (
+        str(industry_raw) if industry_raw is not None
+        and not (isinstance(industry_raw, float) and industry_raw != industry_raw)
+        else None
+    )
+    try:
+        industry_heat = int(row.get("industry_heat") or 0)
+    except (TypeError, ValueError):
+        industry_heat = 0
+
     with st.container(border=True):
         # Row 1 + Row 2(整段 HTML 一次吐出 — 省 streamlit widget tree)
         st.markdown(
@@ -247,6 +280,8 @@ def render_pick_card(
                 win_rate=win_rate,
                 risk_reward=risk_reward,
                 n_signals=n_signals,
+                industry=industry,
+                industry_heat=industry_heat,
             ),
             unsafe_allow_html=True,
         )

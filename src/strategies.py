@@ -1714,14 +1714,64 @@ _AGGREGATED_COLUMNS = [
     "stock_id", "name", "信號數", "信號",
     "close", "target_low", "target_high", "stop_loss",
     "risk_reward", "atr14",
+    "industry", "industry_heat",
 ]
+
+
+def _get_industries_map(sids: list[str]) -> dict[str, str]:
+    """SELECT stock_id, industry FROM stocks IN (sids) → {sid: industry}。
+
+    industry IS NULL / '' → 不入 dict(caller .map 拿 NaN)。給
+    enrich_with_industry_heat 用。
+    """
+    if not sids:
+        return {}
+    placeholders = ",".join("?" * len(sids))
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT stock_id, industry FROM stocks "
+            f"WHERE stock_id IN ({placeholders}) "
+            f"AND industry IS NOT NULL AND industry != ''",
+            sids,
+        ).fetchall()
+    return {r["stock_id"]: r["industry"] for r in rows}
+
+
+def enrich_with_industry_heat(df: pd.DataFrame) -> pd.DataFrame:
+    """加 industry + industry_heat 欄。industry_heat = 同 df 內同產業 fire 數。
+
+    產業熱度高(同類股被多策略集中命中)→ 通常代表類股輪動 / 法人關注,
+    UI 用此排序加分;同分時熱門產業排前面。
+    industry 缺 / IS NULL → industry_heat = 0(不加分)。
+    """
+    if df is None or df.empty:
+        if df is not None:
+            df = df.copy()
+            for col in ("industry", "industry_heat"):
+                if col not in df.columns:
+                    df[col] = pd.Series(dtype=object if col == "industry" else int)
+        return df
+    if "stock_id" not in df.columns:
+        return df
+
+    sids = df["stock_id"].astype(str).tolist()
+    industries = _get_industries_map(sids)
+
+    df = df.copy()
+    df["industry"] = df["stock_id"].astype(str).map(industries)
+    counts = df["industry"].dropna().value_counts().to_dict()
+    df["industry_heat"] = df["industry"].map(counts).fillna(0).astype(int)
+    return df
 
 
 def aggregated_to_dataframe(agg: dict[str, dict]) -> pd.DataFrame:
     """把 run_all_strategies 結果攤平成 DataFrame 給 UI 顯示。
 
-    欄位含目標價(target_low / target_high / stop_loss / risk_reward / atr14),
-    從任一策略 details 取得(三個策略的 _enrich_with_targets 都會塞同樣值)。
+    欄位含目標價(target_low / target_high / stop_loss / risk_reward / atr14)
+    + 產業 (industry / industry_heat)— 從任一策略 details 取得目標價,
+    industry 從 stocks 表 JOIN。
+
+    排序:信號數 desc → industry_heat desc(同類股集中加分)→ stock_id asc。
     """
     if not agg:
         return pd.DataFrame(columns=_AGGREGATED_COLUMNS)
@@ -1750,9 +1800,13 @@ def aggregated_to_dataframe(agg: dict[str, dict]) -> pd.DataFrame:
             "risk_reward": risk_reward,
             "atr14": atr14,
         })
-    df = pd.DataFrame(rows, columns=_AGGREGATED_COLUMNS)
+    df = pd.DataFrame(rows)
+    df = enrich_with_industry_heat(df)
+    # reindex 確保 schema 完整(空欄補 NaN)
+    df = df.reindex(columns=_AGGREGATED_COLUMNS)
     return df.sort_values(
-        ["信號數", "stock_id"], ascending=[False, True],
+        ["信號數", "industry_heat", "stock_id"],
+        ascending=[False, False, True],
     ).reset_index(drop=True)
 
 
@@ -1807,6 +1861,7 @@ __all__ = [
     "screen_gap_up",
     "run_all_strategies",
     "aggregated_to_dataframe",
+    "enrich_with_industry_heat",
     "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
