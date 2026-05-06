@@ -26,7 +26,9 @@ _EXPECTED: dict[str, tuple[str, int, int, str]] = {
     "daily_metrics":      ("trading_day",    2,     5,      "date"),
     "taiex":              ("trading_day",    2,     5,      "date"),
     "institutional":      ("trading_day",    3,     7,      "date"),
-    "financials_quarterly": ("daily_inc",    7,     30,     "period"),
+    # quarterly:台股季報法定 5/15 / 8/14 / 11/14 / 3/31 publish,自然 lag 30-60 天
+    # warn=60 / error=100(原 7/30 太嚴 → 季中會誤報 error)。
+    "financials_quarterly": ("daily_inc",    60,    100,    "period"),
     "monthly_revenue":    ("daily_inc",      14,    45,     "period"),
     "dividend":           ("daily_inc",      30,    180,    "ex_dividend_date"),
     "news":               ("hourly",         2,     7,      "publish_date"),

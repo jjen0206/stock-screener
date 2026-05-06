@@ -63,11 +63,12 @@ def _fake_update_all_fail(stock_ids, on_progress=None):
     }
 
 
-def test_main_writes_6_csvs_on_success(tmp_env, monkeypatch):
-    """從 4 → 6 CSV(2026-05-06 主公拍板把 monthly_revenue + dividend
-    整合進 daily,砍掉冗余 backfill-financials.yml workflow)。
+def test_main_writes_7_csvs_on_success(tmp_env, monkeypatch):
+    """從 6 → 7 CSV(2026-05-06 加 institutional.csv dump 修同 daily_prices bug)。
+
+    institutional.csv 原本只 backfill-history.yml(workflow_dispatch 手動)會 dump,
+    daily-notify / morning-refetch 寫進 SQLite 的法人籌碼隨 runner 銷毀消失。
     """
-    # mock 兩個新 fetcher 不打網路
     monkeypatch.setattr(
         weekly, "update_long_term_data_free", _fake_update_success,
     )
@@ -84,13 +85,12 @@ def test_main_writes_6_csvs_on_success(tmp_env, monkeypatch):
     assert (snapshot / "financials_quarterly.csv").exists()
     assert (snapshot / "stocks.csv").exists()
     assert (snapshot / "daily_prices.csv").exists()
-    # 守門:monthly_revenue.csv 必須被 dump(原來只在 backfill-revenue 週跑)
-    assert (snapshot / "monthly_revenue.csv").exists(), (
-        "monthly_revenue.csv 必須由 daily_market_update 每日 dump"
-    )
-    # 守門:dividend.csv 必須被 dump(原來只在 backfill-dividend 週跑)
-    assert (snapshot / "dividend.csv").exists(), (
-        "dividend.csv 必須由 daily_market_update 每日 dump"
+    assert (snapshot / "monthly_revenue.csv").exists()
+    assert (snapshot / "dividend.csv").exists()
+    # 守門:institutional.csv 必須被 dump(同 daily_prices 修法 pattern)
+    assert (snapshot / "institutional.csv").exists(), (
+        "institutional.csv 必須由 daily_market_update 每日 dump,"
+        "否則 daily_fetch 寫進 runner SQLite 的法人籌碼隨 runner 銷毀消失"
     )
 
 

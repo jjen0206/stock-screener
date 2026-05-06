@@ -119,7 +119,11 @@ def test_snapshot_health_marks_old_data_as_error(tmp_snapshot):
 
 
 def test_snapshot_health_quarterly_uses_period_column(tmp_snapshot):
-    """financials_quarterly 用 period 欄(YYYY-QN 字串)。"""
+    """financials_quarterly 用 period 欄(YYYY-QN 字串)。
+
+    threshold(2026-05-06 校準):warn=60 / error=100(原 7/30 太嚴 → 季中誤報)。
+    Q4 2024 quarter end 2024-12-31。
+    """
     df = pd.DataFrame({
         "stock_id": ["2330"],
         "period": ["2024-Q4"],
@@ -132,6 +136,32 @@ def test_snapshot_health_quarterly_uses_period_column(tmp_snapshot):
     fq = next(r for r in rows if r["table"] == "financials_quarterly")
     assert fq["last_date"] == "2024-Q4"
     assert fq["days_lag"] == 59  # 2025-02-28 - 2024-12-31
+    # 59 < warn=60 → ok(校準後不誤報)
+    assert fq["status"] == "ok", (
+        f"59 天 < warn=60 該 ok(quarterly 季中應屬正常),實際 {fq['status']}"
+    )
+
+
+def test_snapshot_health_quarterly_warn_when_60_to_100_days(tmp_snapshot):
+    """Q4 quarter end 2024-12-31,today 2025-04-15 → lag 105 天 > error 100 → error。
+    today 2025-03-15 → lag 74 天,在 60-100 之間 → warn。
+    """
+    df = pd.DataFrame({
+        "stock_id": ["2330"], "period": ["2024-Q4"], "revenue": [1.0e8],
+    })
+    df.to_csv(tmp_snapshot / "financials_quarterly.csv", index=False)
+    # warn 區間
+    rows = sh.get_snapshot_health(
+        snapshot_dir=tmp_snapshot, today_iso="2025-03-15",
+    )
+    fq = next(r for r in rows if r["table"] == "financials_quarterly")
+    assert fq["status"] == "warn", f"lag 74 天 → warn,實際 {fq['status']}"
+    # error 區間
+    rows = sh.get_snapshot_health(
+        snapshot_dir=tmp_snapshot, today_iso="2025-04-15",
+    )
+    fq = next(r for r in rows if r["table"] == "financials_quarterly")
+    assert fq["status"] == "error", f"lag 105 天 → error,實際 {fq['status']}"
 
 
 # === overall_status ===

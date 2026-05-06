@@ -183,6 +183,19 @@ def main() -> int:
     daily_prices_rows = len(df)
     print(f"[DAILY] 寫 {path.name}: {daily_prices_rows} 行", flush=True)
 
+    # 4b. institutional 全市場(daily_fetch.py 已抓 TOP_50 + watchlist 寫進 SQLite,
+    # 但跟 daily_prices 一樣只 backfill-history.yml 才會 dump CSV → 雲端 reboot 後
+    # snapshot 卡舊日期。同 daily_prices 修法 pattern,把 dump 整合進 daily。
+    with db.get_conn() as conn:
+        df = pd.read_sql(
+            "SELECT * FROM institutional ORDER BY date, stock_id",
+            conn,
+        )
+    path = SNAPSHOT_DIR / "institutional.csv"
+    df.to_csv(path, index=False)
+    institutional_rows = len(df)
+    print(f"[DAILY] 寫 {path.name}: {institutional_rows} 行", flush=True)
+
     # 5. TAIEX 加權指數 200 天歷史(大盤頁的 K 線 + 多週期 + 技術總覽都需要)
     # 走 fetch_daily_price 走 SQLite cache,差的範圍才打 FinMind。
     from datetime import date as _date, timedelta as _td
@@ -276,6 +289,7 @@ def main() -> int:
         f"daily_metrics_rows={result['success_metrics'].__len__()}\n"
         f"eps_rows={result['success_eps'].__len__()}\n"
         f"daily_prices_rows={daily_prices_rows}\n"
+        f"institutional_rows={institutional_rows}\n"
         f"taiex_rows={taiex_rows}\n"
         f"monthly_revenue_rows={monthly_revenue_rows}\n"
         f"dividend_rows={dividend_rows}\n"
