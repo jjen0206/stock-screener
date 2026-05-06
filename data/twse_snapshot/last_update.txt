@@ -1,6 +1,7 @@
-updated_at=2026-05-06T04:57:36+00:00
-git_sha=580581b27114539c1fe01b9c80113514fabf47c0
-run_id=25417245295
+updated_at=2026-05-06T08:20:57+00:00
+git_sha=49313b8b7bcd261d7b2e05cff7f78445511d6007
+run_id=25424242905
 daily_metrics_rows=827
 eps_rows=96
-taiex_rows=131
+daily_prices_rows=134179
+taiex_rows=132
