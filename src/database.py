@@ -1479,11 +1479,18 @@ def dump_strategy_backtest(
 
 def load_latest_strategy_backtest(
     db_path: str | Path | None = None,
+    min_fires: int = 10,
 ) -> dict[str, float]:
     """回 {strategy_name: win_rate},每個 strategy 取最新 period_end 的 win_rate。
 
     給 App 端 _enrich_with_win_rate 用 — 不論 backtest 跑過多少次,只看最新。
     無資料 → 空 dict。
+
+    min_fires:過濾低樣本 strategies(<10 fires 視為不可信噪音)。Phase 1
+    新加策略 (eps_acceleration / high_yield_stable / inst_oversold_reversal /
+    revenue_acceleration) 樣本不足會被 backtest 寫進 0-fire rows;若不過濾,
+    win_rate=0% 會被 _enrich_with_win_rate 算進平均 → 卡片勝率被拉低。同樣
+    防 1-fire 100% 之類的極端噪音(例 ma_squeeze_breakout 1 fire)。
     """
     init_db(db_path)
     with get_conn(db_path) as conn:
@@ -1494,7 +1501,9 @@ def load_latest_strategy_backtest(
                 SELECT strategy, MAX(period_end) FROM strategy_backtest
                 GROUP BY strategy
             )
-            """
+            AND n_fires >= ?
+            """,
+            (min_fires,),
         ).fetchall()
     return {r["strategy"]: float(r["win_rate"]) for r in rows}
 

@@ -168,6 +168,46 @@ def test_load_latest_takes_max_period_end_per_strategy(tmp_db):
     assert rates["volume_kd"] == 0.65
 
 
+def test_load_latest_strategy_backtest_filters_low_fires(tmp_db):
+    """min_fires=10 過濾低樣本噪音 — Phase 1 加 5 個策略樣本不足會寫 0-fire,
+    若不過濾則 win_rate=0 拉低 _enrich_with_win_rate 的平均。
+
+    1-fire 100% WR 的極端噪音(例 ma_squeeze_breakout)也該過濾。
+    """
+    # 灌 4 筆:
+    #  - 高樣本(100 fires)→ 該回
+    #  - 0 fires(Phase 1 新策略未來情境)→ 該過濾
+    #  - 1 fire 100% WR(極端噪音)→ 該過濾
+    #  - 9 fires(剛好低於門檻)→ 該過濾
+    rows = [
+        {"strategy": "good", "period_end": "2026-05-04",
+         "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+         "hold_days": 5, "n_fires": 100, "n_wins": 60, "win_rate": 0.60,
+         "avg_return": 0.012, "computed_at": "2026-05-04T00:00:00+00:00"},
+        {"strategy": "zero_fire", "period_end": "2026-05-04",
+         "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+         "hold_days": 5, "n_fires": 0, "n_wins": 0, "win_rate": 0.0,
+         "avg_return": 0.0, "computed_at": "2026-05-04T00:00:00+00:00"},
+        {"strategy": "one_fire_100", "period_end": "2026-05-04",
+         "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+         "hold_days": 5, "n_fires": 1, "n_wins": 1, "win_rate": 1.0,
+         "avg_return": 0.05, "computed_at": "2026-05-04T00:00:00+00:00"},
+        {"strategy": "borderline", "period_end": "2026-05-04",
+         "lookback_days": 126, "target_pct": 0.05, "stop_pct": 0.03,
+         "hold_days": 5, "n_fires": 9, "n_wins": 5, "win_rate": 0.55,
+         "avg_return": 0.01, "computed_at": "2026-05-04T00:00:00+00:00"},
+    ]
+    db.dump_strategy_backtest(rows)
+    rates = db.load_latest_strategy_backtest()  # default min_fires=10
+    assert "good" in rates
+    assert "zero_fire" not in rates, "0 fires 該被過濾(避免 win_rate=0 拉低平均)"
+    assert "one_fire_100" not in rates, "1-fire 100% 是噪音該過濾"
+    assert "borderline" not in rates, "9 fires < 10 門檻 該過濾"
+    # min_fires=0 可關閉過濾(給 audit / e2e 測試保留 backdoor)
+    rates_all = db.load_latest_strategy_backtest(min_fires=0)
+    assert len(rates_all) == 4
+
+
 def test_dump_strategy_backtest_on_conflict_replaces(tmp_db):
     """重 dump 同 (strategy, period_end) → 用新值覆蓋。"""
     db.dump_strategy_backtest([

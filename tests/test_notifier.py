@@ -497,6 +497,54 @@ def test_format_pick_block_skip_when_no_industry():
     assert "🏭" not in block
 
 
+# === win_rate 推播(2026-05-06 主公拍板加,接 backtest 結果到推播) ===
+
+def test_format_pick_block_includes_win_rate_when_high():
+    """win_rate ≥ 55% → 🎯 emoji + 加粗顯。"""
+    pick = _make_top_pick()
+    pick["win_rate"] = 0.62
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "🎯" in block, "≥55% 該用 🎯 emoji"
+    assert "勝率" in block
+    assert "62%" in block
+    assert "126d 回測" in block
+    # Telegram bold(單星)
+    assert "*62%*" in block
+
+
+def test_format_pick_block_includes_win_rate_when_low():
+    """win_rate < 55% → 📊 emoji(中性 / 不到 55% 不算高勝率)。
+
+    註:🎯 emoji 也出現在「目標」行(🎯 保守 / 積極 / 停損)— 用具體
+    勝率行 substring 斷言才不會跟它撞。
+    """
+    pick = _make_top_pick()
+    pick["win_rate"] = 0.40
+    block = notifier.format_pick_block(pick, channel="telegram")
+    # 找含「勝率 40%」的那行
+    assert "📊 勝率" in block, f"低勝率該用 📊 emoji,實際: {block}"
+    # 「勝率」行不該用 🎯(只 ≥55% 才用)
+    assert "🎯 勝率" not in block
+    assert "40%" in block
+
+
+def test_format_pick_block_skips_win_rate_when_none():
+    """win_rate=None → 不顯該行(向下相容,舊 caller / 命中策略全沒 backtest)。"""
+    pick = _make_top_pick()
+    pick["win_rate"] = None
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "勝率" not in block
+    assert "126d 回測" not in block
+
+
+def test_format_pick_block_skips_win_rate_when_zero():
+    """win_rate=0 視同無資料(避免顯「勝率 0%」誤導)。"""
+    pick = _make_top_pick()
+    pick["win_rate"] = 0.0
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "勝率" not in block
+
+
 def test_format_top_picks_message_includes_separator_and_stats():
     picks = [_make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)]
     msg = notifier.format_top_picks_message(

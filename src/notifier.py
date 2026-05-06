@@ -246,6 +246,10 @@ def _select_top_picks(
         if ind:
             industry_counts[ind] = industry_counts.get(ind, 0) + 1
 
+    # 撈 strategy → win_rate(126 日歷史回測,週一 nightly 跑)— 給每張 pick
+    # 算「命中策略平均勝率」加進推播。低樣本(<10 fires)由 load 函式過濾。
+    strategy_wr_map = db.load_latest_strategy_backtest()
+
     qualified: list[dict] = []
     for sid, info in agg.items():
         matched = list((info.get("details") or {}).keys())
@@ -282,6 +286,9 @@ def _select_top_picks(
         )
         industry = industries_map.get(sid)
         industry_heat = industry_counts.get(industry, 0) if industry else 0
+        # win_rate:命中策略 backtest WR 算術平均(跟 _enrich_df_with_win_rate 同邏輯)
+        valid_wrs = [strategy_wr_map[s] for s in matched if s in strategy_wr_map]
+        win_rate = sum(valid_wrs) / len(valid_wrs) if valid_wrs else None
         qualified.append({
             "rank": 0,  # caller fills
             "sid": sid,
@@ -298,6 +305,7 @@ def _select_top_picks(
             "risk_reward": float(rr) if rr else None,
             "industry": industry,
             "industry_heat": industry_heat,
+            "win_rate": win_rate,
         })
 
     # 排序:ml_prob desc → 命中策略多 desc → sid asc
@@ -361,6 +369,13 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     # ML 機率
     if ml_prob is not None:
         lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
+    # 歷史勝率(126 日回測平均,跟卡片勝率欄同來源)
+    win_rate = pick.get("win_rate")
+    if win_rate is not None and win_rate > 0:
+        emoji = "🎯" if win_rate >= 0.55 else "📊"
+        lines.append(
+            f"   {emoji} 勝率 {b(f'{win_rate * 100:.0f}%', channel)}(126d 回測)"
+        )
     # 目標 / 停損
     if target_low and target_high and stop:
         lines.append(
