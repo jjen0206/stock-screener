@@ -94,6 +94,34 @@ DEFAULT_GAP_UP_PARAMS: dict[str, Any] = {
     "gap_vol_ratio_min": 1.5,      # 獨立 key 避免跟其他策略 vol_ratio_min 衝撞
 }
 
+# === Phase 1 新加 5 個策略 (12-16) 預設參數 ===
+
+DEFAULT_EPS_ACCEL_PARAMS: dict[str, Any] = {
+    # 季 EPS 加速:連 2 季 YoY 都正、且當季 YoY > 上季 YoY
+    # 不設 min YoY % 門檻(過濾在「YoY 都正」就夠嚴),只比加速度
+    "min_quarters": 5,             # 至少 5 個季資料才能算當季 + 上季 YoY
+}
+
+DEFAULT_HIGH_YIELD_PARAMS: dict[str, Any] = {
+    "yield_min_pct": 6.0,          # 殖利率 > 6%(優於台股大盤平均 ~3.5%)
+    "stable_quarters": 4,          # 近 4 季 EPS 都為正
+}
+
+DEFAULT_INST_REVERSAL_PARAMS: dict[str, Any] = {
+    "down_days": 3,                # 連 N 日法人淨賣超
+    # 反轉條件:今日轉買(total_buy_sell > 0),前 down_days 日都 < 0
+}
+
+DEFAULT_TAIEX_ALPHA_PARAMS: dict[str, Any] = {
+    "stock_up_pct_min": 1.0,       # 個股當日漲 > 1%
+    "taiex_down_pct_max": 0.0,     # TAIEX 當日 < 0%(任何負值)
+}
+
+DEFAULT_REV_ACCEL_PARAMS: dict[str, Any] = {
+    "yoy_min_pct": 30.0,           # 月營收 YoY > 30%
+    # 加速條件:當月 YoY > 上月 YoY(無下限,只需嚴格遞增)
+}
+
 
 # === 策略 1:量價 + KD + 法人(包裝既有 screen_short) ===
 
@@ -1000,6 +1028,480 @@ def _evaluate_gap_up(
     }
 
 
+# === Phase 1 新加策略 12:eps_acceleration(季 EPS 加速) ===
+
+def _quarter_sort_key(period: str) -> tuple:
+    """quarterly period 排序 key。FinMind period 多為 "YYYY-MM-DD"(季末日)
+    或 "YYYY-Q[1-4]";直接字串比較剛好遞增。回 tuple 讓 sorted() 用。
+    """
+    return (period,)
+
+
+def screen_eps_acceleration(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 12:連 2 季 EPS YoY > 0 且當季 YoY > 上季 YoY(加速)。
+
+    意義:獲利動能加速 — 不只成長,還在「成長率本身」上升。
+    資料來源:financials.period_type='quarterly';需要至少 5 季歷史
+    (當季 + 上季 + 各對應的 4 季前)。
+    """
+    p = {**DEFAULT_EPS_ACCEL_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "curr_yoy", "prev_yoy", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    min_q = int(p["min_quarters"])
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            fin_rows = conn.execute(
+                f"SELECT stock_id, period, eps FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='quarterly' AND eps IS NOT NULL "
+                f"ORDER BY stock_id, period DESC",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            fin_rows = conn.execute(
+                "SELECT stock_id, period, eps FROM financials "
+                "WHERE period_type='quarterly' AND eps IS NOT NULL "
+                "ORDER BY stock_id, period DESC"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    fin_by_sid: dict[str, list[dict]] = {}
+    for r in fin_rows:
+        fin_by_sid.setdefault(r["stock_id"], []).append({
+            "period": r["period"],
+            "eps": float(r["eps"]) if r["eps"] is not None else None,
+        })
+
+    rows: list[dict] = []
+    for sid in sids:
+        recs = fin_by_sid.get(sid, [])
+        # 已經 ORDER BY period DESC,但保險再排一次
+        recs = sorted(recs, key=lambda x: x["period"], reverse=True)
+        if len(recs) < min_q:
+            continue
+        # idx: 0=當季 / 1=上季 / 4=當季-1y / 5=上季-1y
+        try:
+            curr_eps = recs[0]["eps"]
+            prev_eps = recs[1]["eps"]
+            curr_yoy_base = recs[4]["eps"] if len(recs) > 4 else None
+            prev_yoy_base = recs[5]["eps"] if len(recs) > 5 else None
+        except (IndexError, KeyError):
+            continue
+        if any(v is None or v == 0 for v in
+               (curr_eps, prev_eps, curr_yoy_base, prev_yoy_base)):
+            continue
+        curr_yoy = (curr_eps - curr_yoy_base) / abs(curr_yoy_base) * 100
+        prev_yoy = (prev_eps - prev_yoy_base) / abs(prev_yoy_base) * 100
+        if curr_yoy <= 0 or prev_yoy <= 0:
+            continue
+        if curr_yoy <= prev_yoy:
+            continue
+        # close
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "curr_yoy": float(curr_yoy),
+            "prev_yoy": float(prev_yoy),
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
+# === Phase 1 新加策略 13:high_yield_stable(殖利率異常高 + 獲利穩定) ===
+
+def screen_high_yield_stable(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 13:當前殖利率 > 6% 且近 4 季 EPS 都為正(高殖利率 + 獲利穩定)。
+
+    意義:存股族常用 — 高殖利率不是地雷(有持續獲利支撐)。
+    資料來源:daily_metrics.dividend_yield + financials.eps quarterly。
+    """
+    p = {**DEFAULT_HIGH_YIELD_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "dividend_yield", "stable_quarters", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    yield_min = float(p["yield_min_pct"])
+    stable_q = int(p["stable_quarters"])
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            # 殖利率取最近一筆(<= date)— daily_metrics 不一定每天有
+            yield_rows = conn.execute(
+                f"SELECT stock_id, MAX(date) AS d, dividend_yield "
+                f"FROM daily_metrics "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date <= ? AND dividend_yield IS NOT NULL "
+                f"GROUP BY stock_id",
+                (*sids, date),
+            ).fetchall()
+            fin_rows = conn.execute(
+                f"SELECT stock_id, period, eps FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='quarterly' AND eps IS NOT NULL "
+                f"ORDER BY stock_id, period DESC",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            yield_rows = conn.execute(
+                "SELECT stock_id, MAX(date) AS d, dividend_yield "
+                "FROM daily_metrics "
+                "WHERE date <= ? AND dividend_yield IS NOT NULL "
+                "GROUP BY stock_id",
+                (date,),
+            ).fetchall()
+            fin_rows = conn.execute(
+                "SELECT stock_id, period, eps FROM financials "
+                "WHERE period_type='quarterly' AND eps IS NOT NULL "
+                "ORDER BY stock_id, period DESC"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    yield_by_sid = {
+        r["stock_id"]: float(r["dividend_yield"])
+        for r in yield_rows if r["dividend_yield"] is not None
+    }
+    eps_by_sid: dict[str, list[float]] = {}
+    for r in fin_rows:
+        eps_by_sid.setdefault(r["stock_id"], []).append(
+            float(r["eps"]) if r["eps"] is not None else 0.0
+        )
+
+    rows: list[dict] = []
+    for sid in sids:
+        y = yield_by_sid.get(sid)
+        if y is None or y < yield_min:
+            continue
+        eps_list = eps_by_sid.get(sid, [])
+        if len(eps_list) < stable_q:
+            continue
+        if not all(e > 0 for e in eps_list[:stable_q]):
+            continue
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "dividend_yield": float(y),
+            "stable_quarters": stable_q,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
+# === Phase 1 新加策略 14:inst_oversold_reversal(法人減碼後反轉) ===
+
+def screen_inst_oversold_reversal(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 14:三大法人連 N 日淨賣超後當日轉買。
+
+    意義:法人短期殺低後反手承接,常見大戶調節結束訊號。
+    資料來源:institutional.total_buy_sell。覆蓋率:TOP_50 + watchlist。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_INST_REVERSAL_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "down_days", "matched_at",
+    ]
+    n_down = int(p["down_days"])
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            start_date = (
+                _date.fromisoformat(date) - _td(days=(n_down + 1) * 3)
+            ).isoformat()
+            inst_rows = conn.execute(
+                f"SELECT stock_id, date, total_buy_sell "
+                f"FROM institutional "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, date DESC",
+                (*sids, start_date, date),
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            start_date = (
+                _date.fromisoformat(date) - _td(days=(n_down + 1) * 3)
+            ).isoformat()
+            inst_rows = conn.execute(
+                "SELECT stock_id, date, total_buy_sell "
+                "FROM institutional "
+                "WHERE date BETWEEN ? AND ? "
+                "ORDER BY stock_id, date DESC",
+                (start_date, date),
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    inst_by_sid: dict[str, list[int]] = {}
+    for r in inst_rows:
+        inst_by_sid.setdefault(r["stock_id"], []).append(
+            int(r["total_buy_sell"] or 0)
+        )
+
+    rows: list[dict] = []
+    for sid in sids:
+        recs = inst_by_sid.get(sid, [])
+        if len(recs) < n_down + 1:
+            continue
+        # recs[0] = 最新一日(目標日);recs[1..n_down] = 前 N 日
+        if recs[0] <= 0:
+            continue
+        if not all(v < 0 for v in recs[1:n_down + 1]):
+            continue
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "down_days": n_down,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
+# === Phase 1 新加策略 15:taiex_alpha(個股獨立行情) ===
+
+def _load_taiex_pct_change(conn, date: str) -> float | None:
+    """撈 TAIEX 當日相對昨日 close 漲跌 %。沒資料回 None。"""
+    rows = conn.execute(
+        "SELECT date, close FROM daily_prices "
+        "WHERE stock_id='TAIEX' AND date <= ? "
+        "ORDER BY date DESC LIMIT 2",
+        (date,),
+    ).fetchall()
+    if len(rows) < 2 or rows[0]["date"] != date:
+        return None
+    prev = float(rows[1]["close"]) if rows[1]["close"] else 0.0
+    curr = float(rows[0]["close"]) if rows[0]["close"] else 0.0
+    if prev <= 0:
+        return None
+    return (curr - prev) / prev * 100
+
+
+def screen_taiex_alpha(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 15:TAIEX 當日 < 0,個股當日漲 > 1%(個股逆大盤強勢)。
+
+    意義:大盤跌而個股仍漲,通常代表獨立利多 / 強勢主力護盤。
+    """
+    p = {**DEFAULT_TAIEX_ALPHA_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "stock_pct", "taiex_pct", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    with db.get_conn() as conn:
+        taiex_pct = _load_taiex_pct_change(conn, date)
+        if taiex_pct is None or taiex_pct >= float(p["taiex_down_pct_max"]):
+            # 大盤沒資料 or 沒跌 → 整批回空
+            return pd.DataFrame(columns=cols)
+
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    rows: list[dict] = []
+    up_min = float(p["stock_up_pct_min"])
+    for sid in sids:
+        df = prices_by_sid.get(sid)
+        if df is None or len(df) < 2:
+            continue
+        if df["date"].iloc[-1] != date:
+            continue
+        curr = float(df["close"].iloc[-1])
+        prev = float(df["close"].iloc[-2])
+        if prev <= 0:
+            continue
+        stock_pct = (curr - prev) / prev * 100
+        if stock_pct < up_min:
+            continue
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": curr,
+            "stock_pct": float(stock_pct),
+            "taiex_pct": float(taiex_pct),
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
+# === Phase 1 新加策略 16:revenue_acceleration(月營收年增加速) ===
+
+def screen_revenue_acceleration(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 16:月營收 YoY > 30% 且當月 YoY > 上月 YoY(加速)。
+
+    意義:營收動能加速 — 月營收是台股最快公布的基本面數字(每月 10 號前)。
+    資料來源:financials.period_type='monthly_revenue',revenue_yoy 直接用。
+    """
+    p = {**DEFAULT_REV_ACCEL_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "curr_yoy", "prev_yoy", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    yoy_min = float(p["yoy_min_pct"])
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            rev_rows = conn.execute(
+                f"SELECT stock_id, period, revenue_yoy FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='monthly_revenue' "
+                f"AND revenue_yoy IS NOT NULL "
+                f"ORDER BY stock_id, period DESC",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            rev_rows = conn.execute(
+                "SELECT stock_id, period, revenue_yoy FROM financials "
+                "WHERE period_type='monthly_revenue' "
+                "AND revenue_yoy IS NOT NULL "
+                "ORDER BY stock_id, period DESC"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    rev_by_sid: dict[str, list[float]] = {}
+    for r in rev_rows:
+        rev_by_sid.setdefault(r["stock_id"], []).append(
+            float(r["revenue_yoy"])
+        )
+
+    rows: list[dict] = []
+    for sid in sids:
+        recs = rev_by_sid.get(sid, [])
+        if len(recs) < 2:
+            continue
+        curr_yoy = recs[0]
+        prev_yoy = recs[1]
+        if curr_yoy < yoy_min:
+            continue
+        if curr_yoy <= prev_yoy:
+            continue
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "curr_yoy": float(curr_yoy),
+            "prev_yoy": float(prev_yoy),
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -1069,6 +1571,12 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "inst_silent_accum": screen_inst_silent_accum,
     "volume_breakout": screen_volume_breakout,
     "gap_up": screen_gap_up,
+    # Phase 1 新加 5 個 strategies(基本面 / 殖利率 / 籌碼反轉 / 大盤 alpha / 營收)
+    "eps_acceleration": screen_eps_acceleration,
+    "high_yield_stable": screen_high_yield_stable,
+    "inst_oversold_reversal": screen_inst_oversold_reversal,
+    "taiex_alpha": screen_taiex_alpha,
+    "revenue_acceleration": screen_revenue_acceleration,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -1083,6 +1591,12 @@ STRATEGY_LABELS: dict[str, str] = {
     "inst_silent_accum": "主力默默吸貨",
     "volume_breakout": "量爆突破",
     "gap_up": "跳空缺口",
+    # Phase 1
+    "eps_acceleration": "EPS 加速",
+    "high_yield_stable": "高殖利率穩健",
+    "inst_oversold_reversal": "法人反轉",
+    "taiex_alpha": "獨立行情",
+    "revenue_acceleration": "營收加速",
 }
 
 

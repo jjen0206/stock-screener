@@ -1149,11 +1149,15 @@ _SHORT_PARAM_DEFAULTS: dict[str, float | int] = {
 }
 
 
-# 策略 → 分類(5 tabs 用)。同一策略只屬一類。
+# 策略 → 分類(短線頁 tabs 用)。同一策略只屬一類。
 # - 趨勢:多頭排列、MACD 黃金交叉、均線糾結突破(都是趨勢延續/啟動類訊號)
-# - 反轉:乖離收斂(超賣後修正)
-# - 籌碼:三大法人連買
-# - 動能:量價KD(量能 + KD 動能)
+# - 反轉:乖離收斂(超賣後修正)/ BB 下軌反彈 / RSI 回升
+# - 籌碼:三大法人連買 / 默默吸貨 / 法人反轉
+# - 動能:量價KD / 量爆突破 / 跳空缺口
+# Phase 1 加 3 類:
+# - 基本面:EPS 加速 / 營收加速
+# - 殖利率:高殖利率穩健
+# - 大盤:獨立行情(個股逆 TAIEX)
 _STRATEGY_CATEGORY: dict[str, str] = {
     "volume_kd": "動能",
     "ma_alignment": "趨勢",
@@ -1167,16 +1171,25 @@ _STRATEGY_CATEGORY: dict[str, str] = {
     "inst_silent_accum": "籌碼",
     "volume_breakout": "動能",
     "gap_up": "動能",
+    # Phase 1
+    "eps_acceleration": "基本面",
+    "high_yield_stable": "殖利率",
+    "inst_oversold_reversal": "籌碼",
+    "taiex_alpha": "大盤",
+    "revenue_acceleration": "基本面",
 }
 
 
-# 5 tabs 顏色(CSS injection 用)
+# tabs 顏色(CSS injection 用)。順序 = tab 顯示順序(全部 → 4 短線類 → 3 Phase 1 類)。
 _TAB_COLORS: dict[str, str] = {
     "全部": "#888888",
     "趨勢": "#185FA5",
     "反轉": "#1D9E75",
     "籌碼": "#7F77DD",
     "動能": "#BA7517",
+    "基本面": "#A53A3A",
+    "殖利率": "#3DA571",
+    "大盤": "#5B5B5B",
 }
 
 
@@ -1195,38 +1208,20 @@ def _filter_agg_by_category(
 
 
 def _inject_short_tab_css() -> None:
-    """注入短線頁 5 tabs 的顏色 CSS — 「選中」tab 的下方底線吃顏色,
+    """注入短線頁 tabs 的顏色 CSS — 「選中」tab 的下方底線吃顏色,
     讓使用者用顏色快速辨認當前在哪一類策略 tab 上。
-    Streamlit 的 tab nth-child:第 1=全部 / 2=趨勢 / 3=反轉 / 4=籌碼 / 5=動能。
-    用 :has(aria-selected="true") 鎖選中狀態,沒選中保持 streamlit 預設灰。
+    Streamlit 的 tab nth-child 跟 _TAB_COLORS dict 順序對齊,
+    新增 / 刪除 category 只改 _TAB_COLORS 即可。
     """
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stTabs"] button[role="tab"]:nth-child(1)[aria-selected="true"] {
-            color: #888888 !important;
-            border-bottom: 3px solid #888888 !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:nth-child(2)[aria-selected="true"] {
-            color: #185FA5 !important;
-            border-bottom: 3px solid #185FA5 !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:nth-child(3)[aria-selected="true"] {
-            color: #1D9E75 !important;
-            border-bottom: 3px solid #1D9E75 !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:nth-child(4)[aria-selected="true"] {
-            color: #7F77DD !important;
-            border-bottom: 3px solid #7F77DD !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:nth-child(5)[aria-selected="true"] {
-            color: #BA7517 !important;
-            border-bottom: 3px solid #BA7517 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    rules = []
+    for i, color in enumerate(_TAB_COLORS.values(), start=1):
+        rules.append(
+            f'div[data-testid="stTabs"] button[role="tab"]'
+            f':nth-child({i})[aria-selected="true"] {{ '
+            f'color: {color} !important; '
+            f'border-bottom: 3px solid {color} !important; }}'
+        )
+    st.markdown(f"<style>{''.join(rules)}</style>", unsafe_allow_html=True)
 
 
 def _reset_short_params() -> None:
@@ -1586,18 +1581,18 @@ def _page_short() -> None:
     # 其他 4 tab 走簡單卡片視圖,專注該類策略命中名單。
     _inject_short_tab_css()
 
+    # 從 _TAB_COLORS 取「全部」之外的 category(維持順序)
+    cat_order = [c for c in _TAB_COLORS.keys() if c != "全部"]
     cat_counts = {
         cat: len(_filter_agg_by_category(agg, cat))
-        for cat in ("趨勢", "反轉", "籌碼", "動能")
+        for cat in cat_order
     }
-    tab_labels = [
-        f"全部 ({len(agg)})",
-        f"趨勢 ({cat_counts['趨勢']})",
-        f"反轉 ({cat_counts['反轉']})",
-        f"籌碼 ({cat_counts['籌碼']})",
-        f"動能 ({cat_counts['動能']})",
+    tab_labels = [f"全部 ({len(agg)})"] + [
+        f"{cat} ({cat_counts[cat]})" for cat in cat_order
     ]
-    tab_all, tab_trend, tab_reverse, tab_chip, tab_momentum = st.tabs(tab_labels)
+    all_tabs = st.tabs(tab_labels)
+    tab_all = all_tabs[0]
+    cat_tabs = dict(zip(cat_order, all_tabs[1:]))
 
     selection = None  # 只「全部」tab 表格模式才有 selection
     with tab_all:
@@ -1657,12 +1652,7 @@ def _page_short() -> None:
                 },
             )
 
-    for tab_obj, cat in (
-        (tab_trend, "趨勢"),
-        (tab_reverse, "反轉"),
-        (tab_chip, "籌碼"),
-        (tab_momentum, "動能"),
-    ):
+    for cat, tab_obj in cat_tabs.items():
         with tab_obj:
             sub_agg = _filter_agg_by_category(agg, cat)
             if not sub_agg:

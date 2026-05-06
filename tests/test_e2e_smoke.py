@@ -712,9 +712,9 @@ def test_short_star_button_middle_card_binds_correctly(
 # 短線頁 5 tabs UI(全部/趨勢/反轉/籌碼/動能)
 # ============================================================================
 
-def test_short_renders_five_category_tabs(isolated_db, monkeypatch):
-    """執行選股後,短線頁必須 render 5 個 tabs(全部/趨勢/反轉/籌碼/動能),
-    各 tab 標籤帶該分類入選檔數。
+def test_short_renders_eight_category_tabs(isolated_db, monkeypatch):
+    """執行選股後,短線頁必須 render 8 個 tabs(全部/趨勢/反轉/籌碼/動能/
+    基本面/殖利率/大盤),各 tab 標籤帶該分類入選檔數(Phase 1 從 5 → 8 tabs)。
     """
     from src import database as db, strategies
 
@@ -773,19 +773,20 @@ def test_short_renders_five_category_tabs(isolated_db, monkeypatch):
     next(b for b in at.button if b.label == "執行選股").click().run()
     assert not at.exception, _exc_msgs(at)
 
-    # 抓 5 tabs(streamlit AppTest 把 tabs 暴露在 at.tabs)
+    # 抓 8 tabs(streamlit AppTest 把 tabs 暴露在 at.tabs)
     tabs = at.tabs
-    assert len(tabs) >= 5, f"期望 ≥5 tabs(可能多於 5,其他頁也有), got {len(tabs)}"
+    assert len(tabs) >= 8, f"期望 ≥8 tabs(可能多於 8,其他頁也有), got {len(tabs)}"
 
-    # 取最後 5 個(短線頁的 tabs 在 page render 末段)
-    short_tab_labels = [t.label for t in tabs[-5:]]
+    # 取最後 8 個(短線頁的 tabs 在 page render 末段)
+    short_tab_labels = [t.label for t in tabs[-8:]]
     assert short_tab_labels[0].startswith("全部"), (
         f"第 1 tab 應是『全部』, got {short_tab_labels[0]!r}"
     )
-    assert "趨勢" in short_tab_labels[1]
-    assert "反轉" in short_tab_labels[2]
-    assert "籌碼" in short_tab_labels[3]
-    assert "動能" in short_tab_labels[4]
+    expected_in_order = ["趨勢", "反轉", "籌碼", "動能", "基本面", "殖利率", "大盤"]
+    for i, exp in enumerate(expected_in_order, start=1):
+        assert exp in short_tab_labels[i], (
+            f"第 {i + 1} tab 應含 {exp!r}, got {short_tab_labels[i]!r}"
+        )
 
     # 各分類入選檔數正確(2330 同時是趨勢+動能,所以兩個 tab 都會 +1)
     assert "全部 (3)" in short_tab_labels[0]
@@ -832,24 +833,28 @@ def test_short_commit3_new_strategies_sliders_render(isolated_db):
     assert at.session_state["short_gap_vol_ratio"] == 1.5
 
 
-def test_short_eleven_strategies_registered():
-    """run_all_strategies 應認得全 11 套策略 keys。"""
+def test_short_sixteen_strategies_registered():
+    """run_all_strategies 應認得全 16 套策略 keys(11 短線 + 5 Phase 1)。"""
     from src import strategies as strat
 
-    assert len(strat.ALL_STRATEGIES) == 11
-    assert len(strat.STRATEGY_LABELS) == 11
+    assert len(strat.ALL_STRATEGIES) == 16
+    assert len(strat.STRATEGY_LABELS) == 16
     expected = {
+        # 短線 11
         "volume_kd", "ma_alignment", "bias_convergence",
         "macd_golden", "ma_squeeze_breakout", "inst_consensus",
         "bb_lower_rebound", "rsi_recovery", "inst_silent_accum",
         "volume_breakout", "gap_up",
+        # Phase 1 加 5
+        "eps_acceleration", "high_yield_stable", "inst_oversold_reversal",
+        "taiex_alpha", "revenue_acceleration",
     }
     assert set(strat.ALL_STRATEGIES.keys()) == expected
     assert set(strat.STRATEGY_LABELS.keys()) == expected
 
 
-def test_short_strategy_category_covers_all_eleven():
-    """app._STRATEGY_CATEGORY 必須涵蓋全 11 套策略,否則 5 tabs 篩選會漏。"""
+def test_short_strategy_category_covers_all_sixteen():
+    """app._STRATEGY_CATEGORY 必須涵蓋全 16 套策略,否則 tabs 篩選會漏。"""
     sys.modules.pop("app", None)
     import app as app_mod
     from src import strategies as strat
@@ -858,7 +863,7 @@ def test_short_strategy_category_covers_all_eleven():
     assert not missing, f"_STRATEGY_CATEGORY 漏了:{missing}"
     # 各 cat 都要有人(沒孤兒 cat)
     cats = set(app_mod._STRATEGY_CATEGORY.values())
-    assert cats == {"趨勢", "反轉", "籌碼", "動能"}
+    assert cats == {"趨勢", "反轉", "籌碼", "動能", "基本面", "殖利率", "大盤"}
 
 
 def test_short_filter_agg_by_category_logic():

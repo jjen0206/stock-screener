@@ -764,3 +764,240 @@ def test_gap_up_red_k_but_no_gap_fails(tmp_db):
     db.upsert_daily_prices(rows)
     df = strat.screen_gap_up(_DATES[6], stock_ids=["NOGAP"])
     assert df.empty
+
+
+# === 策略 12:eps_acceleration(Phase 1) ===
+
+def _seed_quarterly_eps(stock_id: str, eps_list: list[float]) -> None:
+    """灌 quarterly financials,eps_list 順序 = period 由舊到新。
+
+    period 用「YYYY-QN」風格但保排序正確的字串(SQLite ORDER BY DESC 會排 alphanum)。
+    """
+    db.upsert_stocks([{"stock_id": stock_id, "name": f"E{stock_id}", "market": "TW"}])
+    rows = []
+    for i, e in enumerate(eps_list):
+        # 用遞增 period 字串確保 ORDER BY DESC 正確(舊→新 = "2023-01" < "2024-04")
+        year = 2023 + (i // 4)
+        q = (i % 4) + 1
+        rows.append({
+            "stock_id": stock_id,
+            "period_type": "quarterly",
+            "period": f"{year}-Q{q}",
+            "revenue": None, "revenue_yoy": None,
+            "eps": e, "roe": None,
+        })
+    db.upsert_financials(rows)
+
+
+def test_eps_acceleration_yoy_accelerating_passes(tmp_db):
+    """連 2 季 YoY 都正,且當季 YoY > 上季 YoY → 入選。
+
+    8 季 EPS:Q1~Q4 (2023) = 1.0/1.0/1.0/1.0,Q5~Q8 (2024) = 1.5/1.8/2.4/3.6
+    當季 YoY (Q8 vs Q4) = (3.6-1.0)/1.0 = +260%
+    上季 YoY (Q7 vs Q3) = (2.4-1.0)/1.0 = +140%
+    260 > 140 → 加速。
+    """
+    eps = [1.0, 1.0, 1.0, 1.0, 1.5, 1.8, 2.4, 3.6]
+    _seed_quarterly_eps("EPSA", eps)
+    # 灌一筆 daily_prices 給 _enrich_with_targets 用 close
+    db.upsert_daily_prices([{
+        "stock_id": "EPSA", "date": _DATES[0],
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    df = strat.screen_eps_acceleration(_DATES[0], stock_ids=["EPSA"])
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["curr_yoy"] > row["prev_yoy"]
+    assert row["curr_yoy"] > 0 and row["prev_yoy"] > 0
+
+
+def test_eps_acceleration_decelerating_fails(tmp_db):
+    """YoY 都正但減速(curr_yoy < prev_yoy)→ 不入選。
+
+    Q5~Q8 = 3.0/2.5/2.0/1.5(YoY 正但每季成長率下滑)
+    """
+    eps = [1.0, 1.0, 1.0, 1.0, 3.0, 2.5, 2.0, 1.5]
+    _seed_quarterly_eps("EPSD", eps)
+    db.upsert_daily_prices([{
+        "stock_id": "EPSD", "date": _DATES[0],
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    df = strat.screen_eps_acceleration(_DATES[0], stock_ids=["EPSD"])
+    assert df.empty
+
+
+# === 策略 13:high_yield_stable(Phase 1) ===
+
+def test_high_yield_stable_yield_above_6_eps_positive_passes(tmp_db):
+    """殖利率 7% + 4 季 EPS 都 > 0 → 入選。"""
+    db.upsert_stocks([{"stock_id": "HYS", "name": "高殖利率", "market": "TW"}])
+    db.upsert_daily_metrics([{
+        "stock_id": "HYS", "date": _DATES[0],
+        "close": 100, "pe": 12, "pb": 1.5, "dividend_yield": 7.0,
+    }])
+    db.upsert_financials([
+        {"stock_id": "HYS", "period_type": "quarterly", "period": f"2024-Q{q}",
+         "revenue": None, "revenue_yoy": None, "eps": 1.5, "roe": None}
+        for q in range(1, 5)
+    ])
+    db.upsert_daily_prices([{
+        "stock_id": "HYS", "date": _DATES[0],
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    df = strat.screen_high_yield_stable(_DATES[0], stock_ids=["HYS"])
+    assert len(df) == 1
+    assert df.iloc[0]["dividend_yield"] == 7.0
+
+
+def test_high_yield_stable_eps_one_quarter_neg_fails(tmp_db):
+    """殖利率夠高但有一季 EPS < 0(獲利不穩)→ 不入選。"""
+    db.upsert_stocks([{"stock_id": "UNST", "name": "不穩", "market": "TW"}])
+    db.upsert_daily_metrics([{
+        "stock_id": "UNST", "date": _DATES[0],
+        "close": 100, "pe": 12, "pb": 1.5, "dividend_yield": 8.0,
+    }])
+    eps_vals = [1.0, -0.5, 1.0, 1.0]  # Q2 虧損
+    db.upsert_financials([
+        {"stock_id": "UNST", "period_type": "quarterly", "period": f"2024-Q{q}",
+         "revenue": None, "revenue_yoy": None, "eps": eps_vals[q - 1], "roe": None}
+        for q in range(1, 5)
+    ])
+    df = strat.screen_high_yield_stable(_DATES[0], stock_ids=["UNST"])
+    assert df.empty
+
+
+# === 策略 14:inst_oversold_reversal(Phase 1) ===
+
+def test_inst_oversold_reversal_3_down_then_buy_passes(tmp_db):
+    """前 3 日法人淨賣超 → 今日轉買 → 入選。"""
+    db.upsert_stocks([{"stock_id": "REV", "name": "反轉", "market": "TW"}])
+    # _DATES[0..3]:前 3 日賣 → 第 4 日買
+    insts = [
+        {"stock_id": "REV", "date": _DATES[0],
+         "foreign_buy_sell": -100, "trust_buy_sell": -50, "dealer_buy_sell": 0,
+         "total_buy_sell": -150},
+        {"stock_id": "REV", "date": _DATES[1],
+         "foreign_buy_sell": -200, "trust_buy_sell": 0, "dealer_buy_sell": -10,
+         "total_buy_sell": -210},
+        {"stock_id": "REV", "date": _DATES[2],
+         "foreign_buy_sell": -300, "trust_buy_sell": -50, "dealer_buy_sell": 0,
+         "total_buy_sell": -350},
+        {"stock_id": "REV", "date": _DATES[3],
+         "foreign_buy_sell": 200, "trust_buy_sell": 50, "dealer_buy_sell": 0,
+         "total_buy_sell": 250},
+    ]
+    db.upsert_institutional(insts)
+    db.upsert_daily_prices([{
+        "stock_id": "REV", "date": _DATES[3],
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    df = strat.screen_inst_oversold_reversal(_DATES[3], stock_ids=["REV"])
+    assert len(df) == 1
+    assert df.iloc[0]["down_days"] == 3
+
+
+def test_inst_oversold_reversal_no_prior_selling_fails(tmp_db):
+    """前 3 日法人都買超 + 今日繼續買 → 沒「反轉」訊號 → 不入選。"""
+    db.upsert_stocks([{"stock_id": "BULL", "name": "持續買", "market": "TW"}])
+    insts = [
+        {"stock_id": "BULL", "date": _DATES[i],
+         "foreign_buy_sell": 100, "trust_buy_sell": 50, "dealer_buy_sell": 0,
+         "total_buy_sell": 150}
+        for i in range(4)
+    ]
+    db.upsert_institutional(insts)
+    df = strat.screen_inst_oversold_reversal(_DATES[3], stock_ids=["BULL"])
+    assert df.empty
+
+
+# === 策略 15:taiex_alpha(Phase 1) ===
+
+def test_taiex_alpha_taiex_down_stock_up_passes(tmp_db):
+    """TAIEX 跌 1% / 個股漲 2% → 入選。"""
+    # TAIEX 灌兩天:昨日 17000 → 今日 16830(跌 1%)
+    db.upsert_daily_prices([
+        {"stock_id": "TAIEX", "date": _DATES[0],
+         "open": 17000, "high": 17000, "low": 17000, "close": 17000, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "TAIEX", "date": _DATES[1],
+         "open": 16830, "high": 16830, "low": 16830, "close": 16830, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    db.upsert_stocks([{"stock_id": "ALPHA", "name": "獨立股", "market": "TW"}])
+    db.upsert_daily_prices([
+        {"stock_id": "ALPHA", "date": _DATES[0],
+         "open": 100, "high": 100, "low": 100, "close": 100, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "ALPHA", "date": _DATES[1],
+         "open": 102, "high": 102, "low": 102, "close": 102, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    df = strat.screen_taiex_alpha(_DATES[1], stock_ids=["ALPHA"])
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["taiex_pct"] < 0
+    assert row["stock_pct"] >= 1.0
+
+
+def test_taiex_alpha_taiex_up_returns_empty(tmp_db):
+    """大盤上漲 → 整批不入選(策略 short-circuit)。"""
+    db.upsert_daily_prices([
+        {"stock_id": "TAIEX", "date": _DATES[0],
+         "open": 17000, "high": 17000, "low": 17000, "close": 17000, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "TAIEX", "date": _DATES[1],
+         "open": 17170, "high": 17170, "low": 17170, "close": 17170, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    db.upsert_stocks([{"stock_id": "X", "name": "X", "market": "TW"}])
+    db.upsert_daily_prices([
+        {"stock_id": "X", "date": _DATES[1],
+         "open": 102, "high": 102, "low": 102, "close": 102, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    df = strat.screen_taiex_alpha(_DATES[1], stock_ids=["X"])
+    assert df.empty
+
+
+# === 策略 16:revenue_acceleration(Phase 1) ===
+
+def test_revenue_acceleration_yoy_above_30_accelerating_passes(tmp_db):
+    """月營收 YoY 50% > 上月 35%(都 > 30% 且加速)→ 入選。"""
+    db.upsert_stocks([{"stock_id": "REV2", "name": "營收加速", "market": "TW"}])
+    # period 由新到舊在 ORDER BY DESC 後:2024-12 / 2024-11
+    db.upsert_financials([
+        {"stock_id": "REV2", "period_type": "monthly_revenue",
+         "period": "2024-11", "revenue": 1.0e8, "revenue_yoy": 35.0,
+         "eps": None, "roe": None},
+        {"stock_id": "REV2", "period_type": "monthly_revenue",
+         "period": "2024-12", "revenue": 1.5e8, "revenue_yoy": 50.0,
+         "eps": None, "roe": None},
+    ])
+    db.upsert_daily_prices([{
+        "stock_id": "REV2", "date": _DATES[0],
+        "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    }])
+    df = strat.screen_revenue_acceleration(_DATES[0], stock_ids=["REV2"])
+    assert len(df) == 1
+    assert df.iloc[0]["curr_yoy"] == 50.0
+    assert df.iloc[0]["prev_yoy"] == 35.0
+
+
+def test_revenue_acceleration_below_30_threshold_fails(tmp_db):
+    """月營收 YoY 25% < 30% → 不入選(不夠強)。"""
+    db.upsert_stocks([{"stock_id": "WEAK", "name": "弱", "market": "TW"}])
+    db.upsert_financials([
+        {"stock_id": "WEAK", "period_type": "monthly_revenue",
+         "period": "2024-11", "revenue": 1.0e8, "revenue_yoy": 20.0,
+         "eps": None, "roe": None},
+        {"stock_id": "WEAK", "period_type": "monthly_revenue",
+         "period": "2024-12", "revenue": 1.1e8, "revenue_yoy": 25.0,
+         "eps": None, "roe": None},
+    ])
+    df = strat.screen_revenue_acceleration(_DATES[0], stock_ids=["WEAK"])
+    assert df.empty
