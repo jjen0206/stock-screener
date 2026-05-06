@@ -18,8 +18,9 @@ concurrency:
 jobs:
   refetch:
     runs-on: ubuntu-latest
-    # daily_fetch ~5 分 + daily_market_update 全市場 ~30 分 + 緩衝
-    timeout-minutes: 60
+    # daily_fetch ~5 分 + daily_market_update 全市場 + monthly_revenue + dividend
+    # 增量(2026-05-06 主公拍板整合)~60-90 分,留 120 緩衝。
+    timeout-minutes: 120
     permissions:
       contents: write
 

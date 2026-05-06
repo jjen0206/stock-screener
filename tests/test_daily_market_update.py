@@ -63,10 +63,19 @@ def _fake_update_all_fail(stock_ids, on_progress=None):
     }
 
 
-def test_main_writes_4_csvs_on_success(tmp_env, monkeypatch):
-    """從 3 → 4 CSV(2026-05-06 加 daily_prices.csv 修 snapshot 漏抓 bug)。"""
+def test_main_writes_6_csvs_on_success(tmp_env, monkeypatch):
+    """從 4 → 6 CSV(2026-05-06 主公拍板把 monthly_revenue + dividend
+    整合進 daily,砍掉冗余 backfill-financials.yml workflow)。
+    """
+    # mock 兩個新 fetcher 不打網路
     monkeypatch.setattr(
         weekly, "update_long_term_data_free", _fake_update_success,
+    )
+    monkeypatch.setattr(
+        weekly, "fetch_monthly_revenue", lambda sid, s, e: None,
+    )
+    monkeypatch.setattr(
+        weekly, "fetch_dividend", lambda sid, s, e: None,
     )
     code = weekly.main()
     assert code == 0
@@ -74,10 +83,53 @@ def test_main_writes_4_csvs_on_success(tmp_env, monkeypatch):
     assert (snapshot / "daily_metrics.csv").exists()
     assert (snapshot / "financials_quarterly.csv").exists()
     assert (snapshot / "stocks.csv").exists()
-    # 守門:daily_prices.csv 必須被 dump,否則 snapshot 會卡在舊日期(主公報的 bug)
-    assert (snapshot / "daily_prices.csv").exists(), (
-        "daily_prices.csv 必須由 daily_market_update 每日 dump,"
-        "否則 daily_fetch 寫進 runner SQLite 的個股價格隨 runner 銷毀消失"
+    assert (snapshot / "daily_prices.csv").exists()
+    # 守門:monthly_revenue.csv 必須被 dump(原來只在 backfill-revenue 週跑)
+    assert (snapshot / "monthly_revenue.csv").exists(), (
+        "monthly_revenue.csv 必須由 daily_market_update 每日 dump"
+    )
+    # 守門:dividend.csv 必須被 dump(原來只在 backfill-dividend 週跑)
+    assert (snapshot / "dividend.csv").exists(), (
+        "dividend.csv 必須由 daily_market_update 每日 dump"
+    )
+
+
+def test_main_calls_fetch_monthly_revenue_per_stock(tmp_env, monkeypatch):
+    """守門:確認 daily_market_update 對 universe 每檔呼叫 fetch_monthly_revenue。"""
+    monkeypatch.setattr(
+        weekly, "update_long_term_data_free", _fake_update_success,
+    )
+    rev_calls: list[str] = []
+    monkeypatch.setattr(
+        weekly, "fetch_monthly_revenue",
+        lambda sid, s, e: rev_calls.append(sid),
+    )
+    monkeypatch.setattr(
+        weekly, "fetch_dividend", lambda sid, s, e: None,
+    )
+    weekly.main()
+    # universe = TW_TOP_50 fallback(SQLite 空)→ 50 檔該被呼叫
+    assert len(rev_calls) == 50, (
+        f"期望 50 個 monthly_revenue 呼叫(TW_TOP_50),實際 {len(rev_calls)}"
+    )
+
+
+def test_main_calls_fetch_dividend_per_stock(tmp_env, monkeypatch):
+    """守門:確認 daily_market_update 對 universe 每檔呼叫 fetch_dividend。"""
+    monkeypatch.setattr(
+        weekly, "update_long_term_data_free", _fake_update_success,
+    )
+    div_calls: list[str] = []
+    monkeypatch.setattr(
+        weekly, "fetch_monthly_revenue", lambda sid, s, e: None,
+    )
+    monkeypatch.setattr(
+        weekly, "fetch_dividend",
+        lambda sid, s, e: div_calls.append(sid),
+    )
+    weekly.main()
+    assert len(div_calls) == 50, (
+        f"期望 50 個 dividend 呼叫(TW_TOP_50),實際 {len(div_calls)}"
     )
 
 

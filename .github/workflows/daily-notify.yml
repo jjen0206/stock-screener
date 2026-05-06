@@ -21,8 +21,10 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     # 全市場 ~2360 檔 bulk + institutional ~70 檔 + daily_market_update 全市場
-    # 財報抓取(~2060 檔 × ~1 秒 ≈ 30 分鐘)。總時長預估 ~40 分,留 60 緩衝。
-    timeout-minutes: 60
+    # 財報 + monthly_revenue + dividend 增量(2026-05-06 主公拍板整合進來)。
+    # 總時長預估 ~60-90 分(quarterly EPS ~30 + revenue/dividend ~15-30 增量),
+    # 留 120 緩衝。
+    timeout-minutes: 120
     permissions:
       contents: write  # 給後面 commit + push snapshot CSV 用
 
