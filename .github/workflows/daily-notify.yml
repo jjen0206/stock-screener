@@ -46,20 +46,56 @@ jobs:
         continue-on-error: true
         run: python -m ruff check src/ scripts/ app.py
 
+      # === Step 1: 抓今日 OHLC + 法人(快,~30 秒)===
       - name: Fetch top-50 daily data (price + institutional)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/daily_fetch.py
 
-      # 此 step 會更新 data/twse_snapshot/ CSV 並 commit
-      # (continue-on-error 保證即使失敗推播仍跑;Streamlit Cloud IP 被 TWSE 擋,
-      # GitHub Actions Azure IP 不被擋,所以這裡是 TWSE 資料的主要來源)
+      # === Step 2: 預跑策略(用今日剛抓的 OHLC,~3 分鐘)===
+      # 預跑 default-params 全 16 strategies × 3 universe → SQLite daily_picks 表
+      # + dump 成 data/twse_snapshot/daily_picks.csv 給 streamlit cloud preload。
+      # 雲端 App boot 後 _run_all_strategies_cached 命中 SQLite → 0ms 回(取代
+      # 每次 user 開頁重算 ~338ms~11s)。
+      # continue-on-error:precompute 失敗(SQLite 沒歷史等)不該擋推播 step。
+      - name: Precompute strategies (default params)
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/precompute_strategies.py
+
+      # === Step 3: ★★ 推播 ★★(移到前面確保 push 必達)===
+      # 2026-05-06 主公拍板:notify step 從尾部移到 daily_market_update 之前。
+      # 原因:daily_market_update 跑全市場財報 ~15 min,若撞 120 min timeout
+      # 先前的 step 全部 cancelled → 推播也沒跑。把推播移到 fetch + precompute
+      # 之後 / market_update 之前,確保主公手機一定收到訊息。
+      - name: Run daily notify
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            python scripts/daily_notify.py --date "${{ inputs.date }}"
+          else
+            python scripts/daily_notify.py
+          fi
+
+      # === Step 4: 抓全市場財報 + dump 6 CSVs(~10-15 分鐘)===
+      # 此 step 會更新 data/twse_snapshot/ CSV 並由下一 step commit
+      # (continue-on-error 保證即使失敗推播 / precompute 仍已跑;Streamlit
+      # Cloud IP 被 TWSE 擋,GitHub Actions Azure IP 不被擋,所以這裡是 TWSE
+      # 資料的主要來源)
+      # 2026-05-06 主公拍板拆 monthly_revenue + dividend 出去(改 weekly
+      # backfill 跑),此 step 從 2h+ → ~15 min。
       - name: Fetch TWSE OpenAPI market data (refresh snapshot)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/daily_market_update.py
         continue-on-error: true
 
+      # === Step 5: Commit 全部 snapshot 改動(daily_picks + market_update 一起)===
       - name: Commit snapshot CSV if changed
         continue-on-error: true
         run: |
@@ -73,33 +109,11 @@ jobs:
             git push
           fi
 
-      # 預跑 default-params 全 11 strategies × 3 universe → SQLite daily_picks 表
-      # + dump 成 data/twse_snapshot/daily_picks.csv 給 streamlit cloud preload。
-      # 雲端 App boot 後 _run_all_strategies_cached 命中 SQLite → 0ms 回(取代
-      # 每次 user 開頁重算 ~338ms~11s)。
-      # continue-on-error:precompute 失敗(SQLite 沒歷史等)不該擋推播 step。
-      - name: Precompute strategies (default params)
-        continue-on-error: true
-        env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python scripts/precompute_strategies.py
-
-      - name: Commit precompute snapshot if changed
-        continue-on-error: true
-        run: |
-          git add data/twse_snapshot/daily_picks.csv || true
-          if git diff --quiet --staged; then
-            echo "No daily_picks snapshot changes to commit"
-          else
-            git commit -m "chore(precompute): daily strategies snapshot [skip ci]"
-            git push
-          fi
-
-      # 歷史回測勝率(只週一跑)— 跑 default params 全 11 strategies 過去 126
-      # 個交易日,寫進 strategy_backtest 表 + dump CSV。週二~五 skip 避免每天
-      # 浪費 CI 時間(回測本身比 precompute 慢很多,多檔 × 多日 × screener)。
+      # === Step 6: 歷史回測勝率(只週一跑)===
+      # 跑 default params 全 16 strategies 過去 126 個交易日,寫進
+      # strategy_backtest 表 + dump CSV。週二~五 skip 避免每天浪費 CI 時間。
       # cron 14:13 UTC,週一在 UTC 也是週一(date -u +%w == "1")。
-      # continue-on-error:回測失敗不擋推播 step。
+      # continue-on-error:回測失敗不擋整體 workflow。
       - name: Backtest strategies (Mondays only)
         continue-on-error: true
         env:
@@ -122,17 +136,4 @@ jobs:
           else
             git commit -m "chore(backtest): weekly strategies backtest snapshot [skip ci]"
             git push
-          fi
-
-      - name: Run daily notify
-        env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          if [ -n "${{ inputs.date }}" ]; then
-            python scripts/daily_notify.py --date "${{ inputs.date }}"
-          else
-            python scripts/daily_notify.py
           fi

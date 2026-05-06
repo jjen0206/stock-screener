@@ -63,20 +63,14 @@ def _fake_update_all_fail(stock_ids, on_progress=None):
     }
 
 
-def test_main_writes_7_csvs_on_success(tmp_env, monkeypatch):
-    """從 6 → 7 CSV(2026-05-06 加 institutional.csv dump 修同 daily_prices bug)。
-
-    institutional.csv 原本只 backfill-history.yml(workflow_dispatch 手動)會 dump,
-    daily-notify / morning-refetch 寫進 SQLite 的法人籌碼隨 runner 銷毀消失。
+def test_main_writes_6_csvs_on_success(tmp_env, monkeypatch):
+    """從 7 → 6 CSV(2026-05-06 主公 revert:拆掉 monthly_revenue + dividend
+    daily 抓的整合 — 跑全市場 ~2060 檔 × FinMind throttle 把 daily-notify
+    拉到 2h+ 撞 120 min timeout。改回 weekly backfill-revenue / backfill-dividend
+    各自 8-shard 跑)。
     """
     monkeypatch.setattr(
         weekly, "update_long_term_data_free", _fake_update_success,
-    )
-    monkeypatch.setattr(
-        weekly, "fetch_monthly_revenue", lambda sid, s, e: None,
-    )
-    monkeypatch.setattr(
-        weekly, "fetch_dividend", lambda sid, s, e: None,
     )
     code = weekly.main()
     assert code == 0
@@ -85,51 +79,13 @@ def test_main_writes_7_csvs_on_success(tmp_env, monkeypatch):
     assert (snapshot / "financials_quarterly.csv").exists()
     assert (snapshot / "stocks.csv").exists()
     assert (snapshot / "daily_prices.csv").exists()
-    assert (snapshot / "monthly_revenue.csv").exists()
-    assert (snapshot / "dividend.csv").exists()
-    # 守門:institutional.csv 必須被 dump(同 daily_prices 修法 pattern)
-    assert (snapshot / "institutional.csv").exists(), (
-        "institutional.csv 必須由 daily_market_update 每日 dump,"
-        "否則 daily_fetch 寫進 runner SQLite 的法人籌碼隨 runner 銷毀消失"
+    assert (snapshot / "institutional.csv").exists()
+    # 守門 revert:monthly_revenue / dividend 不該由 daily 寫(改 weekly backfill)
+    assert not (snapshot / "monthly_revenue.csv").exists(), (
+        "monthly_revenue.csv 不該由 daily 寫,2026-05-06 revert 拆走"
     )
-
-
-def test_main_calls_fetch_monthly_revenue_per_stock(tmp_env, monkeypatch):
-    """守門:確認 daily_market_update 對 universe 每檔呼叫 fetch_monthly_revenue。"""
-    monkeypatch.setattr(
-        weekly, "update_long_term_data_free", _fake_update_success,
-    )
-    rev_calls: list[str] = []
-    monkeypatch.setattr(
-        weekly, "fetch_monthly_revenue",
-        lambda sid, s, e: rev_calls.append(sid),
-    )
-    monkeypatch.setattr(
-        weekly, "fetch_dividend", lambda sid, s, e: None,
-    )
-    weekly.main()
-    # universe = TW_TOP_50 fallback(SQLite 空)→ 50 檔該被呼叫
-    assert len(rev_calls) == 50, (
-        f"期望 50 個 monthly_revenue 呼叫(TW_TOP_50),實際 {len(rev_calls)}"
-    )
-
-
-def test_main_calls_fetch_dividend_per_stock(tmp_env, monkeypatch):
-    """守門:確認 daily_market_update 對 universe 每檔呼叫 fetch_dividend。"""
-    monkeypatch.setattr(
-        weekly, "update_long_term_data_free", _fake_update_success,
-    )
-    div_calls: list[str] = []
-    monkeypatch.setattr(
-        weekly, "fetch_monthly_revenue", lambda sid, s, e: None,
-    )
-    monkeypatch.setattr(
-        weekly, "fetch_dividend",
-        lambda sid, s, e: div_calls.append(sid),
-    )
-    weekly.main()
-    assert len(div_calls) == 50, (
-        f"期望 50 個 dividend 呼叫(TW_TOP_50),實際 {len(div_calls)}"
+    assert not (snapshot / "dividend.csv").exists(), (
+        "dividend.csv 不該由 daily 寫,改 weekly backfill-dividend.yml 跑"
     )
 
 

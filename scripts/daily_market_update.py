@@ -36,12 +36,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
-from src.data_fetcher import (  # noqa: E402
-    FinMindAPIError,
-    fetch_daily_price,
-    fetch_dividend,
-    fetch_monthly_revenue,
-)
+from src.data_fetcher import fetch_daily_price  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
 from src.universe import TW_TOP_50, pure_stock_universe  # noqa: E402
 
@@ -50,50 +45,12 @@ SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
 # TAIEX 抓多少天(週 K MA20 = 20 週 = 100 trading days,200 天 calendar 留緩衝)
 _TAIEX_BACKFILL_DAYS = 200
 
-# monthly_revenue / dividend 增量 lookback(走 sync_log,有 cache 不重抓)
-_REVENUE_BACKFILL_YEARS = 5      # eps_acceleration 策略需 5 季 = 1.25 年但留緩衝
-_DIVIDEND_BACKFILL_YEARS = 5     # high_yield_stable 策略看穩定配息
-
-
-def _incremental_fetch_loop(
-    universe: list[str],
-    start: str,
-    today: str,
-    fetch_fn,
-    label: str,
-) -> tuple[int, int]:
-    """通用 batch 增量 fetcher — sync_log cache hit 直接 skip,只 miss 才打 API。
-
-    fetch_fn 是 fetch_dividend / fetch_monthly_revenue,簽章 (sid, start, end)。
-    回 (ok, fail)。失敗不阻塞(主公只想盡力收最新就好)。
-    """
-    import time as _time
-    ok = fail = 0
-    n = len(universe)
-    t0 = _time.time()
-    for i, sid in enumerate(universe, start=1):
-        try:
-            fetch_fn(sid, start, today)
-            ok += 1
-        except FinMindAPIError as e:
-            fail += 1
-            if fail <= 3:
-                print(f"[DAILY/{label}] {sid} fail: {e}", flush=True)
-        except Exception as e:  # noqa: BLE001
-            fail += 1
-            if fail <= 3:
-                print(
-                    f"[DAILY/{label}] {sid} fail: {type(e).__name__}: {e}",
-                    flush=True,
-                )
-        if i % 200 == 0 or i == n:
-            elapsed = _time.time() - t0
-            print(
-                f"[DAILY/{label}] {i}/{n} (ok={ok} fail={fail}, "
-                f"{elapsed:.1f}s)",
-                flush=True,
-            )
-    return ok, fail
+# monthly_revenue + dividend 不在 daily 抓 — 2026-05-06 主公發現整合進來會撞
+# 120 min workflow timeout(全市場 ~2060 檔 × FinMind throttle)。改回:
+#   - backfill-revenue.yml  週一 22:13 cron 8-shard 全市場
+#   - backfill-dividend.yml 週日 22:13 cron 8-shard 全市場
+# 兩者本質上都是月 / 年級資料,週跑 1 次足夠。daily-notify 拿掉這兩個 fetch
+# 後跑時長從 2h+ → ~15 min。
 
 
 def main() -> int:
@@ -221,60 +178,10 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"[DAILY] TAIEX 抓取 fail (繼續):{type(e).__name__}: {e}", flush=True)
 
-    # 6 + 7. monthly_revenue + dividend 增量(主公拍板砍 backfill-financials,
-    # 把這兩個整合進 daily 22:13 + 09:30 補抓,sync_log cache hit 高 → 實際每天
-    # 只 fetch 真正缺的(月初 ~50-200 檔月營收 / 除息日附近 ~10 檔配息)。
-    # 失敗 continue,quarterly_eps / daily_metrics 已成功就讓 daily_market_update
-    # exit 0 不擋推播。
-    today_iso = _date.today().isoformat()
-
-    # 6. monthly_revenue 增量(eps_acceleration / revenue_acceleration 策略需)
-    rev_start = (
-        _date.today() - _td(days=_REVENUE_BACKFILL_YEARS * 365 + 30)
-    ).isoformat()
-    print(
-        f"[DAILY] 抓 monthly_revenue 增量({len(sids)} 檔,{rev_start}~{today_iso})...",
-        flush=True,
-    )
-    rev_ok, rev_fail = _incremental_fetch_loop(
-        sids, rev_start, today_iso, fetch_monthly_revenue, "REV",
-    )
-
-    # 7. dividend 增量(high_yield_stable / 長線存股策略需)
-    div_start = (
-        _date.today() - _td(days=_DIVIDEND_BACKFILL_YEARS * 365 + 30)
-    ).isoformat()
-    print(
-        f"[DAILY] 抓 dividend 增量({len(sids)} 檔,{div_start}~{today_iso})...",
-        flush=True,
-    )
-    div_ok, div_fail = _incremental_fetch_loop(
-        sids, div_start, today_iso, fetch_dividend, "DIV",
-    )
-
-    # Dump monthly_revenue + dividend CSV
-    monthly_revenue_rows = 0
-    dividend_rows = 0
-    with db.get_conn() as conn:
-        df = pd.read_sql(
-            "SELECT stock_id, period, revenue, revenue_yoy FROM financials "
-            "WHERE period_type='monthly_revenue' "
-            "ORDER BY stock_id, period",
-            conn,
-        )
-        path = SNAPSHOT_DIR / "monthly_revenue.csv"
-        df.to_csv(path, index=False)
-        monthly_revenue_rows = len(df)
-        print(f"[DAILY] 寫 {path.name}: {monthly_revenue_rows} 行", flush=True)
-
-        df = pd.read_sql(
-            "SELECT * FROM dividend ORDER BY stock_id, year",
-            conn,
-        )
-        path = SNAPSHOT_DIR / "dividend.csv"
-        df.to_csv(path, index=False)
-        dividend_rows = len(df)
-        print(f"[DAILY] 寫 {path.name}: {dividend_rows} 行", flush=True)
+    # monthly_revenue / dividend 不在這 daily script 抓 — 2026-05-06 主公拍板
+    # 砍掉,改回 backfill-revenue.yml(週一)+ backfill-dividend.yml(週日)
+    # 各自 8-shard 全市場跑。原因:整合進 daily 全市場 ~2060 檔 × FinMind quota
+    # throttle 把 daily-notify 拉到 2h+ 撞 120 min workflow timeout。
 
     # watchlist.csv 不再由 weekly 維護;改由雲端 app 推到 watchlist-sync 分支
     # (見 src/github_sync.py)。main 上的 watchlist.csv 保留為 seed。
@@ -290,13 +197,7 @@ def main() -> int:
         f"eps_rows={result['success_eps'].__len__()}\n"
         f"daily_prices_rows={daily_prices_rows}\n"
         f"institutional_rows={institutional_rows}\n"
-        f"taiex_rows={taiex_rows}\n"
-        f"monthly_revenue_rows={monthly_revenue_rows}\n"
-        f"dividend_rows={dividend_rows}\n"
-        f"revenue_fetch_ok={rev_ok}\n"
-        f"revenue_fetch_fail={rev_fail}\n"
-        f"dividend_fetch_ok={div_ok}\n"
-        f"dividend_fetch_fail={div_fail}\n",
+        f"taiex_rows={taiex_rows}\n",
         encoding="utf-8",
     )
     print("[DAILY] 寫 last_update.txt", flush=True)
