@@ -1756,6 +1756,43 @@ def aggregated_to_dataframe(agg: dict[str, dict]) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+# === 大盤環境感知:策略 → 類別 → regime 過濾 ===
+# 這份是 strategies.py 的「真實來源」(app.py 的 _STRATEGY_CATEGORY 為 UI tab 顏色用,
+# 一致;但這份對 src/* 模組可見,讓 market_regime.filter_strategies_by_regime 用)。
+STRATEGY_CATEGORY: dict[str, str] = {
+    "volume_kd": "動能",
+    "ma_alignment": "趨勢",
+    "bias_convergence": "反轉",
+    "macd_golden": "趨勢",
+    "ma_squeeze_breakout": "趨勢",
+    "inst_consensus": "籌碼",
+    "bb_lower_rebound": "反轉",
+    "rsi_recovery": "反轉",
+    "inst_silent_accum": "籌碼",
+    "volume_breakout": "動能",
+    "gap_up": "動能",
+    # Phase 1 加 5 個策略的分類
+    "eps_acceleration": "基本面",
+    "high_yield_stable": "殖利率",
+    "inst_oversold_reversal": "籌碼",
+    "taiex_alpha": "大盤",
+    "revenue_acceleration": "基本面",
+}
+
+# regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
+# 設計依據:
+#   bull:大盤多頭趨勢,所有策略都吃得到順風,無過濾
+#   weak_bull:大盤弱勢但未跌破 MA60,趨勢策略風險高,留反轉/基本面/殖利率/動能
+#   sideways:盤整 chopping,趨勢策略最容易雙吐,留反轉/籌碼選個股 alpha
+#   bear:空頭環境,只剩防禦性的籌碼/殖利率/獨立行情(逆勢個股)能搏
+STRATEGY_REGIME_FILTER: dict[str, set[str] | None] = {
+    "bull":      None,
+    "weak_bull": {"反轉", "基本面", "殖利率", "動能"},
+    "sideways":  {"反轉", "籌碼"},
+    "bear":      {"籌碼", "殖利率", "大盤"},
+}
+
+
 __all__ = [
     "screen_volume_kd",
     "screen_ma_alignment",
@@ -1773,6 +1810,8 @@ __all__ = [
     "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
+    "STRATEGY_CATEGORY",
+    "STRATEGY_REGIME_FILTER",
     "STRATEGY_ML_THRESHOLDS",
     "STRATEGY_RR_PARAMS",
     "DEFAULT_RR_PARAMS",

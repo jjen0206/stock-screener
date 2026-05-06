@@ -1237,14 +1237,53 @@ def _reset_short_params() -> None:
 def _page_short() -> None:
     st.header("🔥 短線推薦")
 
+    # 大盤環境感知:讀 TAIEX MA20/MA60 算 regime → 預設只開該 regime 適合的策略類別
+    from src.market_regime import compute_regime, filter_strategies_by_regime
+    from src.strategies import STRATEGY_CATEGORY, STRATEGY_REGIME_FILTER
+    regime_info = compute_regime()
+    regime = regime_info["regime"]
+
+    # 頁頂 + sidebar 都顯示 regime 徽章
+    badge_text = f"{regime_info['badge_emoji']} {regime_info['label']}"
+    if regime_info["close"] is not None:
+        st.caption(
+            f"**大盤環境**:{badge_text}  "
+            f"(TAIEX 收 {regime_info['close']:.0f} / "
+            f"MA20 {regime_info['ma20']:.0f} / MA60 {regime_info['ma60']:.0f})"
+        )
+    else:
+        st.caption(f"**大盤環境**:{badge_text}(資料不足 60 天,全策略開)")
+
+    st.sidebar.markdown(f"### 大盤 {badge_text}")
+    regime_override = st.sidebar.checkbox(
+        "🌐 無視大盤環境(全策略開)",
+        value=False,
+        help="勾選 = 不依 regime 篩策略類別,所有 16 套都開(主公手動 override)",
+    )
+
     # sidebar 多策略選擇
     st.sidebar.markdown("### 啟用策略")
     label_to_key = {v: k for k, v in STRATEGY_LABELS.items()}
+    # 算當前 regime 該預設開哪些策略(override 或 unknown 則全開)
+    if regime_override or regime == "unknown":
+        regime_default_keys = list(STRATEGY_LABELS.keys())
+    else:
+        regime_default_keys = filter_strategies_by_regime(
+            list(STRATEGY_LABELS.keys()),
+            regime,
+            STRATEGY_CATEGORY,
+            STRATEGY_REGIME_FILTER,
+        )
+    regime_default_labels = [STRATEGY_LABELS[k] for k in regime_default_keys]
+
     selected_labels = st.sidebar.multiselect(
         "策略",
         list(STRATEGY_LABELS.values()),
-        default=list(STRATEGY_LABELS.values()),
-        help="多選 = 多策略並行,信號越多 = 越多策略同時看好",
+        default=regime_default_labels,
+        help=(
+            "多選 = 多策略並行,信號越多 = 越多策略同時看好。"
+            f"預設依大盤 {regime_info['label']} 過濾類別,可自行勾選或勾上方 override 全開。"
+        ),
     )
     enabled_keys = [label_to_key[lbl] for lbl in selected_labels]
 
