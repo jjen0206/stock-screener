@@ -124,3 +124,105 @@ def test_get_intraday_quote_handles_yfinance_exception():
 def pytest_approx(value):
     import pytest as _p
     return _p.approx(value)
+
+
+# === 守門 tests:確保 intraday 注入不覆蓋 close / change_pct(主公報的 bug) ===
+
+def test_inject_intraday_does_not_overwrite_row_close():
+    """Guard:_inject_intraday_quotes 該只塞 row['intraday_quote'],
+    不該動 row['close'] 或 row['change_pct']。回歸測試。
+    """
+    import sys
+    sys.modules.pop("app", None)
+    import app as _app
+    from unittest.mock import patch
+
+    rows = [
+        {"stock_id": "2484", "close": 42.55, "change_pct": -1.62},
+        {"stock_id": "2330", "close": 600.0, "change_pct": 0.5},
+    ]
+    fake_quotes = {
+        "2484": {"current": 39.55, "change_pct": -7.05,
+                 "prev_close": 42.55, "volume": 1000, "timestamp": 1},
+        "2330": {"current": 595.0, "change_pct": -0.83,
+                 "prev_close": 600.0, "volume": 2000, "timestamp": 2},
+    }
+
+    # 讓 is_market_hours 永遠 True 跟 _get_intraday_cached mock 回 fake_quotes
+    with patch("src.intraday.is_market_hours", return_value=True), \
+         patch.object(_app, "_get_intraday_cached", return_value=fake_quotes):
+        out = _app._inject_intraday_quotes(rows, ["2484", "2330"])
+
+    assert out is rows  # in-place mutation
+    # 關鍵守門:close / change_pct 仍是 daily 值,沒被 intraday 蓋
+    assert out[0]["close"] == 42.55, "row[0] close 不該被 intraday 覆蓋"
+    assert out[0]["change_pct"] == -1.62, "row[0] change_pct 不該被 intraday 覆蓋"
+    assert out[1]["close"] == 600.0
+    assert out[1]["change_pct"] == 0.5
+    # intraday_quote 該注入到獨立 key
+    assert out[0]["intraday_quote"]["current"] == 39.55
+    assert out[1]["intraday_quote"]["current"] == 595.0
+
+
+def test_inject_intraday_skip_outside_market_hours():
+    """非交易時段 → 不注入 intraday_quote(節省 yfinance quota)。"""
+    import sys
+    sys.modules.pop("app", None)
+    import app as _app
+    from unittest.mock import patch
+
+    rows = [{"stock_id": "2484", "close": 42.55, "change_pct": -1.62}]
+
+    with patch("src.intraday.is_market_hours", return_value=False):
+        out = _app._inject_intraday_quotes(rows, ["2484"])
+
+    assert "intraday_quote" not in out[0], "非交易時段不該注入"
+    assert out[0]["close"] == 42.55  # 仍不該動
+
+
+def test_render_pick_card_keeps_close_and_adds_intraday_line():
+    """Guard:render_pick_card 同時 render 昨收(in card HTML)和 📡 盤中行(獨立)。
+
+    主公曾報「股價欄被改成盤中價」— 這個 test 鎖定 close 跟 intraday 兩數字
+    都該出現在 markdown call 內,不互相覆蓋。
+    """
+    from unittest.mock import patch, MagicMock
+    from src import ui_cards
+
+    # 抓所有 st.markdown 呼叫的內容
+    captured: list[str] = []
+
+    fake_st = MagicMock()
+    fake_st.markdown = lambda content, **kwargs: captured.append(str(content))
+    fake_st.button = lambda *a, **kw: False
+    fake_st.caption = lambda *a, **kw: None
+    fake_st.session_state = {}
+    fake_container = MagicMock()
+    fake_container.__enter__ = MagicMock(return_value=fake_container)
+    fake_container.__exit__ = MagicMock(return_value=False)
+    fake_st.container = MagicMock(return_value=fake_container)
+
+    fake_col = MagicMock()
+    fake_col.__enter__ = MagicMock(return_value=fake_col)
+    fake_col.__exit__ = MagicMock(return_value=False)
+    fake_st.columns = MagicMock(return_value=[fake_col, fake_col, fake_col])
+
+    row = {
+        "stock_id": "2484",
+        "name": "希華",
+        "close": 42.55,
+        "change_pct": -1.62,
+        "intraday_quote": {"current": 39.55, "change_pct": -7.05,
+                           "prev_close": 42.55, "volume": 1000, "timestamp": 1},
+    }
+
+    with patch.object(ui_cards, "st", fake_st):
+        ui_cards.render_pick_card(
+            row, show_change=True, show_targets=False, show_signal=False,
+        )
+
+    all_md = "\n".join(captured)
+    # 關鍵守門:42.55(昨收)跟 39.55(盤中)該同時出現
+    assert "42.55" in all_md, f"昨收 42.55 該在 card HTML 裡,實際: {all_md}"
+    assert "39.55" in all_md, f"盤中 39.55 該在 📡 line 裡,實際: {all_md}"
+    assert "📡" in all_md, "📡 emoji 該在 intraday 行"
