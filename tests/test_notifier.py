@@ -461,6 +461,42 @@ def test_format_pick_block_no_ml_prob_skips_line():
     assert "期望值" not in block  # ev 也算不出
 
 
+# === 產業 badge(2026-05-06 主公拍板加) ===
+
+def test_format_pick_block_includes_hot_industry():
+    """industry_heat ≥ 3 → 顯 🔥 [類別] 加 bold + (今日 N 檔同類)。"""
+    pick = _make_top_pick()
+    pick["industry"] = "半導體業"
+    pick["industry_heat"] = 5
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "🔥" in block, "industry_heat ≥ 3 該顯 🔥 emoji"
+    assert "半導體業" in block
+    assert "今日 5 檔同類" in block
+    # Telegram bold(單星)
+    assert "*半導體業*" in block
+
+
+def test_format_pick_block_includes_normal_industry():
+    """industry_heat < 3 → 顯 🏭 [類別](灰色 normal label,沒「同類」尾段)。"""
+    pick = _make_top_pick()
+    pick["industry"] = "水泥工業"
+    pick["industry_heat"] = 2
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "🏭" in block
+    assert "水泥工業" in block
+    assert "🔥" not in block
+    assert "同類" not in block  # heat < 3 不加「同類」尾段
+
+
+def test_format_pick_block_skip_when_no_industry():
+    """沒 industry 欄(舊 caller / 個股 industry IS NULL)→ 不顯 industry 行。"""
+    pick = _make_top_pick()
+    # 不設 industry / industry_heat
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "🔥" not in block
+    assert "🏭" not in block
+
+
 def test_format_top_picks_message_includes_separator_and_stats():
     picks = [_make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)]
     msg = notifier.format_top_picks_message(

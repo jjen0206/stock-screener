@@ -223,6 +223,29 @@ def _select_top_picks(
                 if row and row["close"]:
                     prev_close_map[sid] = float(row["close"])
 
+    # 撈每檔 industry + 算 industry_heat(同此批 picks 內同產業 fire 數)
+    # 走相同 logic 跟 strategies.enrich_with_industry_heat 對齊。
+    qualified_sids = [
+        sid for sid, info in agg.items()
+        if len(list((info.get("details") or {}).keys())) >= confluence_n
+    ]
+    industries_map: dict[str, str] = {}
+    if qualified_sids:
+        placeholders = ",".join("?" * len(qualified_sids))
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT stock_id, industry FROM stocks "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND industry IS NOT NULL AND industry != ''",
+                qualified_sids,
+            ).fetchall()
+        industries_map = {r["stock_id"]: r["industry"] for r in rows}
+    industry_counts: dict[str, int] = {}
+    for sid in qualified_sids:
+        ind = industries_map.get(sid)
+        if ind:
+            industry_counts[ind] = industry_counts.get(ind, 0) + 1
+
     qualified: list[dict] = []
     for sid, info in agg.items():
         matched = list((info.get("details") or {}).keys())
@@ -257,6 +280,8 @@ def _select_top_picks(
             prob * 0.05 - (1 - prob) * 0.03
             if prob is not None else None
         )
+        industry = industries_map.get(sid)
+        industry_heat = industry_counts.get(industry, 0) if industry else 0
         qualified.append({
             "rank": 0,  # caller fills
             "sid": sid,
@@ -271,6 +296,8 @@ def _select_top_picks(
             "stop": stop,
             "ev": ev,
             "risk_reward": float(rr) if rr else None,
+            "industry": industry,
+            "industry_heat": industry_heat,
         })
 
     # 排序:ml_prob desc → 命中策略多 desc → sid asc
@@ -303,6 +330,8 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     stop = pick.get("stop")
     ev = pick.get("ev")
     rr = pick.get("risk_reward")
+    industry = pick.get("industry")
+    industry_heat = int(pick.get("industry_heat") or 0)
 
     lines = [f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"]
     # 收盤 + 漲跌
@@ -313,6 +342,16 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         else:
             pct_str = ""
         lines.append(f"   收盤 {close:.2f}{pct_str}")
+    # 產業 badge:industry_heat ≥ 3 → 🔥 加 bold(熱門類股輪動)
+    if industry:
+        ind_str = str(industry).strip()
+        if ind_str:
+            if industry_heat >= 3:
+                lines.append(
+                    f"   🔥 {b(ind_str, channel)} (今日 {industry_heat} 檔同類)"
+                )
+            else:
+                lines.append(f"   🏭 {ind_str}")
     # 命中策略
     n = len(matched_labels)
     if n > 0:
