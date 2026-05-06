@@ -97,12 +97,14 @@ def add_paper_trade(
             """
             INSERT OR IGNORE INTO paper_trades
                 (sid, name, entry_date, entry_price, matched_strategies,
-                 ml_prob, target_price, stop_price, hold_days,
+                 ml_prob, target_price, stop_price, current_stop,
+                 trailing_level, hold_days,
                  expected_exit_date, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?)
             """,
             (sid, name, entry_date, entry_price, matched_json,
-             ml_prob, target_price, stop_price, hold_days,
+             ml_prob, target_price, stop_price, stop_price,
+             hold_days,
              expected_exit, now),
         )
         return cur.lastrowid if cur.rowcount > 0 else None
@@ -188,19 +190,60 @@ def already_tracked(
     return row is not None
 
 
+def _update_trailing_stop(
+    entry_price: float,
+    current_stop: float,
+    trailing_level: int,
+    current_close: float,
+) -> tuple[float, int]:
+    """根據浮動報酬上移停損(主公拍板的「動態停損 / 移動停利」)。
+
+    Trail 觸發點(都根據 close,只升不降 — 確保停損單調上移):
+      pct ≥ 8%  → level 3:鎖 5%  → stop = entry × 1.05
+      pct ≥ 5%  → level 2:鎖 2%  → stop = entry × 1.02
+      pct ≥ 3%  → level 1:保本    → stop = entry
+      pct < 3% → 維持原 current_stop / level 不動
+
+    回 (new_current_stop, new_trailing_level)。冪等(已升到更高 level 不會降)。
+    """
+    if entry_price <= 0:
+        return current_stop, trailing_level
+    pct = (current_close - entry_price) / entry_price
+
+    new_stop = current_stop
+    new_level = trailing_level
+    if pct >= 0.08 and trailing_level < 3:
+        new_stop = entry_price * 1.05
+        new_level = 3
+    elif pct >= 0.05 and trailing_level < 2:
+        new_stop = entry_price * 1.02
+        new_level = 2
+    elif pct >= 0.03 and trailing_level < 1:
+        new_stop = entry_price
+        new_level = 1
+    return new_stop, new_level
+
+
 def _evaluate_one(
     sid: str,
     entry_date: str,
     entry_price: float,
     target_price: float,
-    stop_price: float,
+    initial_stop: float,
     hold_days: int,
     db_path: str | Path | None = None,
 ) -> dict | None:
     """模擬該 trade 進場後 hold_days 天 outcome。資料不足 → 回 None(active 不變)。
 
-    回 dict {status, return_pct, exit_date, exit_price};status 取
-    'win' / 'lose' / 'timeout_win' / 'timeout_lose'。
+    Trailing 邏輯(2026-05-06 加):每天用 close 算浮動報酬 → _update_trailing_stop
+    上移 current_stop。若任何一天 low ≤ current_stop → 出場用 current_stop 計算
+    return_pct(可能 -3% / 0% / +2% / +5% 取決於當時的 trailing_level)。
+
+    每次呼叫從 initial_stop / level=0 開始,deterministic — 同樣價格歷史
+    結果一致,不依賴 DB 內 current_stop / trailing_level 上次的 snapshot。
+
+    回 dict {status, return_pct, exit_date, exit_price, current_stop,
+            trailing_level};資料不足回 None。
     """
     future_dates = _next_trading_dates(
         sid, entry_date, hold_days, db_path=db_path,
@@ -223,6 +266,8 @@ def _evaluate_one(
 
     last_close = entry_price
     last_seen_date = entry_date
+    cs = float(initial_stop)
+    tl = 0
     for r in rows[:hold_days]:
         d = r["date"]
         high = float(r["high"] or 0)
@@ -230,15 +275,20 @@ def _evaluate_one(
         close = float(r["close"] or 0)
         last_close = close
         last_seen_date = d
-        hit_stop = low <= stop_price
+
+        # 1. 先用「昨日 close 後設定的 current_stop」偵測今日 stop 觸發
+        # (real-world 邏輯:trailing 由前一日收盤後更新,當日生效)
+        hit_stop = low <= cs
         hit_target = high >= target_price
         # 同日兩邊都觸 → 保守視為先觸停損
         if hit_stop:
             return {
                 "status": "lose",
-                "return_pct": -((entry_price - stop_price) / entry_price),
+                "return_pct": (cs - entry_price) / entry_price,
                 "exit_date": d,
-                "exit_price": stop_price,
+                "exit_price": cs,
+                "current_stop": cs,
+                "trailing_level": tl,
             }
         if hit_target:
             return {
@@ -246,13 +296,19 @@ def _evaluate_one(
                 "return_pct": (target_price - entry_price) / entry_price,
                 "exit_date": d,
                 "exit_price": target_price,
+                "current_stop": cs,
+                "trailing_level": tl,
             }
+
+        # 2. 今日沒出場 → 用今日 close 更新 trailing(只升不降),供明日生效
+        cs, tl = _update_trailing_stop(entry_price, cs, tl, close)
 
     # hold_days 結束都沒觸 → timeout
     if last_close <= 0:
         return {
             "status": "timeout_lose", "return_pct": 0.0,
             "exit_date": last_seen_date, "exit_price": last_close,
+            "current_stop": cs, "trailing_level": tl,
         }
     final_return = (last_close - entry_price) / entry_price
     status = "timeout_win" if final_return > 0 else "timeout_lose"
@@ -261,13 +317,16 @@ def _evaluate_one(
         "return_pct": final_return,
         "exit_date": last_seen_date,
         "exit_price": last_close,
+        "current_stop": cs,
+        "trailing_level": tl,
     }
 
 
 def evaluate_active_trades(db_path: str | Path | None = None) -> int:
     """掃 status='active' 的全部紀錄,可結算的更新成 win/lose/timeout_*。
 
-    回更新筆數(資料不足 / 仍進行中的不算)。
+    回更新筆數(資料不足 / 仍進行中的不算)。出場時同步寫 current_stop /
+    trailing_level 反映出場當下的 trailing snapshot。
     """
     with db.get_conn(db_path) as conn:
         actives = conn.execute(
@@ -293,10 +352,12 @@ def evaluate_active_trades(db_path: str | Path | None = None) -> int:
             conn.execute(
                 "UPDATE paper_trades SET "
                 "status=?, return_pct=?, "
-                "actual_exit_date=?, actual_exit_price=?, updated_at=? "
+                "actual_exit_date=?, actual_exit_price=?, "
+                "current_stop=?, trailing_level=?, updated_at=? "
                 "WHERE id=?",
                 (outcome["status"], outcome["return_pct"],
-                 outcome["exit_date"], outcome["exit_price"], now,
+                 outcome["exit_date"], outcome["exit_price"],
+                 outcome["current_stop"], outcome["trailing_level"], now,
                  row["id"]),
             )
             n_updated += 1

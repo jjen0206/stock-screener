@@ -4551,12 +4551,27 @@ def _page_paper_tracking() -> None:
                 if row and row["close"]:
                     latest_prices[sid_iter] = (row["date"], float(row["close"]))
 
+        # 動態停損 trailing level → 中文 + 顏色(主公拍板 2026-05-06)
+        _trailing_labels = {
+            0: ("", ""),
+            1: ("🛡️ 保本中", "#888888"),
+            2: ("🔒 鎖 2%", "#1f77b4"),
+            3: ("🔒 鎖 5%", "#2ca02c"),
+        }
         st.caption(f"進行中 {len(active_df)} 筆 — 系統每次打開自動 evaluate")
         for _, row in active_df.iterrows():
             sid = row["sid"]
             entry = float(row["entry_price"])
             target = float(row["target_price"])
-            stop = float(row["stop_price"])
+            init_stop = float(row["stop_price"])
+            # current_stop 可能 None(舊資料未 migrate),fallback 用 stop_price
+            current_stop_raw = row.get("current_stop")
+            current_stop = (
+                float(current_stop_raw)
+                if current_stop_raw is not None
+                else init_stop
+            )
+            tl = int(row.get("trailing_level") or 0)
             entry_date = row["entry_date"]
             expected_exit = row.get("expected_exit_date") or "—"
             matched = row.get("matched_strategies") or []
@@ -4566,6 +4581,15 @@ def _page_paper_tracking() -> None:
 
             cur_date, cur_price = latest_prices.get(sid, ("—", entry))
             float_pct = (cur_price - entry) / entry * 100 if entry > 0 else 0.0
+            # current_stop vs entry %(level 0 = -3%、level 1 = 0%、level 2 = +2%、level 3 = +5%)
+            stop_pct_vs_entry = (
+                (current_stop - entry) / entry * 100 if entry > 0 else 0.0
+            )
+            stop_pct_str = (
+                f"{stop_pct_vs_entry:+.1f}%" if stop_pct_vs_entry != 0
+                else "0%"
+            )
+            badge_text, badge_color = _trailing_labels.get(tl, ("", ""))
 
             with st.container(border=True):
                 cols = st.columns([2, 2, 2, 2, 2])
@@ -4586,10 +4610,17 @@ def _page_paper_tracking() -> None:
                     f"浮動<br>{format_change(float_pct)}",
                     unsafe_allow_html=True,
                 )
+                # cols[4]:目標 + 動態停損 + trailing badge
+                badge_html = (
+                    f"<br><span style='color:{badge_color};font-size:0.85rem'>"
+                    f"{badge_text}</span>"
+                    if tl > 0 else ""
+                )
                 cols[4].markdown(
                     f"📅 到期 {expected_exit}<br>"
-                    f"<small>+{(target/entry-1)*100:.1f}% / "
-                    f"-{(1-stop/entry)*100:.1f}%</small>",
+                    f"<small>+{(target / entry - 1) * 100:.1f}% / "
+                    f"停損 {current_stop:.2f} ({stop_pct_str})</small>"
+                    f"{badge_html}",
                     unsafe_allow_html=True,
                 )
 

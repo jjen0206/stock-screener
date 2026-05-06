@@ -288,6 +288,8 @@ SCHEMA: list[str] = [
         ml_prob             REAL,
         target_price        REAL NOT NULL,
         stop_price          REAL NOT NULL,
+        current_stop        REAL,
+        trailing_level      INTEGER NOT NULL DEFAULT 0,
         hold_days           INTEGER NOT NULL DEFAULT 5,
         expected_exit_date  TEXT,
         actual_exit_date    TEXT,
@@ -346,6 +348,7 @@ def init_db(db_path: str | Path | None = None) -> None:
         for stmt in SCHEMA:
             conn.execute(stmt)
         _migrate_daily_picks_add_ml_prob(conn)
+        _migrate_paper_trades_add_trailing(conn)
 
 
 def _migrate_daily_picks_add_ml_prob(conn) -> None:
@@ -362,6 +365,32 @@ def _migrate_daily_picks_add_ml_prob(conn) -> None:
     }
     if "ml_prob" not in cols:
         conn.execute("ALTER TABLE daily_picks ADD COLUMN ml_prob REAL")
+
+
+def _migrate_paper_trades_add_trailing(conn) -> None:
+    """主公拍板「動態停損 / 移動停利」(2026-05-06):加兩欄到既有 paper_trades。
+
+      current_stop    REAL    當前停損價(初始 = stop_price,trailing 啟動上移)
+      trailing_level  INTEGER 0=未觸發 / 1=保本 / 2=鎖2% / 3=鎖5%
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS。冪等。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(paper_trades)"
+        ).fetchall()
+    }
+    if "current_stop" not in cols:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN current_stop REAL")
+        # 既有 row 補 current_stop = stop_price(向下相容)
+        conn.execute(
+            "UPDATE paper_trades SET current_stop = stop_price "
+            "WHERE current_stop IS NULL"
+        )
+    if "trailing_level" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN trailing_level INTEGER DEFAULT 0"
+        )
 
 
 def _now_iso() -> str:

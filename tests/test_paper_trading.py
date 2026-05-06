@@ -411,3 +411,93 @@ def test_paper_tracking_page_renders(tmp_db):
 
     # 不該有 Python exception
     assert not at.exception, f"page 爆 exception: {at.exception}"
+
+
+# === 動態停損 / 移動停利(2026-05-06 主公拍板加) ===
+
+def test_trailing_no_trigger_when_below_3pct():
+    """浮動報酬 < 3% → trailing_level 維持 0,current_stop 不動。"""
+    new_stop, new_lvl = pt._update_trailing_stop(
+        entry_price=100.0, current_stop=97.0, trailing_level=0,
+        current_close=102.0,  # +2%(< 3%)
+    )
+    assert new_stop == 97.0
+    assert new_lvl == 0
+
+
+def test_trailing_breakeven_at_3pct():
+    """浮動 ≥ 3% → trailing_level=1,current_stop 升到 entry(保本)。"""
+    new_stop, new_lvl = pt._update_trailing_stop(
+        entry_price=100.0, current_stop=97.0, trailing_level=0,
+        current_close=103.0,
+    )
+    assert new_stop == pytest.approx(100.0)
+    assert new_lvl == 1
+
+
+def test_trailing_lock_2pct_at_5pct():
+    """浮動 ≥ 5% → trailing_level=2,current_stop = entry × 1.02(鎖 2%)。"""
+    new_stop, new_lvl = pt._update_trailing_stop(
+        entry_price=100.0, current_stop=100.0, trailing_level=1,
+        current_close=105.0,
+    )
+    assert new_stop == pytest.approx(102.0)
+    assert new_lvl == 2
+
+
+def test_trailing_lock_5pct_at_8pct():
+    """浮動 ≥ 8% → trailing_level=3,current_stop = entry × 1.05(鎖 5%)。
+    跳級也行(level 0 直接到 3)。
+    """
+    new_stop, new_lvl = pt._update_trailing_stop(
+        entry_price=100.0, current_stop=97.0, trailing_level=0,
+        current_close=110.0,  # +10%(≥ 8%)
+    )
+    assert new_stop == pytest.approx(105.0)
+    assert new_lvl == 3
+
+
+def test_trailing_uses_current_stop_for_exit(tmp_db):
+    """整合:價格漲到 +6%(觸 level 2 鎖 2%)→ 後續跌穿 102 → status=lose,
+    return_pct=+2%(用 trailing 後的 current_stop 計算,非原始 stop -3%)。
+
+    target_pct=0.10 確保 high 106 不觸發原 target。
+    hold_days=5 → 需 entry 後 5 個交易日(5/05~5/09)。
+    """
+    sid = "TRL"
+    _seed_prices(sid, [
+        # entry day = 5/04 close 100,target 110(用 target_pct=0.10),initial stop 97
+        {"date": "2026-05-04", "high": 100.5, "low": 99.5, "close": 100.0},
+        # 5/05:close=106 +6% → 觸 level 2,明日起 current_stop 升到 102
+        {"date": "2026-05-05", "high": 106.0, "low": 105.0, "close": 106.0},
+        # 5/06:low 101 ≤ 102 → 觸 trailing stop → exit at 102
+        {"date": "2026-05-06", "high": 103.0, "low": 101.0, "close": 102.5},
+        {"date": "2026-05-07", "high": 100, "low": 100, "close": 100},
+        {"date": "2026-05-08", "high": 100, "low": 100, "close": 100},
+        {"date": "2026-05-09", "high": 100, "low": 100, "close": 100},
+    ])
+    pt.add_paper_trade(
+        sid=sid, name="Trail",
+        entry_date="2026-05-04", entry_price=100.0,
+        target_pct=0.10,  # target=110,確保不被 high 106 觸發
+        stop_pct=0.03, hold_days=5,
+    )
+    n = pt.evaluate_active_trades()
+    assert n == 1
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, return_pct, actual_exit_price, current_stop, "
+            "trailing_level FROM paper_trades WHERE sid=?", (sid,),
+        ).fetchone()
+    assert row["status"] == "lose", f"應 lose(觸 trailing stop),實際 {row['status']}"
+    # 5/05 close 106 觸 level 2 → current_stop = 102
+    # 5/06 low 101 ≤ 102 → exit at 102 → return = +2%
+    assert row["actual_exit_price"] == pytest.approx(102.0), (
+        f"應 exit 在 trailing stop 102,實際 {row['actual_exit_price']}"
+    )
+    assert row["return_pct"] == pytest.approx(0.02, abs=0.001), (
+        f"應 return +2%(鎖利),實際 {row['return_pct']}"
+    )
+    assert row["trailing_level"] == 2
+    assert row["current_stop"] == pytest.approx(102.0)
