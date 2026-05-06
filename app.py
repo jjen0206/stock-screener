@@ -4067,6 +4067,58 @@ def _render_system_health() -> None:
 
     db.init_db()
 
+    # === 🏥 Snapshot CSV 健康(最先顯,error 時頁頂醒目警告)===
+    # 防呆:2026-05-06 主公踩 daily_prices.csv 漏 dump 坑後加。
+    from src.snapshot_health import (
+        get_snapshot_health, overall_status, get_last_update_text,
+    )
+    health_rows = get_snapshot_health()
+    overall = overall_status(health_rows)
+    if overall == "error":
+        st.error(
+            "🚨 **資料健康異常**:有 CSV 落後超過警戒線。"
+            "下方表格紅色行為主要問題。"
+        )
+    elif overall == "warn":
+        st.warning(
+            "⚠️ **資料健康警告**:部分 CSV 略微落後,通常 cron 跑下輪會修復。"
+        )
+
+    st.markdown("### 🏥 Snapshot CSV 健康")
+    df_health = pd.DataFrame(health_rows)
+    if not df_health.empty:
+        # 顯示用欄位 + 中文 header
+        df_show = df_health.rename(columns={
+            "table": "CSV",
+            "last_date": "最新資料日期",
+            "days_lag": "落後天數",
+            "row_count": "行數",
+            "expected_freq": "預期頻率",
+            "status": "狀態",
+            "note": "備註",
+        })[
+            ["CSV", "最新資料日期", "落後天數", "行數",
+             "預期頻率", "狀態", "備註"]
+        ]
+        # status emoji 染色
+        _status_emoji = {
+            "ok": "🟢 正常",
+            "warn": "🟡 警告",
+            "error": "🔴 異常",
+            "missing": "⚪ 缺失",
+            "unknown": "❔ 未知",
+        }
+        df_show["狀態"] = df_show["狀態"].map(_status_emoji).fillna(df_show["狀態"])
+        # row 數加千分位
+        df_show["行數"] = df_show["行數"].apply(
+            lambda v: f"{int(v):,}" if pd.notna(v) and int(v) > 0 else "—"
+        )
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+    last_update_text = get_last_update_text()
+    if last_update_text:
+        with st.expander("📝 last_update.txt(daily-notify 寫入的 timestamp + run_id)"):
+            st.code(last_update_text, language="ini")
+
     # === 📊 資料覆蓋率 ===
     st.markdown("### 📊 資料覆蓋率")
     health = db.cache_health_summary()
