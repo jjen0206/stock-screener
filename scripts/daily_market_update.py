@@ -116,7 +116,24 @@ def main() -> int:
         df.to_csv(path, index=False)
         print(f"[DAILY] 寫 {path.name}: {len(df)} 行", flush=True)
 
-    # 4. TAIEX 加權指數 200 天歷史(大盤頁的 K 線 + 多週期 + 技術總覽都需要)
+    # 4. daily_prices 全市場(個股 OHLCV)— **Bug 修:原版只 dump TAIEX,
+    # 沒 dump 個股 daily_prices,導致 daily_fetch.py 寫進 runner SQLite 的
+    # 個股當日資料隨 runner 銷毀就消失,Streamlit Cloud 永遠看不到 5/4 之後的
+    # 個股 close。2026-05-06 主公發現「股價 39.55 vs 📡 40.85」差 3 元就是這 bug。
+    # backfill-history.yml 只 workflow_dispatch 手動觸發,scheduled workflow
+    # 永不 commit daily_prices.csv → 此修補。
+    with db.get_conn() as conn:
+        df = pd.read_sql(
+            "SELECT * FROM daily_prices WHERE stock_id != 'TAIEX' "
+            "ORDER BY stock_id, date",
+            conn,
+        )
+    path = SNAPSHOT_DIR / "daily_prices.csv"
+    df.to_csv(path, index=False)
+    daily_prices_rows = len(df)
+    print(f"[DAILY] 寫 {path.name}: {daily_prices_rows} 行", flush=True)
+
+    # 5. TAIEX 加權指數 200 天歷史(大盤頁的 K 線 + 多週期 + 技術總覽都需要)
     # 走 fetch_daily_price 走 SQLite cache,差的範圍才打 FinMind。
     from datetime import date as _date, timedelta as _td
     print(f"[DAILY] TAIEX {_TAIEX_BACKFILL_DAYS} 天 backfill...", flush=True)
@@ -153,6 +170,7 @@ def main() -> int:
         f"run_id={os.environ.get('GITHUB_RUN_ID', 'local')}\n"
         f"daily_metrics_rows={result['success_metrics'].__len__()}\n"
         f"eps_rows={result['success_eps'].__len__()}\n"
+        f"daily_prices_rows={daily_prices_rows}\n"
         f"taiex_rows={taiex_rows}\n",
         encoding="utf-8",
     )

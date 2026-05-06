@@ -63,7 +63,8 @@ def _fake_update_all_fail(stock_ids, on_progress=None):
     }
 
 
-def test_main_writes_3_csvs_on_success(tmp_env, monkeypatch):
+def test_main_writes_4_csvs_on_success(tmp_env, monkeypatch):
+    """從 3 → 4 CSV(2026-05-06 加 daily_prices.csv 修 snapshot 漏抓 bug)。"""
     monkeypatch.setattr(
         weekly, "update_long_term_data_free", _fake_update_success,
     )
@@ -73,6 +74,11 @@ def test_main_writes_3_csvs_on_success(tmp_env, monkeypatch):
     assert (snapshot / "daily_metrics.csv").exists()
     assert (snapshot / "financials_quarterly.csv").exists()
     assert (snapshot / "stocks.csv").exists()
+    # 守門:daily_prices.csv 必須被 dump,否則 snapshot 會卡在舊日期(主公報的 bug)
+    assert (snapshot / "daily_prices.csv").exists(), (
+        "daily_prices.csv 必須由 daily_market_update 每日 dump,"
+        "否則 daily_fetch 寫進 runner SQLite 的個股價格隨 runner 銷毀消失"
+    )
 
 
 def test_main_csvs_have_expected_data(tmp_env, monkeypatch):
