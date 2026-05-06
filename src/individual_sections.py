@@ -85,16 +85,41 @@ def _compute_key_levels(sid: str) -> dict:
         return {"error": "技術指標 NaN(歷史可能不足或資料異常)"}
 
     half_atr = 0.5 * atr14
+    pressure_low = bb_upper - half_atr
+    pressure_high = bb_upper + half_atr
+    consol_low = bb_mid - half_atr
+    consol_high = bb_mid + half_atr
+    support_low = bb_lower - half_atr
+    support_high = bb_lower + half_atr
+
+    # current_status:close 在三區間中的位置 — 給 UI 顯「突破狀態 banner」用
+    cl = float(close_last)
+    if cl > pressure_high:
+        status = "breakout_up"        # 已突破壓力上限 → 前壓變支撐
+    elif cl >= pressure_low:
+        status = "in_pressure"        # 測壓中
+    elif cl > consol_high:
+        status = "rising"             # 壓力下、回檔上 → 上行
+    elif cl >= consol_low:
+        status = "in_consolidation"   # 回檔區整理中
+    elif cl > support_high:
+        status = "falling"            # 回檔下、支撐上 → 下行
+    elif cl >= support_low:
+        status = "in_support"         # 測支撐中
+    else:
+        status = "breakdown"          # 已跌破支撐下限
+
     return {
-        "close": float(close_last),
+        "close": cl,
         "atr14": float(atr14),
         "bb_upper": float(bb_upper),
         "bb_mid": float(bb_mid),
         "bb_lower": float(bb_lower),
+        "current_status": status,
         "levels": [
-            ("🔴 壓力區", "上漲遇阻", bb_upper - half_atr, bb_upper + half_atr),
-            ("🟡 回檔區", "中性整理", bb_mid - half_atr, bb_mid + half_atr),
-            ("🟢 支撐區", "下跌支撐", bb_lower - half_atr, bb_lower + half_atr),
+            ("🔴 壓力區", "上漲遇阻", pressure_low, pressure_high),
+            ("🟡 回檔區", "中性整理", consol_low, consol_high),
+            ("🟢 支撐區", "下跌支撐", support_low, support_high),
         ],
     }
 
@@ -253,21 +278,61 @@ def _render_technical_summary(sid: str) -> None:
     )
 
 
+# 關鍵價位三區間色:壓力紅 / 回檔灰 / 支撐綠(台股慣例,主公拍板)。
+# 之前 bug:用 `backtick` 包數字 → Streamlit 預設 inline code 偏綠,三區
+# 全綠不依 label 染色。改 <span style='color:...'> 顯式上色。
+_LEVEL_COLORS: list[str] = ["#d62728", "#888888", "#2ca02c"]
+
+# current_status → (emoji, 文字, 顏色)。color 用 hex 直接套 markdown <span>。
+_STATUS_BANNERS: dict[str, tuple[str, str, str]] = {
+    "breakout_up":      ("🚀", "已突破壓力上限,前壓區轉為支撐",   "#1f77b4"),
+    "in_pressure":      ("⚠️", "測試壓力區中,留意是否拉回",      "#d62728"),
+    "rising":           ("📈", "通道內上行(回檔上、壓力下)",      "#1f77b4"),
+    "in_consolidation": ("🟡", "回檔區整理中,等方向",            "#888888"),
+    "falling":          ("📉", "通道內下行(回檔下、支撐上)",      "#BA7517"),
+    "in_support":       ("🛡️", "測試支撐區中,留意是否止跌",      "#2ca02c"),
+    "breakdown":        ("💔", "已跌破支撐下限,警戒",             "#d62728"),
+}
+
+
 def _render_key_levels(sid: str) -> None:
-    """個股頁:壓力 / 回檔 / 支撐 三個關鍵價位區間 — 渲染層。"""
+    """個股頁:壓力 / 回檔 / 支撐 三個關鍵價位區間 — 渲染層。
+
+    顏色:壓力紅 / 回檔灰 / 支撐綠。頂部加 current_status banner 提示
+    當前 close 在哪個區間(突破 / 測試 / 整理)。
+    """
     result = _compute_key_levels(sid)
     if "error" in result:
         st.info(f"🎯 關鍵價位:{result['error']}")
         return
 
     st.markdown("### 🎯 關鍵價位")
+
+    # 突破狀態 banner(close 跟三區關係)
+    status = result.get("current_status")
+    banner = _STATUS_BANNERS.get(status) if status else None
+    if banner:
+        emoji, text, color = banner
+        close_val = result.get("close")
+        close_str = f"(收 {close_val:.2f})" if close_val is not None else ""
+        st.markdown(
+            f"<div style='padding:6px 10px;border-left:3px solid {color};"
+            f"background:rgba(128,128,128,0.06);margin:4px 0 8px 0'>"
+            f"<span style='color:{color};font-weight:500'>{emoji} {text}</span>"
+            f" <span style='color:#888;font-size:0.85rem'>{close_str}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     cols = st.columns(3)
     for i, (label, hint, low, high) in enumerate(result["levels"]):
+        color = _LEVEL_COLORS[i] if i < len(_LEVEL_COLORS) else "#888"
         with cols[i]:
             st.markdown(
                 f"**{label}**  \n"
                 f"<span style='color:#888;font-size:0.85rem'>{hint}</span>  \n"
-                f"`{low:.2f}` ~ `{high:.2f}`",
+                f"<span style='color:{color};font-family:monospace;"
+                f"font-weight:500'>{low:.2f} ~ {high:.2f}</span>",
                 unsafe_allow_html=True,
             )
     st.caption(

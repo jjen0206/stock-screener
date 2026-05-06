@@ -1391,6 +1391,125 @@ def test_key_levels_fallback_when_no_data(isolated_db):
     assert "0 天" in info_text, f"預期 fallback 標明 0 天, 實際: {info_text!r}"
 
 
+# === current_status 分類 + 色 + 突破 banner(2026-05-06 主公拍板加) ===
+
+def _seed_flat_then_spike(spike_close: float, n_flat: int = 25):
+    """灌 n_flat 天 100 平盤 + 最後一天 close=spike_close。
+    用來測 breakout_up / breakdown / in_consolidation 的 current_status。
+    """
+    from src import database as db
+    db.upsert_stocks([{"stock_id": "TEST", "name": "Test", "market": "TW"}])
+    rows = []
+    for i in range(n_flat):
+        rows.append({
+            "stock_id": "TEST", "date": f"2026-04-{1 + i:02d}",
+            "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+            "volume": 1000,
+        })
+    # 最後一天 close = spike_close;放在月底好排序
+    rows.append({
+        "stock_id": "TEST", "date": f"2026-04-{1 + n_flat:02d}",
+        "open": spike_close, "high": spike_close + 0.5,
+        "low": spike_close - 0.5, "close": spike_close, "volume": 1000,
+    })
+    db.upsert_daily_prices(rows)
+
+
+def test_status_breakout_up_when_close_above_pressure(isolated_db):
+    """close 遠高於 BB upper + half_atr → status='breakout_up'。"""
+    from src.individual_sections import _compute_key_levels
+    _seed_flat_then_spike(spike_close=200.0, n_flat=25)  # 100 平盤 → 200 暴漲
+    r = _compute_key_levels("TEST")
+    assert "error" not in r, f"預期成功計算,實際 error={r.get('error')}"
+    assert r["current_status"] == "breakout_up", (
+        f"close=200 vs bb_upper={r['bb_upper']:.1f},應 breakout_up,"
+        f"實際 {r['current_status']}"
+    )
+
+
+def test_status_breakdown_when_close_below_support(isolated_db):
+    """close 遠低於 BB lower - half_atr → status='breakdown'。"""
+    from src.individual_sections import _compute_key_levels
+    _seed_flat_then_spike(spike_close=50.0, n_flat=25)  # 100 平盤 → 50 暴跌
+    r = _compute_key_levels("TEST")
+    assert "error" not in r
+    assert r["current_status"] == "breakdown", (
+        f"close=50 vs bb_lower={r['bb_lower']:.1f},應 breakdown,"
+        f"實際 {r['current_status']}"
+    )
+
+
+def test_status_in_consolidation_when_close_at_mid(isolated_db):
+    """close ≈ BB mid + BB 有寬度 → status='in_consolidation'(回檔區內)。
+
+    需要 OHLC 有變化讓 BB σ > 0(寬度) + ATR > 0,否則三區重疊會被
+    優先排序的 pressure 攔下變 in_pressure。
+    """
+    from src import database as db
+    from src.individual_sections import _compute_key_levels
+
+    db.upsert_stocks([{"stock_id": "TEST", "name": "Test", "market": "TW"}])
+    rows = []
+    # 25 天圍繞 100 上下震盪 [97, 100, 103, 100, 97 ...] → SMA20 ≈ 100, σ ≈ 2
+    pattern = [97.0, 100.0, 103.0, 100.0]
+    for i in range(25):
+        c = pattern[i % 4]
+        rows.append({
+            "stock_id": "TEST", "date": f"2026-04-{1 + i:02d}",
+            "open": c, "high": c + 1.0, "low": c - 1.0, "close": c,
+            "volume": 1000,
+        })
+    # 最後一天 close = 100(= bb_mid)
+    rows.append({
+        "stock_id": "TEST", "date": "2026-04-26",
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+        "volume": 1000,
+    })
+    db.upsert_daily_prices(rows)
+
+    r = _compute_key_levels("TEST")
+    assert "error" not in r
+    assert r["current_status"] == "in_consolidation", (
+        f"close={r['close']:.1f} 接近 bb_mid={r['bb_mid']:.1f},"
+        f"bb_upper={r['bb_upper']:.1f} 該夠遠避免被 pressure 抓到,"
+        f"實際 status={r['current_status']}"
+    )
+
+
+def test_render_key_levels_pressure_red_support_green(isolated_db):
+    """守門:壓力區數字該紅(#d62728)、支撐區該綠(#2ca02c),不是全綠。
+
+    回歸測試:之前用 markdown backtick `123.45` → Streamlit inline code 預設
+    全綠,主公看到「emoji 紅黃綠 + 數字全綠」視覺衝突。改 <span color> 後鎖定。
+    """
+    from streamlit.testing.v1 import AppTest as _AppTest
+    _seed_daily_prices_only(n_days=25)
+
+    def _harness():
+        import app
+        app._render_key_levels("2330")
+
+    at = _AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    # 壓力區數字該紅
+    assert "#d62728" in md_text, (
+        f"壓力區數字該用紅色 #d62728,實際 markdown={md_text[:500]!r}"
+    )
+    # 支撐區數字該綠
+    assert "#2ca02c" in md_text, (
+        f"支撐區數字該用綠色 #2ca02c,實際 markdown={md_text[:500]!r}"
+    )
+    # 不該再用 backtick 包數字(那會全綠)
+    # 檢查格式 `XX.YY` ~ `XX.YY` 不再出現
+    import re
+    assert not re.search(r"`\d+\.\d{2}` ~ `\d+\.\d{2}`", md_text), (
+        "不該再用 backtick 包數字(主公報的全綠 bug)"
+    )
+
+
 # ============================================================================
 # 個股頁:技術分析總覽(7 項 rule-based 文字解讀)
 # ============================================================================
