@@ -1,0 +1,156 @@
+name: Backfill Financials Quarterly (weekly 8-shard)
+
+# 週六 14:13 UTC = 22:13 台北 跑全市場 quarterly_financials 補漏(季級資料,週跑一次夠)。
+# 8-way matrix shard parallel,每 shard ~250 檔。runner 用量 ~40 min,看時鐘 ~5 min。
+#
+# 解決基本面策略 universe bottleneck — daily_market_update 只抓 TW_TOP_50 的財報,
+# eps_acceleration / revenue_acceleration 全市場 universe 樣本不足。
+#
+# 跟 backfill-dividend.yml 同模式,差在 fetch_quarterly_financials + 不同 cron 時間。
+
+on:
+  schedule:
+    - cron: "13 14 * * 6"
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "抓近幾年季報(預設 5)"
+        required: false
+        default: "5"
+      limit:
+        description: "每個 shard 只跑前 N 檔(debug 用,留空 = 全跑)"
+        required: false
+        default: ""
+
+concurrency:
+  group: backfill-financials
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: "shard ${{ matrix.shard }}/8"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Init universe (確保 stocks 表完整 + universe 可建)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/daily_fetch.py
+        continue-on-error: true
+
+      - name: Run financials backfill (shard ${{ matrix.shard }}/8)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FINMIND_LONG_BACKOFF: "1"
+        run: |
+          ARGS="--shard ${{ matrix.shard }} --total-shards 8"
+          ARGS="$ARGS --years ${{ inputs.years || '5' }}"
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          echo "Running: python scripts/backfill_financials.py $ARGS"
+          python scripts/backfill_financials.py $ARGS
+
+      - name: Commit & push shard CSV
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/financials_shard_${{ matrix.shard }}.csv \
+                  data/twse_snapshot/last_financials_shard_${{ matrix.shard }}.txt 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to financials shard ${{ matrix.shard }}"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): financials shard ${{ matrix.shard }}/8 [skip ci]"
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "shard ${{ matrix.shard }} push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "shard ${{ matrix.shard }} push failed after 10 retries"
+          exit 1
+
+  aggregate:
+    name: aggregate financials shards
+    needs: backfill
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Aggregate financials shard CSVs
+        run: python scripts/aggregate_financials_shards.py --total-shards 8
+
+      - name: Commit & push aggregated financials_quarterly.csv
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data/twse_snapshot/
+          if git diff --staged --quiet; then
+            echo "No changes to aggregated financials_quarterly.csv"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): financials aggregated 8-shard [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "aggregate push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "aggregate push failed after 5 retries"
+          exit 1

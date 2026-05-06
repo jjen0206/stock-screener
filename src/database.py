@@ -994,6 +994,30 @@ def preload_snapshots(
             upsert_financials(rows, db_path=db_path)
             counts["financials_quarterly"] = len(rows)
 
+    # 3b. financials.monthly_revenue(from backfill-revenue.yml weekly 8-shard)
+    rev_csv = snapshot_dir / "monthly_revenue.csv"
+    if rev_csv.exists():
+        df = pd.read_csv(rev_csv, dtype={"stock_id": str})
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                "stock_id": str(r["stock_id"]),
+                "period_type": "monthly_revenue",
+                "period": str(r["period"]),
+                "revenue": (
+                    float(r["revenue"]) if pd.notna(r.get("revenue")) else None
+                ),
+                "revenue_yoy": (
+                    float(r["revenue_yoy"])
+                    if pd.notna(r.get("revenue_yoy")) else None
+                ),
+                "eps": None,
+                "roe": None,
+            })
+        if rows:
+            upsert_financials(rows, db_path=db_path)
+            counts["monthly_revenue"] = len(rows)
+
     # 4. daily_prices(從 backfill_history 產生的 ~130K 行 snapshot)
     prices_csv = snapshot_dir / "daily_prices.csv"
     if prices_csv.exists():
