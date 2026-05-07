@@ -329,6 +329,15 @@ def render_pick_card(
         except Exception:  # noqa: BLE001
             pass  # 沒倉位 / DB 錯誤都 silent skip(不影響卡片本體)
 
+        # 法人目標價 inline 行(只在有資料時顯)— 比 row 3 metadata badge 顯眼
+        # 漲幅 ≥ +10% 紅(看好)/ ≤ -5% 綠(下修)/ 其他灰
+        _render_analyst_target_inline(
+            analyst_target_mean=analyst_target_mean,
+            analyst_num=analyst_num,
+            close=close,
+            sid=sid,
+        )
+
         # Row 3:button 列(加入關注 / 展開詳細分析)+ 右側 metadata
         # st.columns 把 row 3 分成 3 區塊:button | button | metadata
         if show_add_button:
@@ -360,6 +369,77 @@ def render_pick_card(
         flag_key = f"card_exp_{button_key_prefix}_{sid}"
         if st.session_state.get(flag_key, False):
             _render_lazy_detail_section_body(sid, button_key_prefix, flag_key)
+
+
+def _render_analyst_target_inline(
+    analyst_target_mean: float | None,
+    analyst_num: int | None,
+    close: float | None,
+    sid: str,
+) -> None:
+    """卡片內顯眼的「法人共識目標」行 — 比 row 3 metadata 大,有資料才渲。
+
+    格式:
+      📊 法人共識 850 (+21%) · 券商 23 家 · Yahoo
+    染色(漲幅 vs close):
+      ≥ +10% → 紅 #d62728(看好)
+      ≤ -5%  → 綠 #2ca02c(下修)
+      其他   → 灰 #555
+    來源 'yfinance' → 顯「Yahoo」;'gemini_news' → 顯「新聞解析」。
+    """
+    if analyst_target_mean is None or (
+        isinstance(analyst_target_mean, float)
+        and analyst_target_mean != analyst_target_mean  # NaN
+    ):
+        return
+    try:
+        mean_val = float(analyst_target_mean)
+    except (TypeError, ValueError):
+        return
+
+    upside_str = ""
+    color = "#555"
+    if close is not None:
+        try:
+            close_f = float(close)
+            if close_f > 0:
+                upside = (mean_val - close_f) / close_f * 100
+                sign = "+" if upside >= 0 else "-"
+                upside_str = f" ({sign}{abs(upside):.0f}%)"
+                if upside >= 10:
+                    color = "#d62728"
+                elif upside <= -5:
+                    color = "#2ca02c"
+        except (TypeError, ValueError):
+            pass
+
+    n_str = (
+        str(int(analyst_num)) if analyst_num is not None
+        and not (isinstance(analyst_num, float) and analyst_num != analyst_num)
+        else "?"
+    )
+
+    # 來源:從 SQLite analyst_targets 撈 source 顯小字
+    source_label = ""
+    try:
+        from src.analyst_targets import get_analyst_target
+        target = get_analyst_target(sid)
+        if target:
+            src = target.get("source")
+            if src == "yfinance":
+                source_label = " · Yahoo"
+            elif src == "gemini_news":
+                source_label = " · 新聞解析"
+    except Exception:  # noqa: BLE001
+        pass  # 撈不到就不顯來源(badge 仍正常)
+
+    st.markdown(
+        f"<span style='color:{color};font-size:14px;'>"
+        f"📊 <strong>法人共識 {mean_val:.0f}{upside_str}</strong>"
+        f" · 券商 {n_str} 家{source_label}"
+        f"</span>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_watchlist_toggle_button(sid: str, button_key_prefix: str) -> None:

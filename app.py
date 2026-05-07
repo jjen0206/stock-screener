@@ -1635,13 +1635,16 @@ def _page_short() -> None:
     )
 
     _tic("short_aggregated_to_df")
-    df = _enrich_df_with_matched_strategies(
-        _enrich_df_with_ml_prob(
-            _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
-            trade_date=today_iso,
-            agg=agg,
+    from src.strategies import enrich_with_analyst_target
+    df = enrich_with_analyst_target(
+        _enrich_df_with_matched_strategies(
+            _enrich_df_with_ml_prob(
+                _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
+                trade_date=today_iso,
+                agg=agg,
+            ),
+            agg,
         ),
-        agg,
     )
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
@@ -1734,15 +1737,17 @@ def _page_short() -> None:
             if not sub_agg:
                 st.info("📭 此分類本日無入選。")
                 continue
-            sub_df = _enrich_df_with_matched_strategies(
-                _enrich_df_with_ml_prob(
-                    _enrich_df_with_win_rate(
-                        aggregated_to_dataframe(sub_agg), sub_agg,
+            sub_df = enrich_with_analyst_target(
+                _enrich_df_with_matched_strategies(
+                    _enrich_df_with_ml_prob(
+                        _enrich_df_with_win_rate(
+                            aggregated_to_dataframe(sub_agg), sub_agg,
+                        ),
+                        trade_date=today_iso,
+                        agg=sub_agg,
                     ),
-                    trade_date=today_iso,
-                    agg=sub_agg,
+                    sub_agg,
                 ),
-                sub_agg,
             )
             sub_rows = sub_df.to_dict("records")
             filtered_sub, total_sub = _apply_confidence_filter(sub_rows)
@@ -1898,8 +1903,13 @@ def _page_long() -> None:
             if view_mode == "🃏 卡片":
                 # 長線結果欄位:stock_id/name/close/pe/pb/yield/avg_roe etc.
                 # 卡片只顯示基本資訊(目標價非長線重點,故關閉)
+                # enrich 法人目標價 — 長線跟價值估算強相關,有共識票要看
+                from src.strategies import (
+                    enrich_with_analyst_target as _enrich_at,
+                )
+                long_cards = _enrich_at(result).to_dict("records")
                 render_picks_cards(
-                    result.to_dict("records"),
+                    long_cards,
                     show_signal=False, show_targets=False, show_change=False,
                     show_add_button=True, button_key_prefix="long",
                 )
@@ -3629,6 +3639,12 @@ def _page_watchlist() -> None:
             except (TypeError, ValueError):
                 return None
 
+        # Bulk lookup 法人目標價(一次 SQL,避免 N 檔 N 次 query)
+        from src.analyst_targets import get_analyst_targets_for_sids
+        at_map = get_analyst_targets_for_sids(
+            [it["stock_id"] for it in items]
+        )
+
         cards = []
         for it, r in zip(items, rows):
             sid = it["stock_id"]
@@ -3645,6 +3661,12 @@ def _page_watchlist() -> None:
                     "target_high": tp.get("target_high"),
                     "stop_loss": tp.get("stop_loss"),
                     "risk_reward": tp.get("risk_reward"),
+                })
+            at_row = at_map.get(sid)
+            if at_row:
+                card.update({
+                    "analyst_target_mean": at_row.get("target_mean"),
+                    "analyst_num": at_row.get("num_analysts"),
                 })
             cards.append(card)
         # 盤中行情注入(非交易時段 no-op)— watchlist 範圍小,不會撞 yfinance rate
