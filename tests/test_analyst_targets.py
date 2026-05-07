@@ -388,6 +388,23 @@ def test_safe_boot_load_fallback_no_remote(tmp_db, monkeypatch):
     assert result == "fallback-no-remote"
 
 
+def test_preload_snapshots_calls_watchlist_load(tmp_db, monkeypatch):
+    """preload_snapshots 應 trigger watchlist_snapshot.load_from_csv —
+    讓 actions runner 跑 fetch_analyst_targets.py --scope=watchlist 看得到主公星號。
+    用 spy 攔截確認 helper 真的被呼叫(不依賴 watchlist.csv 真的存在)。
+    """
+    from src import watchlist_snapshot
+    calls: list = []
+
+    def _spy(db_path=None):
+        calls.append(db_path)
+        return 0  # 模擬 csv 不存在或空表 → 不影響其他 preload step
+
+    monkeypatch.setattr(watchlist_snapshot, "load_from_csv", _spy)
+    db.preload_snapshots(snapshot_dir=tmp_db)
+    assert len(calls) == 1, "preload_snapshots 應呼叫 watchlist load_from_csv"
+
+
 def test_preload_snapshots_loads_analyst_targets(tmp_db, monkeypatch):
     """preload_snapshots 應載 analyst_targets.csv 進 SQLite。"""
     # 寫一個 analyst_targets.csv 進 tmp snapshot dir

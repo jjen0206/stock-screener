@@ -53,7 +53,15 @@ jobs:
           git add data/twse_snapshot/analyst_targets.csv 2>/dev/null || true
           if git diff --quiet --staged; then
             echo "No analyst_targets snapshot changes to commit"
-          else
-            git commit -m "chore(analyst-targets): weekly full-market refresh [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore(analyst-targets): weekly full-market refresh [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[WEEKLY-TARGETS] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::weekly-targets push 失敗 5 次"

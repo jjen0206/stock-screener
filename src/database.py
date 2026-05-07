@@ -1034,11 +1034,11 @@ def preload_snapshots(
 
     Loads(順序保留依賴關係:stocks 先行,daily_prices/institutional 後續):
       stocks.csv / daily_metrics.csv / financials_quarterly.csv /
-      daily_prices.csv / institutional.csv / taiex.csv
+      daily_prices.csv / institutional.csv / taiex.csv /
+      watchlist.csv(2026-05-07 加,讓 actions runner 看到主公的關注股
+      → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)
 
     回 {csv stem: rows loaded} 給 caller 用 log。任何 csv 不存在 → skip。
-
-    watchlist 不在這個 helper(streamlit 專屬,workflow 不需要)。
     """
     import pandas as pd
 
@@ -1281,6 +1281,20 @@ def preload_snapshots(
             counts["paper_trades"] = n_paper
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] paper_trades load 失敗:%s", e)
+
+    # 8b2. watchlist(關注股)— 讓 actions runner 看到主公的 ☆ 名單
+    # 修補:2026-05-07 主公發現 fetch_analyst_targets.py --scope=watchlist 在
+    # GitHub Actions 跑時回「共 0 檔」,因為 fresh runner SQLite 是空的、
+    # watchlist 表沒人灌。watchlist_snapshot.load_from_csv 走自己的
+    # WATCHLIST_CSV(項目根 data/twse_snapshot/watchlist.csv)+ silent skip
+    # 在 tmp_path 測試環境(不打到 repo)。
+    try:
+        from src.watchlist_snapshot import load_from_csv as _load_watchlist
+        n_wl = _load_watchlist(db_path=db_path)
+        if n_wl > 0:
+            counts["watchlist"] = n_wl
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] watchlist load 失敗:%s", e)
 
     # 8c. analyst_targets(法人目標價)— 平日抓 watchlist+picks / 週日抓全市場
     # 雲端容器重啟還原。表已有資料時 INSERT OR REPLACE 不會覆蓋同 (sid, source) PK,
