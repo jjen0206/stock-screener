@@ -2861,7 +2861,7 @@ def test_pick_card_displays_ml_prob_when_present(isolated_db):
             show_targets=False, show_change=False,
             button_key_prefix="low",
         )
-        # None → 「🤖 —」灰
+        # None → 不渲 ML chip(避免 watchlist 卡片誤導顯「🤖 —」)
         render_pick_card(
             {
                 "stock_id": "9999", "name": "X", "close": 100.0,
@@ -2886,8 +2886,14 @@ def test_pick_card_displays_ml_prob_when_present(isolated_db):
     # 低機率 40% 綠
     assert "🤖 40%" in md_text
     assert "color:#2ca02c'>🤖 40%" in md_text
-    # None → 「🤖 —」
-    assert "🤖 —" in md_text
+    # None → 不渲 ML chip(只有 9999 這張卡 ml_prob 為 None,
+    # 確認 markdown 沒包含 9999 的 🤖 chip)
+    # 三張前面的 ml prob 卡都會有 🤖 X% 字串,但 9999 不該出現任何 🤖
+    # 用上下文 assert:🤖 出現次數 == 3(2330 / 2317 / 1101)
+    assert md_text.count("🤖") == 3, (
+        f"None 卡片不應渲 ML chip,實際 🤖 數: {md_text.count('🤖')}"
+    )
+    assert "🤖 —" not in md_text, "ml_prob None 不應顯 fallback"
 
 
 def test_backtest_strategy_with_ml_filter(tmp_path, monkeypatch):

@@ -477,7 +477,8 @@ def _render_card_metadata(
     - >= 0.70 → 紅 #d62728
     - 0.60-0.70 → 灰 #888888
     - < 0.60 → 綠 #2ca02c
-    None / NaN → 顯「🤖 —」灰
+    None / NaN → **整段不渲**(跟 analyst_target_mean 同邏輯,避免 watchlist
+    卡片永遠顯誤導性的「🤖 —」,主公會以為是「期待值」沒值)。
 
     analyst_target_mean:有資料才顯,沒有就不渲(避免空 badge)。
 
@@ -496,13 +497,11 @@ def _render_card_metadata(
         except (TypeError, ValueError):
             pass
 
-    # ML 機率
+    # ML 機率(有值才顯,沒值整段不渲)
     ml_html = ""
-    if ml_prob is None or (
+    if ml_prob is not None and not (
         isinstance(ml_prob, float) and ml_prob != ml_prob  # NaN
     ):
-        ml_html = "<span style='color:#888'>🤖 —</span>"
-    else:
         try:
             p = float(ml_prob)
             if p >= 0.70:
@@ -515,7 +514,7 @@ def _render_card_metadata(
                 f"<span style='color:{ml_color}'>🤖 {p * 100:.0f}%</span>"
             )
         except (TypeError, ValueError):
-            ml_html = "<span style='color:#888'>🤖 —</span>"
+            ml_html = ""
 
     # 法人共識目標價(有資料才顯)
     analyst_html = ""
