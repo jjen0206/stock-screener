@@ -2232,17 +2232,24 @@ def _render_analyst_target(sid: str) -> None:
     """個股頁:法人(券商研究員)目標價共識區塊。
 
     SQLite analyst_targets 已預先 fetch(平日 watchlist+picks / 週日全市場),
-    這裡只 lookup 顯示 — 沒資料就 skip(不顯空白 / 不主動打 yfinance)。
+    這裡只 lookup 顯示。
 
+    Header 永遠顯,無資料時顯友善 caption(讓主公知道 section 接上了,只是
+    還沒抓到資料,別誤判成 bug)。
     顯:target_mean / target_high / target_low / num_analysts / source / fetched_at
     """
     from src.analyst_targets import get_analyst_target
 
+    st.markdown("### 📊 法人目標價")
+
     target = get_analyst_target(sid)
     if not target or target.get("target_mean") is None:
+        st.caption(
+            "🕐 此股目前尚無法人共識資料。"
+            "資料每日 22:13 抓 watchlist + 今日 picks,週日 22:13 抓全市場。"
+        )
         return
 
-    st.markdown("### 📊 法人目標價")
     cols = st.columns(4)
     cols[0].metric("共識目標", f"{target['target_mean']:.0f}")
     if target.get("target_high"):
