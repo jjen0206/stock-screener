@@ -698,6 +698,44 @@ def _dump_trades_snapshot(db_path: str | Path | None) -> None:
     )
 
 
+def _dump_paper_trades_snapshot(db_path: str | Path | None) -> None:
+    """在 paper_trades 變動後 dump CSV + 自動 push GitHub(雲端永久化)。
+
+    跟 _dump_watchlist_snapshot / _dump_trades_snapshot 同 pattern:
+    - 一律 dump 進本地 paper_trades.csv(讓本機 streamlit 也能 reload 還原)
+    - 有 GITHUB_PAT → fire-and-forget thread push 到 watchlist-sync 分支
+    - 沒 PAT → 不開 thread,本機行為不變
+
+    修補:2026-05-07 主公發現「昨天加的實測追蹤不見了」— 雲端 SQLite ephemeral
+    重啟清光,paper_trades 從未被 dump 進 git snapshot。
+    """
+    try:
+        from src import paper_trades_snapshot
+        n = paper_trades_snapshot.dump_to_csv(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] dump paper_trades.csv 失敗:%s", ex)
+        return
+    if n < 0:
+        return
+    if not os.environ.get("GITHUB_PAT"):
+        return
+    try:
+        csv_content = paper_trades_snapshot.dump_to_string(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] 取 paper_trades csv 字串失敗:%s", ex)
+        return
+    try:
+        from src.github_sync import push_paper_trades_to_github
+    except ImportError as ex:
+        logger.warning(
+            "[GH_SYNC] push_paper_trades_to_github 不存在 (%s),skip 推送", ex,
+        )
+        return
+    _spawn_github_push_thread(
+        push_paper_trades_to_github, csv_content, "paper_trades",
+    )
+
+
 def add_to_watchlist(
     stock_id: str,
     note: str | None = None,
@@ -1174,6 +1212,21 @@ def preload_snapshots(
             counts["trades"] = n_trades
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] trades load 失敗:%s", e)
+
+    # 8b. paper_trades(實測追蹤)— delegate 給 paper_trades_snapshot,只在表空時灌
+    # 修補:2026-05-07 主公發現「昨天加的實測追蹤不見了」— 雲端容器重啟清光 SQLite,
+    # 沒這個 preload 紀錄就消失。同 trades 邏輯只在表為空時灌避免覆蓋新進的紀錄。
+    try:
+        from src.paper_trades_snapshot import (
+            load_from_csv as _load_paper_trades,
+        )
+        n_paper = _load_paper_trades(
+            snapshot_dir=snapshot_dir, db_path=db_path,
+        )
+        if n_paper > 0:
+            counts["paper_trades"] = n_paper
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] paper_trades load 失敗:%s", e)
 
     # 9. daily_picks(precompute 預跑結果)— nightly workflow dump 進 repo,
     # Cloud 容器 git pull 拿到 CSV → 這裡灌進 SQLite,App 端 _run_all_strategies_cached

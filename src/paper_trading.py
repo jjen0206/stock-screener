@@ -107,7 +107,17 @@ def add_paper_trade(
              hold_days,
              expected_exit, now),
         )
-        return cur.lastrowid if cur.rowcount > 0 else None
+        new_id = cur.lastrowid if cur.rowcount > 0 else None
+
+    if new_id is not None:
+        # 持久化 paper_trades.csv:讓使用者新加的紀錄跨容器重啟保留
+        # (主公 2026-05-07 報「昨天加的實測追蹤不見了」即此 bug)
+        # bulk_add_paper_trades 會把 _LOAD_IN_PROGRESS 設 True 抑制中間 dump,
+        # 結尾才統一 dump+push 一次,避免 N 筆 row 開 N 個 push thread。
+        from src import paper_trades_snapshot as _pts
+        if not _pts._LOAD_IN_PROGRESS:
+            db._dump_paper_trades_snapshot(db_path)
+    return new_id
 
 
 def bulk_add_paper_trades(
@@ -128,53 +138,63 @@ def bulk_add_paper_trades(
     n_added = 0
     n_skipped = 0
     n_errors = 0
-    for r in rows:
-        sid = str(r.get("stock_id", "") or "").strip()
-        if not sid:
-            n_errors += 1
-            continue
-        close = r.get("close")
-        try:
-            close_val = float(close) if close is not None else 0.0
-        except (TypeError, ValueError):
-            n_errors += 1
-            continue
-        if close_val <= 0 or close_val != close_val:  # NaN check
-            n_errors += 1
-            continue
-
-        name = str(r.get("name", "") or "")
-        matched = r.get("matched_strategies") or []
-        if isinstance(matched, str):
+    # 用 paper_trades_snapshot._LOAD_IN_PROGRESS 抑制每筆 add_paper_trade 觸發
+    # 的 dump_to_csv;結尾統一 dump+push 一次,避免 N 筆 row 開 N 個 push thread。
+    from src import paper_trades_snapshot as _pts
+    _pts._LOAD_IN_PROGRESS = True
+    try:
+        for r in rows:
+            sid = str(r.get("stock_id", "") or "").strip()
+            if not sid:
+                n_errors += 1
+                continue
+            close = r.get("close")
             try:
-                matched = json.loads(matched)
+                close_val = float(close) if close is not None else 0.0
             except (TypeError, ValueError):
-                matched = []
-        ml_prob = r.get("ml_prob")
-        try:
-            ml_prob_val = (
-                float(ml_prob) if ml_prob is not None
-                and float(ml_prob) == float(ml_prob)  # not NaN
-                else None
-            )
-        except (TypeError, ValueError):
-            ml_prob_val = None
+                n_errors += 1
+                continue
+            if close_val <= 0 or close_val != close_val:  # NaN check
+                n_errors += 1
+                continue
 
-        try:
-            new_id = add_paper_trade(
-                sid=sid, name=name, entry_date=entry_date,
-                entry_price=close_val,
-                matched_strategies=list(matched),
-                ml_prob=ml_prob_val,
-                target_pct=target_pct, stop_pct=stop_pct,
-                hold_days=hold_days, db_path=db_path,
-            )
-            if new_id:
-                n_added += 1
-            else:
-                n_skipped += 1  # UNIQUE conflict(已追蹤)
-        except ValueError:
-            n_errors += 1
+            name = str(r.get("name", "") or "")
+            matched = r.get("matched_strategies") or []
+            if isinstance(matched, str):
+                try:
+                    matched = json.loads(matched)
+                except (TypeError, ValueError):
+                    matched = []
+            ml_prob = r.get("ml_prob")
+            try:
+                ml_prob_val = (
+                    float(ml_prob) if ml_prob is not None
+                    and float(ml_prob) == float(ml_prob)  # not NaN
+                    else None
+                )
+            except (TypeError, ValueError):
+                ml_prob_val = None
+
+            try:
+                new_id = add_paper_trade(
+                    sid=sid, name=name, entry_date=entry_date,
+                    entry_price=close_val,
+                    matched_strategies=list(matched),
+                    ml_prob=ml_prob_val,
+                    target_pct=target_pct, stop_pct=stop_pct,
+                    hold_days=hold_days, db_path=db_path,
+                )
+                if new_id:
+                    n_added += 1
+                else:
+                    n_skipped += 1  # UNIQUE conflict(已追蹤)
+            except ValueError:
+                n_errors += 1
+    finally:
+        _pts._LOAD_IN_PROGRESS = False
+
+    if n_added > 0:
+        db._dump_paper_trades_snapshot(db_path)
     return {"added": n_added, "skipped": n_skipped, "errors": n_errors}
 
 
@@ -361,6 +381,10 @@ def evaluate_active_trades(db_path: str | Path | None = None) -> int:
                  row["id"]),
             )
             n_updated += 1
+
+    if n_updated > 0:
+        # 持久化 paper_trades.csv:評估後的 status / current_stop 更新跨容器保留
+        db._dump_paper_trades_snapshot(db_path)
     return n_updated
 
 

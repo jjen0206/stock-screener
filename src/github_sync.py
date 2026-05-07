@@ -31,12 +31,16 @@ DEFAULT_REPO = "jjen0206/stock-screener"
 DEFAULT_BRANCH = "watchlist-sync"
 DEFAULT_PATH = "data/twse_snapshot/watchlist.csv"
 DEFAULT_TRADES_PATH = "data/twse_snapshot/trades.csv"
+DEFAULT_PAPER_TRADES_PATH = "data/twse_snapshot/paper_trades.csv"
 COMMITTER = {
     "name": "stock-screener-bot",
     "email": "actions@users.noreply.github.com",
 }
 DEFAULT_MESSAGE = "chore(watchlist): auto-sync from cloud app"
 DEFAULT_TRADES_MESSAGE = "chore(trades): auto-sync P&L from cloud app"
+DEFAULT_PAPER_TRADES_MESSAGE = (
+    "chore(paper_trades): auto-sync 實測追蹤 from cloud app"
+)
 HTTP_TIMEOUT = 15
 
 
@@ -279,9 +283,33 @@ def fetch_trades_from_github() -> str | None:
     return _fetch_csv_generic(path, "trades")
 
 
+def push_paper_trades_to_github(
+    csv_content: str,
+    message: str = DEFAULT_PAPER_TRADES_MESSAGE,
+) -> bool:
+    """把 csv_content 推到遠端 paper_trades.csv(實測追蹤永久化)。
+
+    跟 watchlist / trades 同一個 branch(watchlist-sync,避免觸發 main redeploy)。
+    Returns 同 push_watchlist_to_github。
+    """
+    path = os.environ.get("GITHUB_PAPER_TRADES_PATH", DEFAULT_PAPER_TRADES_PATH)
+    return _push_csv_generic(csv_content, path, message, "paper_trades")
+
+
+def fetch_paper_trades_from_github() -> str | None:
+    """從 watchlist-sync 分支拉最新 paper_trades.csv(雲端 boot 時 remote-first 載入)。
+
+    Returns 同 fetch_watchlist_from_github。
+    """
+    path = os.environ.get("GITHUB_PAPER_TRADES_PATH", DEFAULT_PAPER_TRADES_PATH)
+    return _fetch_csv_generic(path, "paper_trades")
+
+
 __all__ = [
     "push_watchlist_to_github",
     "fetch_watchlist_from_github",
     "push_trades_to_github",
     "fetch_trades_from_github",
+    "push_paper_trades_to_github",
+    "fetch_paper_trades_from_github",
 ]
