@@ -1,7 +1,8 @@
-updated_at=2026-05-06T08:20:57+00:00
-git_sha=49313b8b7bcd261d7b2e05cff7f78445511d6007
-run_id=25424242905
-daily_metrics_rows=827
-eps_rows=96
-daily_prices_rows=134179
+updated_at=2026-05-07T05:09:31+00:00
+git_sha=bacee974bccd0e115d69585e1d42d8927a4b8a94
+run_id=25476880379
+daily_metrics_rows=824
+eps_rows=146
+daily_prices_rows=135535
+institutional_rows=2892
 taiex_rows=132
