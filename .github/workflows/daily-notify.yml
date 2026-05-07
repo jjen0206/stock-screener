@@ -106,7 +106,9 @@ jobs:
         run: python scripts/daily_market_update.py
         continue-on-error: true
 
-      # === Step 5: Commit 全部 snapshot 改動(daily_picks + market_update 一起)===
+      # === Step 5: Commit 全部 snapshot 改動(daily_picks + market_update + analyst_targets 一起)===
+      # push race retry:跟 news-notify / morning-refetch 同 pattern,跨 workflow
+      # 同時段推 main 時用 rebase + retry 5 次避免 [rejected] (fetch first) 把 CSV 吃掉。
       - name: Commit snapshot CSV if changed
         continue-on-error: true
         run: |
@@ -115,10 +117,18 @@ jobs:
           git add data/twse_snapshot/ || true
           if git diff --quiet --staged; then
             echo "No snapshot changes to commit"
-          else
-            git commit -m "chore(snapshot): daily TWSE market data refresh [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore(snapshot): daily TWSE market data refresh [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[DAILY-NOTIFY] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::daily-notify snapshot push 失敗 5 次"
 
       # === Step 6: 歷史回測勝率(只週一跑)===
       # 跑 default params 全 16 strategies 過去 126 個交易日,寫進
@@ -144,7 +154,15 @@ jobs:
           git add data/twse_snapshot/strategy_backtest.csv 2>/dev/null || true
           if git diff --quiet --staged; then
             echo "No strategy_backtest snapshot changes to commit"
-          else
-            git commit -m "chore(backtest): weekly strategies backtest snapshot [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore(backtest): weekly strategies backtest snapshot [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[BACKTEST] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::backtest snapshot push 失敗 5 次"
