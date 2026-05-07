@@ -64,6 +64,17 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/precompute_strategies.py
 
+      # === Step 2.5: 抓法人目標價(A=yfinance / B=Gemini fallback)===
+      # 平日只抓「今天會看到的」— watchlist + 今日 picks(各 ~5-30 檔,~1-2 分鐘)
+      # 全市場由週日 weekly-targets.yml 跑 cover。continue-on-error:抓不到不擋推播。
+      - name: Fetch analyst targets (watchlist + picks)
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python scripts/fetch_analyst_targets.py --scope=watchlist
+          python scripts/fetch_analyst_targets.py --scope=picks
+
       # === Step 3: ★★ 推播 ★★(移到前面確保 push 必達)===
       # 2026-05-06 主公拍板:notify step 從尾部移到 daily_market_update 之前。
       # 原因:daily_market_update 跑全市場財報 ~15 min,若撞 120 min timeout

@@ -250,6 +250,11 @@ def _select_top_picks(
     # 算「命中策略平均勝率」加進推播。低樣本(<10 fires)由 load 函式過濾。
     strategy_wr_map = db.load_latest_strategy_backtest()
 
+    # 撈 analyst_targets(法人目標價共識)— 平日 watchlist+picks / 週日全市場
+    # fetch 進 SQLite。bulk lookup 一次,enrich 進 pick dict 後排序加分。
+    from src.analyst_targets import get_analyst_targets_for_sids
+    analyst_target_map = get_analyst_targets_for_sids(qualified_sids)
+
     qualified: list[dict] = []
     for sid, info in agg.items():
         matched = list((info.get("details") or {}).keys())
@@ -289,6 +294,11 @@ def _select_top_picks(
         # win_rate:命中策略 backtest WR 算術平均(跟 _enrich_df_with_win_rate 同邏輯)
         valid_wrs = [strategy_wr_map[s] for s in matched if s in strategy_wr_map]
         win_rate = sum(valid_wrs) / len(valid_wrs) if valid_wrs else None
+        # analyst_target:有就 enrich,排序時加分(讓有法人共識的 picks 排前面)
+        at_row = analyst_target_map.get(sid) or {}
+        analyst_target_mean = at_row.get("target_mean")
+        analyst_num = at_row.get("num_analysts")
+        analyst_source = at_row.get("source")
         qualified.append({
             "rank": 0,  # caller fills
             "sid": sid,
@@ -306,10 +316,17 @@ def _select_top_picks(
             "industry": industry,
             "industry_heat": industry_heat,
             "win_rate": win_rate,
+            "analyst_target_mean": analyst_target_mean,
+            "analyst_target_high": at_row.get("target_high"),
+            "analyst_target_low": at_row.get("target_low"),
+            "analyst_num": analyst_num,
+            "analyst_source": analyst_source,
         })
 
-    # 排序:ml_prob desc → 命中策略多 desc → sid asc
+    # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
+    # → ml_prob desc → 命中策略多 desc → sid asc
     qualified.sort(key=lambda p: (
+        -(100 if p.get("analyst_target_mean") else 0),
         -(p["ml_prob"] or 0.0),
         -len(p["matched_strategies"]),
         p["sid"],
@@ -369,6 +386,19 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     # ML 機率
     if ml_prob is not None:
         lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
+    # 法人共識目標價(yfinance / Gemini news)— 在勝率之前
+    analyst_mean = pick.get("analyst_target_mean")
+    if analyst_mean:
+        n_analyst = pick.get("analyst_num") or "?"
+        upside_str = ""
+        if close is not None and close > 0:
+            upside = (analyst_mean - close) / close * 100
+            sign = "+" if upside >= 0 else "-"
+            upside_str = f" ({sign}{abs(upside):.0f}%)"
+        lines.append(
+            f"   📊 共識目標 {b(f'{analyst_mean:.0f}', channel)}"
+            f"{upside_str}(券商 {n_analyst} 家)"
+        )
     # 歷史勝率(126 日回測平均,跟卡片勝率欄同來源)
     win_rate = pick.get("win_rate")
     if win_rate is not None and win_rate > 0:

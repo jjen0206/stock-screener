@@ -328,6 +328,25 @@ SCHEMA: list[str] = [
     "ON news(sent_telegram, sent_discord, publish_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_news_sid_date "
     "ON news(sid, publish_date DESC)",
+    # analyst_targets:法人(券商研究員)目標價共識。A+B 雙來源
+    # source='yfinance' 直接拿 Yahoo Finance Analyst Estimates
+    # source='gemini_news' 拿不到 yfinance 時走 Gemini 解析新聞
+    # PK 加 source → 同一 sid 兩種來源各保一筆,UI 顯時優先 yfinance(較準)
+    """
+    CREATE TABLE IF NOT EXISTS analyst_targets (
+        stock_id       TEXT NOT NULL,
+        target_mean    REAL,
+        target_median  REAL,
+        target_high    REAL,
+        target_low     REAL,
+        num_analysts   INTEGER,
+        source         TEXT NOT NULL,
+        fetched_at     TEXT NOT NULL,
+        PRIMARY KEY (stock_id, source)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_analyst_targets_sid "
+    "ON analyst_targets(stock_id)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -733,6 +752,41 @@ def _dump_paper_trades_snapshot(db_path: str | Path | None) -> None:
         return
     _spawn_github_push_thread(
         push_paper_trades_to_github, csv_content, "paper_trades",
+    )
+
+
+def _dump_analyst_targets_snapshot(db_path: str | Path | None) -> None:
+    """analyst_targets 表變動後 dump CSV + 自動 push GitHub(雲端永久化)。
+
+    跟 _dump_paper_trades_snapshot 同 pattern:
+    - dump 進本地 analyst_targets.csv
+    - 有 GITHUB_PAT → fire-and-forget thread push 到 watchlist-sync 分支
+    - 沒 PAT → 不開 thread,本機行為不變
+    """
+    try:
+        from src import analyst_targets_snapshot
+        n = analyst_targets_snapshot.dump_to_csv(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] dump analyst_targets.csv 失敗:%s", ex)
+        return
+    if n < 0:
+        return
+    if not os.environ.get("GITHUB_PAT"):
+        return
+    try:
+        csv_content = analyst_targets_snapshot.dump_to_string(db_path=db_path)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] 取 analyst_targets csv 字串失敗:%s", ex)
+        return
+    try:
+        from src.github_sync import push_analyst_targets_to_github
+    except ImportError as ex:
+        logger.warning(
+            "[GH_SYNC] push_analyst_targets_to_github 不存在 (%s),skip 推送", ex,
+        )
+        return
+    _spawn_github_push_thread(
+        push_analyst_targets_to_github, csv_content, "analyst_targets",
     )
 
 
@@ -1227,6 +1281,22 @@ def preload_snapshots(
             counts["paper_trades"] = n_paper
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] paper_trades load 失敗:%s", e)
+
+    # 8c. analyst_targets(法人目標價)— 平日抓 watchlist+picks / 週日抓全市場
+    # 雲端容器重啟還原。表已有資料時 INSERT OR REPLACE 不會覆蓋同 (sid, source) PK,
+    # 但會把 CSV snapshot 內較新的 fetched_at 寫進去 → 這裡走「永遠 reload」,
+    # 因目標價是覆蓋式更新而非歷史紀錄(跟 daily_picks 同邏輯,跟 paper_trades 不同)。
+    try:
+        from src.analyst_targets_snapshot import (
+            load_from_csv as _load_analyst_targets,
+        )
+        n_at = _load_analyst_targets(
+            snapshot_dir=snapshot_dir, db_path=db_path,
+        )
+        if n_at > 0:
+            counts["analyst_targets"] = n_at
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] analyst_targets load 失敗:%s", e)
 
     # 9. daily_picks(precompute 預跑結果)— nightly workflow dump 進 repo,
     # Cloud 容器 git pull 拿到 CSV → 這裡灌進 SQLite,App 端 _run_all_strategies_cached

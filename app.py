@@ -2224,6 +2224,46 @@ def _render_summary(
     # === 🏢 公司資訊(FinMind facts + Gemini LLM) ===
     _render_company_profile(sid)
 
+    # === 📊 法人目標價(yfinance / Gemini news fallback) ===
+    _render_analyst_target(sid)
+
+
+def _render_analyst_target(sid: str) -> None:
+    """個股頁:法人(券商研究員)目標價共識區塊。
+
+    SQLite analyst_targets 已預先 fetch(平日 watchlist+picks / 週日全市場),
+    這裡只 lookup 顯示 — 沒資料就 skip(不顯空白 / 不主動打 yfinance)。
+
+    顯:target_mean / target_high / target_low / num_analysts / source / fetched_at
+    """
+    from src.analyst_targets import get_analyst_target
+
+    target = get_analyst_target(sid)
+    if not target or target.get("target_mean") is None:
+        return
+
+    st.markdown("### 📊 法人目標價")
+    cols = st.columns(4)
+    cols[0].metric("共識目標", f"{target['target_mean']:.0f}")
+    if target.get("target_high"):
+        cols[1].metric("最樂觀", f"{target['target_high']:.0f}")
+    if target.get("target_low"):
+        cols[2].metric("最保守", f"{target['target_low']:.0f}")
+    n_analyst = target.get("num_analysts")
+    if n_analyst:
+        cols[3].metric("券商家數", f"{int(n_analyst)} 家")
+
+    src = target.get("source") or "?"
+    src_label = "Yahoo 共識" if src == "yfinance" else "Gemini 新聞解析"
+    fetched_at = target.get("fetched_at") or ""
+    fetched_label = (
+        fetched_at[:19].replace("T", " ") if len(fetched_at) >= 19 else fetched_at
+    )
+    st.caption(
+        f"來源:{src_label}  ·  更新:{fetched_label} UTC  ·  "
+        "⚠️ 僅供研究參考,非投資建議"
+    )
+
 
 def _render_company_profile(sid: str) -> None:
     """個股頁摘要 tab 內的公司資訊區塊。

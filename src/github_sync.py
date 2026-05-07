@@ -32,6 +32,7 @@ DEFAULT_BRANCH = "watchlist-sync"
 DEFAULT_PATH = "data/twse_snapshot/watchlist.csv"
 DEFAULT_TRADES_PATH = "data/twse_snapshot/trades.csv"
 DEFAULT_PAPER_TRADES_PATH = "data/twse_snapshot/paper_trades.csv"
+DEFAULT_ANALYST_TARGETS_PATH = "data/twse_snapshot/analyst_targets.csv"
 COMMITTER = {
     "name": "stock-screener-bot",
     "email": "actions@users.noreply.github.com",
@@ -40,6 +41,9 @@ DEFAULT_MESSAGE = "chore(watchlist): auto-sync from cloud app"
 DEFAULT_TRADES_MESSAGE = "chore(trades): auto-sync P&L from cloud app"
 DEFAULT_PAPER_TRADES_MESSAGE = (
     "chore(paper_trades): auto-sync 實測追蹤 from cloud app"
+)
+DEFAULT_ANALYST_TARGETS_MESSAGE = (
+    "chore(analyst_targets): auto-sync 法人目標價 from cloud app"
 )
 HTTP_TIMEOUT = 15
 
@@ -305,6 +309,29 @@ def fetch_paper_trades_from_github() -> str | None:
     return _fetch_csv_generic(path, "paper_trades")
 
 
+def push_analyst_targets_to_github(
+    csv_content: str,
+    message: str = DEFAULT_ANALYST_TARGETS_MESSAGE,
+) -> bool:
+    """把 csv_content 推到遠端 analyst_targets.csv(法人目標價永久化)。
+
+    跟 watchlist / trades / paper_trades 同一個 branch(watchlist-sync,
+    避免觸發 main redeploy)。
+    """
+    path = os.environ.get(
+        "GITHUB_ANALYST_TARGETS_PATH", DEFAULT_ANALYST_TARGETS_PATH,
+    )
+    return _push_csv_generic(csv_content, path, message, "analyst_targets")
+
+
+def fetch_analyst_targets_from_github() -> str | None:
+    """從 watchlist-sync 分支拉最新 analyst_targets.csv(雲端 boot remote-first)。"""
+    path = os.environ.get(
+        "GITHUB_ANALYST_TARGETS_PATH", DEFAULT_ANALYST_TARGETS_PATH,
+    )
+    return _fetch_csv_generic(path, "analyst_targets")
+
+
 __all__ = [
     "push_watchlist_to_github",
     "fetch_watchlist_from_github",
@@ -312,4 +339,6 @@ __all__ = [
     "fetch_trades_from_github",
     "push_paper_trades_to_github",
     "fetch_paper_trades_from_github",
+    "push_analyst_targets_to_github",
+    "fetch_analyst_targets_from_github",
 ]
