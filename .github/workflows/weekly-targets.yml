@@ -1,0 +1,59 @@
+name: Weekly Analyst Targets
+
+# 週日 22:13 台北 = 14:13 UTC 抓全市場法人目標價
+# - 平日 daily-notify 只抓 watchlist + picks(快、quota 內)
+# - 週日跑全市場 ~1500 檔 cover 冷門股 + 為下週 picks pre-warm cache
+on:
+  schedule:
+    - cron: "13 14 * * 0"   # 週日 22:13 台北
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Override limit (debug only,留空抓全市場)"
+        required: false
+        default: ""
+
+jobs:
+  fetch-all:
+    runs-on: ubuntu-latest
+    # 全市場 ~1500 檔 × ~0.5s/檔 yfinance + 部分走 Gemini fallback,
+    # 預估 ~30-60 分鐘,timeout 留 90 分鐘緩衝。
+    timeout-minutes: 90
+    permissions:
+      contents: write   # commit + push snapshot CSV
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch analyst targets (full universe)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "${{ inputs.limit }}" ]; then
+            python scripts/fetch_analyst_targets.py --scope=all --limit "${{ inputs.limit }}"
+          else
+            python scripts/fetch_analyst_targets.py --scope=all
+          fi
+
+      - name: Commit analyst_targets snapshot if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/analyst_targets.csv 2>/dev/null || true
+          if git diff --quiet --staged; then
+            echo "No analyst_targets snapshot changes to commit"
+          else
+            git commit -m "chore(analyst-targets): weekly full-market refresh [skip ci]"
+            git push
+          fi

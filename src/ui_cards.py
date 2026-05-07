@@ -251,6 +251,8 @@ def render_pick_card(
     risk_reward = row.get("risk_reward") if show_targets else None
     win_rate = row.get("win_rate")  # Phase B 加;Phase A 通常 None
     ml_prob = row.get("ml_prob")    # Stage 1 加;雲端 enrich 後有值
+    analyst_target_mean = row.get("analyst_target_mean")
+    analyst_num = row.get("analyst_num")
 
     # 產業 badge(2026-05-06 加):caller 傳 row['industry'] / row['industry_heat']
     # 才顯;沒傳該欄(舊 caller) → 不影響 layout
@@ -336,14 +338,22 @@ def render_pick_card(
             with r3_cols[1]:
                 _render_lazy_detail_section_compact(sid, button_key_prefix)
             with r3_cols[2]:
-                _render_card_metadata(n_signals, risk_reward, ml_prob=ml_prob)
+                _render_card_metadata(
+                    n_signals, risk_reward, ml_prob=ml_prob,
+                    analyst_target_mean=analyst_target_mean,
+                    analyst_num=analyst_num,
+                )
         else:
             # 沒 add button(watchlist 卡 / 表格附帶卡)— 只 render 詳細 + metadata
             r3_cols = st.columns([1, 1])
             with r3_cols[0]:
                 _render_lazy_detail_section_compact(sid, button_key_prefix)
             with r3_cols[1]:
-                _render_card_metadata(n_signals, risk_reward, ml_prob=ml_prob)
+                _render_card_metadata(
+                    n_signals, risk_reward, ml_prob=ml_prob,
+                    analyst_target_mean=analyst_target_mean,
+                    analyst_num=analyst_num,
+                )
 
         # 展開詳細分析「打開」狀態時,full helper section 還是要在 button 之外
         # render(button 觸發後 flag=True,下一輪 rerun render 完整 section)
@@ -378,14 +388,18 @@ def _render_card_metadata(
     n_signals: int,
     risk_reward: float | None,
     ml_prob: float | None = None,
+    analyst_target_mean: float | None = None,
+    analyst_num: int | None = None,
 ) -> None:
-    """卡片 row 3 右側 metadata — 信號數 · R:R · 🤖 ML 機率。
+    """卡片 row 3 右側 metadata — 信號數 · R:R · 🤖 ML 機率 · 📊 共識目標。
 
     ml_prob 染色(高 = 好,台股慣例好 = 紅):
     - >= 0.70 → 紅 #d62728
     - 0.60-0.70 → 灰 #888888
     - < 0.60 → 綠 #2ca02c
     None / NaN → 顯「🤖 —」灰
+
+    analyst_target_mean:有資料才顯,沒有就不渲(避免空 badge)。
 
     用 markdown(unsafe_allow_html=True)而非 st.caption 才能上色。
     """
@@ -423,10 +437,33 @@ def _render_card_metadata(
         except (TypeError, ValueError):
             ml_html = "<span style='color:#888'>🤖 —</span>"
 
-    if parts or ml_html:
+    # 法人共識目標價(有資料才顯)
+    analyst_html = ""
+    if analyst_target_mean is not None and not (
+        isinstance(analyst_target_mean, float)
+        and analyst_target_mean != analyst_target_mean  # NaN
+    ):
+        try:
+            mean_val = float(analyst_target_mean)
+            n_str = (
+                str(int(analyst_num)) if analyst_num is not None
+                and not (
+                    isinstance(analyst_num, float) and analyst_num != analyst_num
+                ) else "?"
+            )
+            analyst_html = (
+                f"<span style='color:#1f77b4'>📊 共識 {mean_val:.0f} "
+                f"({n_str} 家)</span>"
+            )
+        except (TypeError, ValueError):
+            analyst_html = ""
+
+    if parts or ml_html or analyst_html:
         text_parts = parts.copy()
         if ml_html:
             text_parts.append(ml_html)
+        if analyst_html:
+            text_parts.append(analyst_html)
         st.markdown(
             "<div style='font-size:11px;color:#888'>"
             + " · ".join(text_parts)

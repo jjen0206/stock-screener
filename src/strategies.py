@@ -1737,6 +1737,36 @@ def _get_industries_map(sids: list[str]) -> dict[str, str]:
     return {r["stock_id"]: r["industry"] for r in rows}
 
 
+def enrich_with_analyst_target(df: pd.DataFrame) -> pd.DataFrame:
+    """加 analyst_target_mean / analyst_num 欄(從 SQLite analyst_targets join)。
+
+    df 缺 stock_id 欄 → 直接回(no-op);analyst_targets 表沒資料 → 兩欄填 NaN。
+    優先 yfinance source(get_analyst_targets_for_sids 已處理優先序)。
+    """
+    if df is None or df.empty:
+        if df is not None:
+            df = df.copy()
+            for col in ("analyst_target_mean", "analyst_num"):
+                if col not in df.columns:
+                    df[col] = pd.Series(dtype=float)
+        return df
+    if "stock_id" not in df.columns:
+        return df
+
+    from src.analyst_targets import get_analyst_targets_for_sids
+    sids = df["stock_id"].astype(str).tolist()
+    targets_map = get_analyst_targets_for_sids(sids)
+
+    df = df.copy()
+    df["analyst_target_mean"] = df["stock_id"].astype(str).map(
+        lambda s: (targets_map.get(s) or {}).get("target_mean")
+    )
+    df["analyst_num"] = df["stock_id"].astype(str).map(
+        lambda s: (targets_map.get(s) or {}).get("num_analysts")
+    )
+    return df
+
+
 def enrich_with_industry_heat(df: pd.DataFrame) -> pd.DataFrame:
     """加 industry + industry_heat 欄。industry_heat = 同 df 內同產業 fire 數。
 
@@ -1862,6 +1892,7 @@ __all__ = [
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
+    "enrich_with_analyst_target",
     "compute_target_prices",
     "ALL_STRATEGIES",
     "STRATEGY_LABELS",
