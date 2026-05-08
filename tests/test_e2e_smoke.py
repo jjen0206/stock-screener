@@ -172,6 +172,28 @@ def test_watchlist_bulk_add_form_renders_and_submits(isolated_db):
     assert sids == {"2330", "2317", "00878"}, f"實際 watchlist={sids}"
 
 
+def test_watchlist_renders_5_column_table(isolated_db):
+    """watchlist 頁渲染表格時應只有 5 欄(編號/名稱/目前股價/漲幅/分析建議),
+    且不再有舊版 view_mode toggle。
+    """
+    from src import database as db
+    db.add_to_watchlist("2330")
+
+    at = _new_at("⭐ 關注")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 表格 — 5 欄 schema(view_mode toggle 已移除,主表只一個 dataframe)
+    dfs = at.dataframe
+    assert len(dfs) >= 1, "watchlist 應渲染表格"
+    main_df = dfs[0].value
+    expected_cols = {"編號", "名稱", "目前股價", "漲幅", "分析建議"}
+    actual_cols = set(main_df.columns)
+    assert actual_cols == expected_cols, (
+        f"watchlist 表格欄位應只有 5 欄 {expected_cols},實際 {actual_cols}"
+    )
+
+
 def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):
     """全部無效格式 → 不炸 + DB 沒新增。"""
     from src import database as db
