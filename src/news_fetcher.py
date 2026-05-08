@@ -239,20 +239,34 @@ def get_watchlist_sids(db_path: str | Path | None = None) -> set[str]:
     return {str(r["stock_id"]) for r in rows if r["stock_id"]}
 
 
-def get_today_picks_sids(
+def get_latest_picks_sids(
     trade_date: str | None = None,
     db_path: str | Path | None = None,
     min_strategies: int = 2,
 ) -> set[str]:
-    """讀今日 daily_picks → set of sid:命中策略 ≥ min_strategies(預設 2)。
+    """讀 daily_picks 最新 trade_date → set of sid(命中策略 ≥ min_strategies)。
 
-    無資料 / 表不存在 → 空 set。trade_date None 取今日 ISO。
+    主公拍板(2026-05-08):picks fetcher 改抓 MAX(trade_date),不再綁
+    today.isoformat() — 這樣 5/08 早上(cron 還沒跑寫今日 picks)仍能拿到
+    5/07 那批 picks,不會「沒 picks 等同空 set」。
+
+    Args:
+      trade_date: 顯式指定日期 → 用該日;None → MAX(trade_date)
+      min_strategies: 命中策略門檻(預設 2 = 嚴格 confluence,給 priority
+        bonus 用;eligible_sids filter 走寬鬆 1 — 從 get_short_picks_sids 調用)
+      db_path: SQLite 路徑
+
+    無資料 / 表不存在 → 空 set。
     """
-    from datetime import date as _date
-    if trade_date is None:
-        trade_date = _date.today().isoformat()
     try:
         with db.get_conn(db_path) as conn:
+            if trade_date is None:
+                latest = conn.execute(
+                    "SELECT MAX(trade_date) AS d FROM daily_picks"
+                ).fetchone()
+                trade_date = latest["d"] if latest else None
+            if not trade_date:
+                return set()
             rows = conn.execute(
                 "SELECT sid, COUNT(DISTINCT strategy) AS n "
                 "FROM daily_picks WHERE trade_date=? GROUP BY sid",
@@ -264,6 +278,11 @@ def get_today_picks_sids(
         str(r["sid"]) for r in rows
         if r["sid"] and r["n"] is not None and r["n"] >= min_strategies
     }
+
+
+# Backward-compat alias — 舊 caller(_priority_score 內 ctx fetcher 等)
+# 仍走「今日 picks」語意,但實際拿 MAX(trade_date),5/08 早上能 fallback 拿 5/07 那批。
+get_today_picks_sids = get_latest_picks_sids
 
 
 def get_short_picks_sids(
@@ -271,27 +290,19 @@ def get_short_picks_sids(
     db_path: str | Path | None = None,
     min_strategies: int = 1,
 ) -> set[str]:
-    """讀今日 daily_picks → set of sid(命中策略 ≥ min_strategies)。
+    """讀 daily_picks 最新 trade_date → set of sid(命中策略 ≥ min_strategies=1)。
 
-    短線 picks 來源,跟 get_today_picks_sids 同一張表,但門檻放寬到 ≥1 策略命中
-    (eligible_sids 不需要嚴格 confluence ≥2,只要被任一短線策略選中即合格)。
+    短線 picks 來源(eligible_sids filter 用),門檻放寬到 ≥1 策略命中
+    (任一短線策略選中即合格,跟 priority bonus 用的嚴格 ≥2 不同)。
+
+    主公拍板(2026-05-08):走 latest 語義,不再綁 today —
+    delegate 到 get_latest_picks_sids 共用 MAX(trade_date) 邏輯。
     """
-    from datetime import date as _date
-    if trade_date is None:
-        trade_date = _date.today().isoformat()
-    try:
-        with db.get_conn(db_path) as conn:
-            rows = conn.execute(
-                "SELECT sid, COUNT(DISTINCT strategy) AS n "
-                "FROM daily_picks WHERE trade_date=? GROUP BY sid",
-                (trade_date,),
-            ).fetchall()
-    except Exception:  # noqa: BLE001
-        return set()
-    return {
-        str(r["sid"]) for r in rows
-        if r["sid"] and r["n"] is not None and r["n"] >= min_strategies
-    }
+    return get_latest_picks_sids(
+        trade_date=trade_date,
+        db_path=db_path,
+        min_strategies=min_strategies,
+    )
 
 
 def get_long_picks_sids(db_path: str | Path | None = None) -> set[str]:
@@ -672,7 +683,8 @@ __all__ = [
     "list_unsent_important_news",
     "mark_news_sent",
     "get_watchlist_sids",
-    "get_today_picks_sids",
+    "get_today_picks_sids",   # alias 維持向後相容
+    "get_latest_picks_sids",
     "get_paper_trades_sids",
     "get_big_movers_sids",
     "get_target_hit_sids",
