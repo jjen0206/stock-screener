@@ -812,6 +812,20 @@ def _load_snapshot_if_needed() -> None:
     from src import portfolio_snapshot
     portfolio_snapshot.safe_boot_load()
 
+    # 灌 paper_trades(實測追蹤)— 同 watchlist / trades pattern。
+    # **修補(2026-05-08 主公二度回報「實測追蹤又不見」)**:
+    # 之前只在 db.preload_snapshots 內呼叫 paper_trades_snapshot.load_from_csv
+    # (本機 file-only),但雲端 main 分支沒這檔(paper_trades 走 watchlist-sync
+    # 分支),容器 reboot 讀不到 → DB 空 → user 加新一輪 → dump 覆蓋 watchlist-sync
+    # → 舊資料 LOST。改 wire safe_boot_load(remote-first GitHub fetch)修這個漏。
+    from src import paper_trades_snapshot
+    paper_trades_snapshot.safe_boot_load()
+
+    # 灌 analyst_targets(法人目標價)— 雙保險(workflow 已 commit 進 main,但雲端
+    # 容器 git pull 之間若有 race,safe_boot_load fetch watchlist-sync 多一層保護)。
+    from src import analyst_targets_snapshot
+    analyst_targets_snapshot.safe_boot_load()
+
     st.session_state[_BOOT_DONE_KEY] = True
 
 

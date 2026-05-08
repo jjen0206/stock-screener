@@ -280,6 +280,58 @@ def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):
 # Phase 2 perf 改動:boot guard / dashboard lazy / run_all_strategies cache
 # ============================================================================
 
+def test_boot_wires_paper_trades_safe_boot_load(isolated_db, monkeypatch):
+    """**Critical persistence regression(2026-05-08 修)**:
+    paper_trades_snapshot.safe_boot_load 必須在 boot 時被呼叫,不然雲端 reboot
+    後 main 分支沒 paper_trades.csv → DB 空 → user 加新一輪 → dump 蓋掉
+    watchlist-sync → 舊資料永久 LOST。
+
+    主公已重複丟資料 ≥2 次,本 test 守住 boot wiring 不能再被砍。同 watchlist /
+    portfolio_snapshot.safe_boot_load 一起驗證(防 future regression 砍其中一個)。
+    """
+    from src import (
+        analyst_targets_snapshot,
+        paper_trades_snapshot,
+        portfolio_snapshot,
+        watchlist_snapshot,
+    )
+
+    pt_calls: list = []
+    at_calls: list = []
+    wl_calls: list = []
+    po_calls: list = []
+    monkeypatch.setattr(
+        paper_trades_snapshot, "safe_boot_load",
+        lambda *a, **kw: pt_calls.append(1) or "test",
+    )
+    monkeypatch.setattr(
+        analyst_targets_snapshot, "safe_boot_load",
+        lambda *a, **kw: at_calls.append(1) or "test",
+    )
+    monkeypatch.setattr(
+        watchlist_snapshot, "safe_boot_load",
+        lambda *a, **kw: wl_calls.append(1) or "test",
+    )
+    monkeypatch.setattr(
+        portfolio_snapshot, "safe_boot_load",
+        lambda *a, **kw: po_calls.append(1) or "test",
+    )
+
+    at = _new_at("🏠 首頁")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    assert len(pt_calls) == 1, (
+        f"paper_trades_snapshot.safe_boot_load 必須在 boot 時跑(主公資料保命)"
+        f",實際 {len(pt_calls)} 次"
+    )
+    assert len(at_calls) == 1, (
+        f"analyst_targets_snapshot.safe_boot_load 應跑,實際 {len(at_calls)} 次"
+    )
+    assert len(wl_calls) == 1, "watchlist 已驗;regression"
+    assert len(po_calls) == 1, "portfolio_snapshot 已驗;regression"
+
+
 def test_boot_setup_runs_only_once(isolated_db, monkeypatch):
     """**Perf regression** — _load_snapshot_if_needed 在多次 rerun 內只該跑
     一次。原本 module-level _snapshot_loaded 被 streamlit 每輪 script 重執行
