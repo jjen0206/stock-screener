@@ -849,6 +849,17 @@ def main() -> None:
     # 註:用 segmented_control 而非 st.tabs — st.tabs 會把所有頁渲染,
     # 觸發不必要的選股 + 大盤情緒抓取。segmented_control 走 session_state
     # 單頁路由,行為等同舊版 radio 但放在主區頂端。
+    #
+    # pending_nav 旗標:程式化跳頁(例 watchlist 點擊行 → 跳「🔍 個股」)
+    # 不能直接寫 st.session_state["nav_segmented"]=X(widget instantiate 後 raise
+    # StreamlitAPIException)。要在 segmented_control render 「之前」消費旗標,
+    # 改 default 即生效,沒有 widget key 衝突。
+    if "pending_nav" in st.session_state:
+        target = st.session_state.pop("pending_nav")
+        st.session_state["active_page"] = target
+        # 同步清掉舊的 nav_segmented widget state,讓新一輪 segmented_control
+        # 拿 default=target 開新 widget(沒衝突,因為前一輪 widget 已銷毀)
+        st.session_state.pop("nav_segmented", None)
     if "active_page" not in st.session_state:
         st.session_state["active_page"] = PAGES[0]  # 預設首頁 Dashboard
     page = st.segmented_control(
@@ -3651,8 +3662,11 @@ def _page_watchlist() -> None:
     )
     st.caption("💡 點擊任一行 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。")
 
-    # 點擊行 → 跳「🔍 個股」頁(設 session_state 兩個 key + rerun)。
-    # nav_segmented 是 widget key,active_page 是邏輯 key,兩者一起設。
+    # 點擊行 → 跳「🔍 個股」頁。
+    # 不能直接寫 st.session_state["nav_segmented"](widget 已 instantiate,
+    # 改 widget state 觸發 StreamlitAPIException — c1b66fc 主公 cloud 撞到)。
+    # 改設 pending_nav 旗標,main() 下一輪 rerun 在 segmented_control render
+    # 之前消費它(同步 active_page + 清掉舊 widget state → 新 widget 拿 default)。
     # wl_last_jumped_sid 防 stale selection 重複觸發 jump。
     if selection and selection.selection.rows:
         idx = selection.selection.rows[0]
@@ -3662,8 +3676,7 @@ def _page_watchlist() -> None:
             if last_jumped != clicked_sid:
                 st.session_state["wl_last_jumped_sid"] = clicked_sid
                 st.session_state["query_stock_id"] = clicked_sid
-                st.session_state["active_page"] = "🔍 個股"
-                st.session_state["nav_segmented"] = "🔍 個股"
+                st.session_state["pending_nav"] = "🔍 個股"
                 st.rerun()
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
