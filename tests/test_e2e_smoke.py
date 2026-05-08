@@ -173,8 +173,40 @@ def test_watchlist_bulk_add_form_renders_and_submits(isolated_db):
 
 
 def test_watchlist_renders_5_column_table(isolated_db):
-    """watchlist 頁渲染表格時應只有 5 欄(編號/名稱/目前股價/漲幅/分析建議),
-    且不再有舊版 view_mode toggle。
+    """watchlist 頁渲染:每檔個股一個 wl_view_{sid} button + 5 欄資料 markdown。
+
+    aaf1ada 後改用 st.columns + per-row button 取代 st.dataframe row select,
+    避免 selection 殘留導致無限導航迴圈。test 改驗 button + markdown
+    存在(不再 assert dataframe 結構)。
+    """
+    from src import database as db
+    db.add_to_watchlist("2330")
+    db.add_to_watchlist("2317")
+
+    at = _new_at("⭐ 關注")
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    # 每檔個股應有一個「🔍 查看」 button(key=wl_view_{sid})
+    btn_keys = {b.key for b in at.button if b.key and b.key.startswith("wl_view_")}
+    assert btn_keys == {"wl_view_2330", "wl_view_2317"}, (
+        f"應為每檔關注股 render 一個 wl_view button,實際 keys: {btn_keys}"
+    )
+
+    # 5 欄 header(markdown 形式)+ 每行 5 欄資料
+    md_text = "\n".join(m.value for m in at.markdown)
+    for label in ("**編號**", "**名稱**", "**目前股價**", "**漲幅**", "**分析建議**"):
+        assert label in md_text, f"header 漏 {label}"
+    # sid 顯在 row 第一欄(用 backtick 包)
+    assert "`2330`" in md_text and "`2317`" in md_text, (
+        f"sid 該 render 在 row 第一欄,實際 markdown: {md_text[:500]}"
+    )
+
+
+def test_watchlist_view_button_sets_pending_nav(isolated_db):
+    """點「🔍 查看」 button → 觸發 _jump_to_stock_query callback →
+    session_state["pending_nav"] / ["query_stock_id"] 都被設好,讓 main()
+    下一輪 rerun 跳「🔍 個股」頁。
     """
     from src import database as db
     db.add_to_watchlist("2330")
@@ -183,21 +215,18 @@ def test_watchlist_renders_5_column_table(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # 表格 — 5 欄 schema(view_mode toggle 已移除,主表只一個 dataframe)
-    dfs = at.dataframe
-    assert len(dfs) >= 1, "watchlist 應渲染表格"
-    main_df = dfs[0].value
-    expected_cols = {"編號", "名稱", "目前股價", "漲幅", "分析建議"}
-    actual_cols = set(main_df.columns)
-    assert actual_cols == expected_cols, (
-        f"watchlist 表格欄位應只有 5 欄 {expected_cols},實際 {actual_cols}"
+    # callback 應設 session_state 兩個 key,沒撞 StreamlitAPIException
+    at.button(key="wl_view_2330").click().run()
+    assert not at.exception, (
+        f"點 wl_view button 後不該炸,實際 exceptions: {_exc_msgs(at)}"
     )
-
-    # 「分析建議」欄不該全空 — 至少有 fallback「資料不足」/「分析失敗」/真實 summary
-    advice_col = main_df["分析建議"]
-    assert all(str(v).strip() for v in advice_col), (
-        f"分析建議欄不應有空白 cell,實際: {advice_col.tolist()}"
+    # 新一輪 main() 已消費 pending_nav,active_page 已切到「🔍 個股」
+    # AppTest.session_state 不支援 .get(),用 in + [] 取
+    active = (
+        at.session_state["active_page"]
+        if "active_page" in at.session_state else None
     )
+    assert active == "🔍 個股", f"active_page 應切到 個股,實際: {active}"
 
 
 def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):

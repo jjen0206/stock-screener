@@ -3524,6 +3524,21 @@ def _remove_watchlist_row(sid: str) -> None:
     st.toast(f"已移除 {sid}", icon="🗑️")
 
 
+def _jump_to_stock_query(sid: str) -> None:
+    """關注頁「🔍 查看」 button 的 callback — 跳「🔍 個股」頁並預填 sid。
+
+    on_click callback 在 Streamlit rerun 之前執行,session_state 寫入安全
+    (不會觸發 widget instantiate 衝突)。main() 在 segmented_control render
+    之前消費 pending_nav,完成跳頁。
+
+    用 callback 而非 in-place st.rerun 是為了避開 dataframe row-select
+    殘留問題(aaf1ada 撞無限迴圈) — explicit button click 是 user intent
+    的明確訊號,沒有 stale state 殘留。
+    """
+    st.session_state["query_stock_id"] = sid
+    st.session_state["pending_nav"] = "🔍 個股"
+
+
 def _page_watchlist() -> None:
     st.header("⭐ 我的關注")
     db.init_db()
@@ -3645,39 +3660,37 @@ def _page_watchlist() -> None:
             "漲幅": f"{change_pct:+.2f}%" if change_pct is not None else "—",
             "分析建議": advice,
         })
-    df = pd.DataFrame(rows)
+    # 表格用 st.columns + 每行 「🔍 查看」 button(取代 st.dataframe row select)
+    # 修法背景:aaf1ada 用 dataframe selection_mode="single-row" 跳頁,但
+    # streamlit dataframe selection 在 rerun / 跨頁切換間殘留 → 觸發無限導航
+    # 迴圈 + 兩邊空白(主公 cloud 撞到)。改 explicit button + on_click callback
+    # 完全避開 selection state 殘留問題。
+    header_cols = st.columns([1.2, 2.2, 1.5, 1.2, 2.5, 1.4])
+    for col, label in zip(
+        header_cols,
+        ["編號", "名稱", "目前股價", "漲幅", "分析建議", ""],
+    ):
+        col.markdown(f"**{label}**")
+    st.divider()
 
-    # 5 欄表格 + single-row select → 點擊跳「🔍 個股」頁(不在本頁展開)
-    selection = st.dataframe(
-        df, use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row",
-        column_config={
-            "編號": st.column_config.TextColumn("編號", width="small"),
-            "名稱": st.column_config.TextColumn("名稱", width="medium"),
-            "目前股價": st.column_config.TextColumn("目前股價", width="small"),
-            "漲幅": st.column_config.TextColumn("漲幅", width="small"),
-            # 分析建議走 medium width — 中文 6-8 字不會被截
-            "分析建議": st.column_config.TextColumn("分析建議", width="medium"),
-        },
+    for row in rows:
+        sid = row["編號"]
+        rcols = st.columns([1.2, 2.2, 1.5, 1.2, 2.5, 1.4])
+        rcols[0].markdown(f"`{sid}`")
+        rcols[1].markdown(row["名稱"])
+        rcols[2].markdown(row["目前股價"])
+        rcols[3].markdown(row["漲幅"])
+        rcols[4].markdown(row["分析建議"])
+        rcols[5].button(
+            "🔍 查看",
+            key=f"wl_view_{sid}",
+            on_click=_jump_to_stock_query,
+            args=(sid,),
+            use_container_width=True,
+        )
+    st.caption(
+        "💡 點「🔍 查看」 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。"
     )
-    st.caption("💡 點擊任一行 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。")
-
-    # 點擊行 → 跳「🔍 個股」頁。
-    # 不能直接寫 st.session_state["nav_segmented"](widget 已 instantiate,
-    # 改 widget state 觸發 StreamlitAPIException — c1b66fc 主公 cloud 撞到)。
-    # 改設 pending_nav 旗標,main() 下一輪 rerun 在 segmented_control render
-    # 之前消費它(同步 active_page + 清掉舊 widget state → 新 widget 拿 default)。
-    # wl_last_jumped_sid 防 stale selection 重複觸發 jump。
-    if selection and selection.selection.rows:
-        idx = selection.selection.rows[0]
-        if 0 <= idx < len(items):
-            clicked_sid = items[idx]["stock_id"]
-            last_jumped = st.session_state.get("wl_last_jumped_sid")
-            if last_jumped != clicked_sid:
-                st.session_state["wl_last_jumped_sid"] = clicked_sid
-                st.session_state["query_stock_id"] = clicked_sid
-                st.session_state["pending_nav"] = "🔍 個股"
-                st.rerun()
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")
