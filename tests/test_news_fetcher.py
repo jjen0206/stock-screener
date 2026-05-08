@@ -76,7 +76,7 @@ def test_normalize_handles_subject_with_trailing_space_key():
         "公司代號": "2330",
         "公司名稱": "台積電",
         "主旨 ": "公告本公司董事會決議...",  # ← 尾有空格的 key
-        "符合條款": "第14款",
+        "符合條款": "第10款",
         "事實發生日": "1150504",
         "說明": "1.事實發生日:民國115年05月04日...",
     }]
@@ -87,7 +87,7 @@ def test_normalize_handles_subject_with_trailing_space_key():
     assert r["company_name"] == "台積電"
     assert r["publish_date"] == "2026-05-04"
     assert r["subject"] == "公告本公司董事會決議..."
-    assert r["article_no"] == "第14款"
+    assert r["article_no"] == "第10款"
     assert r["fact_date"] == "2026-05-04"
     assert r["url_hash"]  # 非空
 
@@ -129,7 +129,7 @@ def test_upsert_news_dedup_by_url_hash(tmp_db):
         {
             "公司代號": "2330", "公司名稱": "台積電",
             "發言日期": "1150504", "發言時間": "70003",
-            "主旨 ": "公告A", "符合條款": "第14款",
+            "主旨 ": "公告A", "符合條款": "第10款",
         },
     ])
     inserted, skipped = news_fetcher.upsert_news(rows)
@@ -151,7 +151,7 @@ def test_list_unsent_filters_by_whitelist(tmp_db):
     rows = news_fetcher.normalize_twse_news([
         {
             "公司代號": "2330", "公司名稱": "台積",
-            "發言日期": "1150504", "主旨 ": "重要訴訟", "符合條款": "第14款",
+            "發言日期": "1150504", "主旨 ": "重要訴訟", "符合條款": "第10款",
         },
         {
             "公司代號": "2454", "公司名稱": "聯發",
@@ -167,7 +167,7 @@ def test_list_unsent_filters_by_whitelist(tmp_db):
     unsent = news_fetcher.list_unsent_important_news(channel="telegram")
     sids = sorted(r["sid"] for r in unsent)
     assert sids == ["2330"], (
-        f"預期只 2330 (第14款 在白名單),實際: {sids}"
+        f"預期只 2330 (第10款 在白名單),實際: {sids}"
     )
 
 
@@ -175,7 +175,7 @@ def test_mark_news_sent_updates_only_target_channel(tmp_db):
     rows = news_fetcher.normalize_twse_news([
         {
             "公司代號": "2330", "公司名稱": "台積",
-            "發言日期": "1150504", "主旨 ": "ok", "符合條款": "第14款",
+            "發言日期": "1150504", "主旨 ": "ok", "符合條款": "第10款",
         },
     ])
     news_fetcher.upsert_news(rows)
@@ -206,7 +206,7 @@ def _make_news_dict() -> dict:
         "sid": "2330", "company_name": "台積電",
         "publish_date": "2026-05-04", "publish_time": "143005",
         "subject": "公告本公司董事會決議盈餘分配",
-        "article_no": "第14款",
+        "article_no": "第10款",
         "description": "1.事實發生日...",
     }
 
@@ -216,7 +216,7 @@ def test_format_news_block_telegram_includes_fields():
     block = notifier.format_news_block(news, channel="telegram")
     assert "台積電 (2330)" in block
     assert "14:30" in block
-    assert "第14款" in block
+    assert "第10款" in block
     assert "盈餘分配" in block
     # Telegram = single asterisk bold
     assert "*台積電 (2330)*" in block
@@ -275,12 +275,12 @@ def _make_news_row(sid: str, article: str, time_str: str = "100000") -> dict:
 
 def test_priority_score_watchlist_first():
     """watchlist 命中 → +1000,壓過任何條款分數。"""
-    n_w = {"sid": "2330", "article_no": "第6款"}    # watchlist 但低條款
-    n_3 = {"sid": "9999", "article_no": "第3款"}    # 第3款 = 100,但不在 watchlist
+    n_w = {"sid": "2330", "article_no": "第4款"}    # watchlist 但低條款
+    n_3 = {"sid": "9999", "article_no": "第30款"}   # 第30款 base 100,但不在 watchlist
     s_w = news_fetcher._priority_score(n_w, watchlist_sids={"2330"})
     s_3 = news_fetcher._priority_score(n_3, watchlist_sids={"2330"})
     assert s_w > s_3, (
-        f"watchlist (第6款 base 60 + 1000 = 1060) 應 > 第3款 base 100,"
+        f"watchlist (第4款 base 70 + 1000 = 1070) 應 > 第30款 base 100,"
         f"得 {s_w} vs {s_3}"
     )
 
@@ -288,43 +288,44 @@ def test_priority_score_watchlist_first():
 def test_priority_score_picks_second():
     """picks 命中 (+500) > 高條款 (100);但 watchlist (+1000) > picks。"""
     n_p = {"sid": "2454", "article_no": "第12款"}   # picks 但很低條款 (50)
-    n_h = {"sid": "9999", "article_no": "第3款"}    # 第3款 = 100
+    n_h = {"sid": "9999", "article_no": "第30款"}   # 第30款 base 100
     n_w = {"sid": "1234", "article_no": "第12款"}   # watchlist 命中
     s_p = news_fetcher._priority_score(n_p, picks_sids={"2454"})
     s_h = news_fetcher._priority_score(n_h, picks_sids={"2454"})
     s_w = news_fetcher._priority_score(
         n_w, watchlist_sids={"1234"}, picks_sids={"2454"},
     )
-    assert s_p > s_h, f"picks (50+500=550) 應 > 第3款 (100),得 {s_p} vs {s_h}"
+    assert s_p > s_h, f"picks (50+500=550) 應 > 第30款 (100),得 {s_p} vs {s_h}"
     assert s_w > s_p, f"watchlist (50+1000=1050) 應 > picks (550),得 {s_w} vs {s_p}"
 
 
 def test_priority_high_article_first():
-    """都不在 watchlist / picks → 純條款 base 比較,第3款 > 第6款 > 第12款。"""
-    n3 = {"sid": "1", "article_no": "第3款"}
-    n6 = {"sid": "2", "article_no": "第6款"}
+    """都不在 watchlist / picks → 純條款 base 比較,第30款 > 第3款 > 第12款。"""
+    n30 = {"sid": "1", "article_no": "第30款"}
+    n3 = {"sid": "2", "article_no": "第3款"}
     n12 = {"sid": "3", "article_no": "第12款"}
+    s30 = news_fetcher._priority_score(n30)
     s3 = news_fetcher._priority_score(n3)
-    s6 = news_fetcher._priority_score(n6)
     s12 = news_fetcher._priority_score(n12)
-    assert s3 == 100 and s6 == 60 and s12 == 50
-    assert s3 > s6 > s12
+    assert s30 == 100 and s3 == 85 and s12 == 50
+    assert s30 > s3 > s12
 
 
 def test_load_unsent_returns_sorted_by_priority(tmp_db, monkeypatch):
     """list_unsent_important_news 回 list 順序:watchlist 第一 → picks 第二 →
     高條款第三 → 低條款最後(排序 by score DESC)。
     """
-    # 4 筆 unsent:不同 sid 不同條款
+    # 4 筆 unsent:不同 sid 不同條款(改用新白名單條款,publish_time 都用盤後
+    # 14:00 排除 trading_hours 加分干擾)
     rows = news_fetcher.normalize_twse_news([
-        _make_news_row("1111", "第12款", "100000"),  # 低條款 50
-        _make_news_row("2222", "第3款",  "100100"),   # 高條款 100
-        _make_news_row("3333", "第6款",  "100200"),   # 中條款 60(picks)
-        _make_news_row("4444", "第12款", "100300"),  # 低條款 50(watchlist)
+        _make_news_row("1111", "第12款", "140000"),  # 低條款 50
+        _make_news_row("2222", "第30款", "140100"),  # 高條款 100
+        _make_news_row("3333", "第4款",  "140200"),  # 中條款 70(picks)
+        _make_news_row("4444", "第12款", "140300"),  # 低條款 50(watchlist)
     ])
     news_fetcher.upsert_news(rows)
 
-    # mock watchlist + picks
+    # mock watchlist + picks(其他 ctx fetcher 走真實 SQLite 都回空 set)
     monkeypatch.setattr(
         news_fetcher, "get_watchlist_sids", lambda db_path=None: {"4444"},
     )
@@ -335,8 +336,8 @@ def test_load_unsent_returns_sorted_by_priority(tmp_db, monkeypatch):
     unsent = news_fetcher.list_unsent_important_news(channel="telegram")
     sids = [r["sid"] for r in unsent]
     assert sids == ["4444", "3333", "2222", "1111"], (
-        f"預期 watchlist 4444 → picks 3333 → 第3款 2222 → 第12款 1111,"
-        f"實際: {sids}"
+        f"預期 watchlist 4444 (1050) → picks 3333 (570) → 第30款 2222 (100) → "
+        f"第12款 1111 (50),實際: {sids}"
     )
 
 
@@ -360,7 +361,7 @@ def test_news_notify_dry_run_prints_to_stdout(tmp_db, monkeypatch, capsys):
             "發言時間": "143005", "公司代號": "2330",
             "公司名稱": "台積電",
             "主旨 ": "重大訴訟",
-            "符合條款": "第14款",
+            "符合條款": "第10款",
             "事實發生日": "1150504",
             "說明": "...",
         },
