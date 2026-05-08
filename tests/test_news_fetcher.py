@@ -146,8 +146,29 @@ def test_upsert_news_dedup_by_url_hash(tmp_db):
 
 # === list_unsent + whitelist filter ===
 
-def test_list_unsent_filters_by_whitelist(tmp_db):
+def _mock_eligible_sids_open(monkeypatch, sids: set[str]) -> None:
+    """測試用 helper:mock get_eligible_news_sids 把指定 sid 全放進 watchlist
+    set,讓主公 2026-05-08 加的 6 類 filter 等同 no-op,讓舊條款 / mark_sent
+    測試專注驗證自身邏輯。
+    """
+    groups = {
+        "watchlist": set(sids),
+        "short_picks": set(),
+        "long_picks": set(),
+        "limit_up": set(),
+        "limit_down_after_up": set(),
+        "hot": set(),
+        "all": set(sids),
+    }
+    monkeypatch.setattr(
+        news_fetcher, "get_eligible_news_sids",
+        lambda trade_date=None, db_path=None: groups,
+    )
+
+
+def test_list_unsent_filters_by_whitelist(tmp_db, monkeypatch):
     """條款不在白名單 → 不在 unsent list 裡。"""
+    _mock_eligible_sids_open(monkeypatch, {"2330", "2454", "1101"})
     rows = news_fetcher.normalize_twse_news([
         {
             "公司代號": "2330", "公司名稱": "台積",
@@ -171,7 +192,8 @@ def test_list_unsent_filters_by_whitelist(tmp_db):
     )
 
 
-def test_mark_news_sent_updates_only_target_channel(tmp_db):
+def test_mark_news_sent_updates_only_target_channel(tmp_db, monkeypatch):
+    _mock_eligible_sids_open(monkeypatch, {"2330"})
     rows = news_fetcher.normalize_twse_news([
         {
             "公司代號": "2330", "公司名稱": "台積",
@@ -332,6 +354,9 @@ def test_load_unsent_returns_sorted_by_priority(tmp_db, monkeypatch):
     monkeypatch.setattr(
         news_fetcher, "get_today_picks_sids", lambda db_path=None: {"3333"},
     )
+    # mock eligible_sids 把 4 個 sid 都納入(沒納入會被 2026-05-08 加的 sid filter
+    # 砍掉 — 此 test 焦點是 priority sort,不是 sid filter)
+    _mock_eligible_sids_open(monkeypatch, {"1111", "2222", "3333", "4444"})
 
     unsent = news_fetcher.list_unsent_important_news(channel="telegram")
     sids = [r["sid"] for r in unsent]
@@ -377,6 +402,9 @@ def test_news_notify_dry_run_prints_to_stdout(tmp_db, monkeypatch, capsys):
             *news_fetcher.upsert_news(news_fetcher.normalize_twse_news(fake_raw)),
         )[:3],
     )
+    # 把 fake news 的 sid 納入 eligible_sids 讓主公 2026-05-08 加的 sid filter
+    # 不擋住此 dry-run e2e test
+    _mock_eligible_sids_open(monkeypatch, {"2330"})
     # 防漏網,確認 requests.post 不會被叫
     with patch("requests.post") as m_post:
         monkeypatch.setattr(
