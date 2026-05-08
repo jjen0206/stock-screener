@@ -38,6 +38,12 @@ jobs:
       - name: Fetch analyst targets (full universe)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 加 TG/Discord secrets 因為 fetch_analyst_targets.py 內部會呼叫
+          # notify_target_changes(主公拍板 2026-05-08 的法人異動推播);
+          # 週日全市場 fetch 跑完比平日 watchlist+picks 多了量,異動推播觸發機率高。
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           if [ -n "${{ inputs.limit }}" ]; then
             python scripts/fetch_analyst_targets.py --scope=all --limit "${{ inputs.limit }}"
