@@ -1061,7 +1061,98 @@ def _page_dashboard() -> None:
             wl_cards, show_signal=False, show_targets=False, show_change=True,
         )
 
-    # === 4. 系統狀態 ===
+    # === 4. 熱門 / 漲停 / 跌停反轉(本地 daily_prices,純 SQL,~毫秒)===
+    st.markdown("### 🌡️ 市場熱度")
+    from src.limit_movers import (
+        get_hot_stocks, get_limit_up, get_limit_down_after_up,
+    )
+    tab_hot, tab_up, tab_down = st.tabs(
+        ["🔥 熱門", "🚀 漲停", "💥 跌停反轉"],
+    )
+    with tab_hot:
+        df_hot = get_hot_stocks(n=30)
+        if df_hot.empty:
+            st.caption("📭 沒抓到熱門股(daily_prices 沒今日資料?)")
+        else:
+            _render_table_with_inline_detail(
+                df_hot,
+                state_prefix="dash_hot",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "成交金額(億)": st.column_config.NumberColumn(
+                        "成交金額 (億)", format="%.1f", width="small",
+                    ),
+                },
+                back_label="← 返回熱門股列表",
+                table_caption=(
+                    "🔥 當日成交金額 Top 30。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_hot_detail",
+            )
+    with tab_up:
+        df_up = get_limit_up()
+        if df_up.empty:
+            st.caption("📭 今日無漲停股(或資料尚未更新)")
+        else:
+            _render_table_with_inline_detail(
+                df_up,
+                state_prefix="dash_up",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "成交金額(億)": st.column_config.NumberColumn(
+                        "成交金額 (億)", format="%.1f", width="small",
+                    ),
+                },
+                back_label="← 返回漲停股列表",
+                table_caption=(
+                    "🚀 當日 ret ≥ +9.95%。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_up_detail",
+            )
+    with tab_down:
+        df_down = get_limit_down_after_up(window=5)
+        if df_down.empty:
+            st.caption("📭 今日無「跌停反轉」股(逃命波警訊條件未觸發)")
+        else:
+            _render_table_with_inline_detail(
+                df_down,
+                state_prefix="dash_down",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "前 N 日漲停日": st.column_config.TextColumn(
+                        "前 5 日漲停日", width="medium",
+                    ),
+                },
+                back_label="← 返回跌停反轉列表",
+                table_caption=(
+                    "💥 當日 ret ≤ -9.95% AND 前 5 日內 ≥ 1 日漲停。"
+                    "「飆完反轉」/ 逃命波警訊。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_down_detail",
+            )
+
+    # === 5. 系統狀態 ===
     st.markdown("### 📅 系統狀態")
     health = db.cache_health_summary()
     b = health["buckets"]
@@ -3536,6 +3627,127 @@ def _on_watchlist_back_to_table() -> None:
     st.session_state["wl_table_version"] = v + 1
 
 
+def _on_inline_table_back(state_prefix: str) -> None:
+    """Generic 「← 返回列表」 callback for _render_table_with_inline_detail。
+
+    清掉 detail_sid + bump table_version,跟 watchlist 同 pattern。
+    """
+    st.session_state[f"{state_prefix}_detail_sid"] = None
+    v = st.session_state.get(f"{state_prefix}_table_version", 0)
+    st.session_state[f"{state_prefix}_table_version"] = v + 1
+
+
+def _render_table_with_inline_detail(
+    df: pd.DataFrame,
+    state_prefix: str,
+    column_config: dict,
+    back_label: str = "← 返回列表",
+    table_caption: str = "💡 點任一行 → 在本區展開該檔完整卡片",
+    sid_column: str = "編號",
+    name_column: str = "名稱",
+    detail_button_prefix: str | None = None,
+) -> bool:
+    """五欄 dataframe + 點行 inline 展開完整卡片(reuse pattern from watchlist)。
+
+    Caller 負責 build df with columns matching column_config keys,以及保留 sid/name
+    欄(default 編號 / 名稱)。session_state 用 state_prefix 隔離不同 caller:
+    - {prefix}_detail_sid: 當前展開的 sid(None = table mode)
+    - {prefix}_table_version: dataframe widget key 版本號(返回時 +1 清 selection)
+
+    detail_button_prefix:render_pick_card 的 button_key_prefix。預設 = state_prefix。
+
+    踩過的坑(已內建):
+    - dataframe selection 跨 mode 切換殘留 → 用 table_version bump 清
+    - 卡片詳細 lazy expander 預設關閉 → 強制設 flag_key=True 讓全部 section 展開
+    - render_pick_card 內部用 button_key_prefix + sid 組 widget key,prefix 必須跨 caller 唯一
+    """
+    if df is None or df.empty:
+        st.caption("📭 沒有資料")
+        return False
+
+    if detail_button_prefix is None:
+        detail_button_prefix = state_prefix
+
+    detail_sid = st.session_state.get(f"{state_prefix}_detail_sid")
+    valid_sids = {str(s) for s in df[sid_column].astype(str).tolist()}
+    detail_valid = detail_sid and detail_sid in valid_sids
+
+    if detail_valid:
+        # === Detail mode:返回 button + 完整卡片 ===
+        st.button(
+            back_label,
+            key=f"{state_prefix}_back_to_table",
+            on_click=_on_inline_table_back,
+            args=(state_prefix,),
+        )
+        sid = detail_sid
+        # 從 df 拿該 row 算 close + change_pct(reuse 已 build 好的資料避免重複 SQL)
+        row = df[df[sid_column].astype(str) == sid].iloc[0]
+        close = row.get("目前股價")
+        chg = row.get("漲幅")
+        try:
+            close = float(close) if close is not None and not pd.isna(close) else None
+        except (TypeError, ValueError):
+            close = None
+        try:
+            chg = float(chg) if chg is not None and not pd.isna(chg) else None
+        except (TypeError, ValueError):
+            chg = None
+        # 補目標價 / 法人共識(detail 才需要,table 不顯)
+        from src.analyst_targets import get_analyst_target
+        tp = compute_target_prices(sid)
+        card = {
+            "stock_id": sid,
+            "name": str(row.get(name_column, "") or ""),
+            "close": close,
+            "change_pct": chg,
+        }
+        if tp is not None:
+            card.update({
+                "target_low": tp.get("target_low"),
+                "target_high": tp.get("target_high"),
+                "stop_loss": tp.get("stop_loss"),
+                "risk_reward": tp.get("risk_reward"),
+            })
+        at_row = get_analyst_target(sid)
+        if at_row:
+            card.update({
+                "analyst_target_mean": at_row.get("target_mean"),
+                "analyst_num": at_row.get("num_analysts"),
+            })
+        cards_for_inject = _inject_intraday_quotes([card], [sid])
+        # 強制展開 lazy detail section
+        flag_key = f"card_exp_{detail_button_prefix}_{sid}"
+        st.session_state[flag_key] = True
+        render_picks_cards(
+            cards_for_inject,
+            show_signal=False, show_targets=True, show_change=True,
+            show_add_button=True,
+            button_key_prefix=detail_button_prefix,
+        )
+        return True   # detail 已 render → caller 通常 return 不再顯其他 section
+
+    # === Table mode:dataframe with single-row select ===
+    table_version = st.session_state.get(f"{state_prefix}_table_version", 0)
+    selection = st.dataframe(
+        df,
+        use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        key=f"{state_prefix}_table_v{table_version}",
+        column_config=column_config,
+    )
+    st.caption(table_caption)
+
+    if selection and selection.selection.rows:
+        idx = selection.selection.rows[0]
+        if 0 <= idx < len(df):
+            clicked_sid = str(df.iloc[idx][sid_column])
+            if st.session_state.get(f"{state_prefix}_detail_sid") != clicked_sid:
+                st.session_state[f"{state_prefix}_detail_sid"] = clicked_sid
+                st.rerun()
+    return False
+
+
 def _page_watchlist() -> None:
     st.header("⭐ 我的關注")
     db.init_db()
@@ -3660,87 +3872,13 @@ def _page_watchlist() -> None:
 
     df = pd.DataFrame(rows)
 
-    # === Detail mode vs Table mode ===
-    # 主公拍板:點擊行 → 在「📌 我的關注」頁 inline 展開完整卡片(不跳頁)
-    # 用 wl_detail_sid 切 mode + wl_table_version bump 清 selection 殘留
-    # (跨 mode 切換時 dataframe key 改變,新 widget 沒舊 selection 干擾)。
-    wl_detail_sid = st.session_state.get("wl_detail_sid")
-    detail_valid = wl_detail_sid and any(
-        it["stock_id"] == wl_detail_sid for it in items
-    )
-
-    if detail_valid:
-        # === Detail mode:返回 button + 完整卡片 ===
-        st.button(
-            "← 返回關注列表",
-            key="wl_back_to_table",
-            on_click=_on_watchlist_back_to_table,
-        )
-        sid = wl_detail_sid
-        from src.analyst_targets import get_analyst_target
-
-        # 從 SQLite 拿 latest close + change_pct(detail mode 不 reuse table loop)
-        with db.get_conn() as conn:
-            recent = conn.execute(
-                "SELECT close FROM daily_prices "
-                "WHERE stock_id=? ORDER BY date DESC LIMIT 2",
-                (sid,),
-            ).fetchall()
-        d_close = (
-            float(recent[0]["close"])
-            if recent and recent[0]["close"] is not None else None
-        )
-        d_prev = (
-            float(recent[1]["close"])
-            if len(recent) > 1 and recent[1]["close"] is not None else None
-        )
-        d_chg = (
-            (d_close - d_prev) / d_prev * 100
-            if (d_close and d_prev) else None
-        )
-        d_tp = compute_target_prices(sid)
-        card = {
-            "stock_id": sid,
-            "name": name_map.get(sid, "—"),
-            "close": d_close,
-            "change_pct": d_chg,
-        }
-        if d_tp is not None:
-            card.update({
-                "target_low": d_tp.get("target_low"),
-                "target_high": d_tp.get("target_high"),
-                "stop_loss": d_tp.get("stop_loss"),
-                "risk_reward": d_tp.get("risk_reward"),
-            })
-        d_at = get_analyst_target(sid)
-        if d_at:
-            card.update({
-                "analyst_target_mean": d_at.get("target_mean"),
-                "analyst_num": d_at.get("num_analysts"),
-            })
-        # 盤中 quote 注入(非交易時段 no-op)
-        cards_for_inject = _inject_intraday_quotes([card], [sid])
-        # 預先把詳細展開 flag 設 True,render_pick_card render 完
-        # _render_lazy_detail_section_body 自動跑(主力燈號 / 技術摘要 / 操作建議
-        # 全在卡片下面)
-        flag_key = "card_exp_wl_detail_" + sid
-        st.session_state[flag_key] = True
-        render_picks_cards(
-            cards_for_inject,
-            show_signal=False, show_targets=True, show_change=True,
-            show_add_button=True,  # 卡片內含「🗑️ 移除關注」 toggle
-            button_key_prefix="wl_detail",
-        )
-        return  # detail mode 不顯目標價參考 / 編輯區塊
-
-    # === Table mode:5 欄純展示 + on_select 偵測點擊 ===
-    table_version = st.session_state.get("wl_table_version", 0)
-    selection = st.dataframe(
+    # 主公拍板:點擊行 → inline 展開完整卡片(不跳頁)
+    # reuse _render_table_with_inline_detail helper(state_prefix="wl"),內部
+    # 自動處理 detail / table mode 切換 + table_version bump 清 selection 殘留。
+    # helper 回 True = detail mode 已 render(skip 後面的 目標價參考 / 編輯)。
+    showed_detail = _render_table_with_inline_detail(
         df,
-        use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row",
-        # bump version 強制換 widget id → selection 殘留歸零(主公以前撞過 loop)
-        key=f"wl_table_v{table_version}",
+        state_prefix="wl",
         column_config={
             "編號": st.column_config.TextColumn("編號", width="small"),
             "名稱": st.column_config.TextColumn("名稱", width="medium"),
@@ -3752,19 +3890,12 @@ def _page_watchlist() -> None:
             ),
             "分析建議": st.column_config.TextColumn("分析建議", width="medium"),
         },
+        back_label="← 返回關注列表",
+        table_caption="💡 點任一行 → 在本頁展開該檔完整卡片(K 線、技術、法人目標價)",
+        detail_button_prefix="wl_detail",
     )
-    st.caption("💡 點任一行 → 在本頁展開該檔完整卡片(K 線、技術、法人目標價)")
-
-    # 偵測點擊 → 設 wl_detail_sid + rerun 進 detail mode
-    # 用同一輪 selection 的 row idx 取 sid,不用 last_jumped 比對
-    # (table_version bump 已保證 dataframe widget 重建,沒 stale selection)
-    if selection and selection.selection.rows:
-        idx = selection.selection.rows[0]
-        if 0 <= idx < len(rows):
-            clicked_sid = rows[idx]["編號"]
-            if st.session_state.get("wl_detail_sid") != clicked_sid:
-                st.session_state["wl_detail_sid"] = clicked_sid
-                st.rerun()
+    if showed_detail:
+        return
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")
