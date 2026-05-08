@@ -332,21 +332,55 @@ SCHEMA: list[str] = [
     # source='yfinance' 直接拿 Yahoo Finance Analyst Estimates
     # source='gemini_news' 拿不到 yfinance 時走 Gemini 解析新聞
     # PK 加 source → 同一 sid 兩種來源各保一筆,UI 顯時優先 yfinance(較準)
+    # previous_target_mean / previous_fetched_at(2026-05-08 加):
+    #   每次 upsert 時把當前 target_mean / fetched_at 存成 previous,讓
+    #   推播 / picks Δ 可比對「這次 vs 上一次」變動,不需另開 history table。
     """
     CREATE TABLE IF NOT EXISTS analyst_targets (
-        stock_id       TEXT NOT NULL,
-        target_mean    REAL,
-        target_median  REAL,
-        target_high    REAL,
-        target_low     REAL,
-        num_analysts   INTEGER,
-        source         TEXT NOT NULL,
-        fetched_at     TEXT NOT NULL,
+        stock_id              TEXT NOT NULL,
+        target_mean           REAL,
+        target_median         REAL,
+        target_high           REAL,
+        target_low            REAL,
+        num_analysts          INTEGER,
+        source                TEXT NOT NULL,
+        fetched_at            TEXT NOT NULL,
+        previous_target_mean  REAL,
+        previous_fetched_at   TEXT,
         PRIMARY KEY (stock_id, source)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_analyst_targets_sid "
     "ON analyst_targets(stock_id)",
+    # analyst_target_alerts:法人異動推播去重(同 sid 同日同方向只推一次)
+    """
+    CREATE TABLE IF NOT EXISTS analyst_target_alerts (
+        sid             TEXT NOT NULL,
+        alert_date      TEXT NOT NULL,
+        direction       TEXT NOT NULL CHECK(direction IN ('up', 'down')),
+        sent_telegram   INTEGER NOT NULL DEFAULT 0,
+        sent_discord    INTEGER NOT NULL DEFAULT 0,
+        old_target      REAL,
+        new_target      REAL,
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (sid, alert_date, direction)
+    )
+    """,
+    # target_hit_log:現價達法人共識目標價推播,7 日冷卻防重推
+    """
+    CREATE TABLE IF NOT EXISTS target_hit_log (
+        sid              TEXT NOT NULL,
+        hit_date         TEXT NOT NULL,
+        close            REAL NOT NULL,
+        target_consensus REAL NOT NULL,
+        sent_telegram    INTEGER NOT NULL DEFAULT 0,
+        sent_discord     INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL,
+        PRIMARY KEY (sid, hit_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_target_hit_log_sid_date "
+    "ON target_hit_log(sid, hit_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -368,6 +402,27 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute(stmt)
         _migrate_daily_picks_add_ml_prob(conn)
         _migrate_paper_trades_add_trailing(conn)
+        _migrate_analyst_targets_add_previous(conn)
+
+
+def _migrate_analyst_targets_add_previous(conn) -> None:
+    """主公拍板「法人異動推播」(2026-05-08):加 previous_target_mean /
+    previous_fetched_at 欄到既有 analyst_targets,讓 upsert 時保留前一次值
+    供推播 / picks Δ 比對(避另開 history table 浪費空間)。冪等。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(analyst_targets)"
+        ).fetchall()
+    }
+    if "previous_target_mean" not in cols:
+        conn.execute(
+            "ALTER TABLE analyst_targets ADD COLUMN previous_target_mean REAL"
+        )
+    if "previous_fetched_at" not in cols:
+        conn.execute(
+            "ALTER TABLE analyst_targets ADD COLUMN previous_fetched_at TEXT"
+        )
 
 
 def _migrate_daily_picks_add_ml_prob(conn) -> None:

@@ -125,6 +125,9 @@ def main() -> int:
         return 0
 
     n_yf = n_gemini = n_fail = 0
+    # 收集每筆 upsert 的 change_info,batch 結束後一次 push 異動推播
+    # (主公拍板 2026-05-08:|Δ%| ≥ 5% 且 sid ∈ 6 類聯集才推 + 同日同方向防重複)
+    changes_for_alert: list[dict] = []
     for i, sid in enumerate(sids, start=1):
         name = _name_for_sid(sid)
         try:
@@ -136,6 +139,9 @@ def main() -> int:
             print(f"  [{i}/{len(sids)}] {sid} 失敗:{e}", flush=True)
             n_fail += 1
             continue
+
+        if data and data.get("_change_info"):
+            changes_for_alert.append(data["_change_info"])
 
         if data is None:
             n_fail += 1
@@ -169,6 +175,25 @@ def main() -> int:
         f"失敗 {n_fail} / 總 {len(sids)}",
         flush=True,
     )
+
+    # === 異動推播(主公拍板 2026-05-08)===
+    # 對所有 upsert 完的 changes,跑一次 notify_target_changes:
+    # 內部 filter sid ∈ 6 類聯集 + |Δ%| ≥ 5% + 同日同方向未推過 → push TG/Discord
+    if changes_for_alert:
+        try:
+            from src.analyst_target_alerts import notify_target_changes
+            result = notify_target_changes(changes_for_alert)
+            print(
+                f"[ANALYST-ALERT] 異動推播 — 收集 {len(changes_for_alert)} "
+                f"筆 change → 通過 filter {result['n_eligible']} 筆 → "
+                f"TG={result['n_pushed_telegram']} / "
+                f"Discord={result['n_pushed_discord']}",
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            # 異動推播失敗不該影響 fetch CLI 的 exit code
+            print(f"[ANALYST-ALERT] 推播 step 失敗(忽略):{e}", flush=True)
+
     return 0
 
 

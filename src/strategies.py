@@ -1738,15 +1738,20 @@ def _get_industries_map(sids: list[str]) -> dict[str, str]:
 
 
 def enrich_with_analyst_target(df: pd.DataFrame) -> pd.DataFrame:
-    """加 analyst_target_mean / analyst_num 欄(從 SQLite analyst_targets join)。
+    """加 analyst_target_mean / analyst_num / analyst_target_prev_mean 欄
+    (從 SQLite analyst_targets join)。
 
-    df 缺 stock_id 欄 → 直接回(no-op);analyst_targets 表沒資料 → 兩欄填 NaN。
+    df 缺 stock_id 欄 → 直接回(no-op);analyst_targets 表沒資料 → 三欄填 NaN。
     優先 yfinance source(get_analyst_targets_for_sids 已處理優先序)。
+    `analyst_target_prev_mean` 用於 picks 推播 Δ 標示(主公 2026-05-08 拍板)。
     """
     if df is None or df.empty:
         if df is not None:
             df = df.copy()
-            for col in ("analyst_target_mean", "analyst_num"):
+            for col in (
+                "analyst_target_mean", "analyst_num",
+                "analyst_target_prev_mean",
+            ):
                 if col not in df.columns:
                     df[col] = pd.Series(dtype=float)
         return df
@@ -1763,6 +1768,9 @@ def enrich_with_analyst_target(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["analyst_num"] = df["stock_id"].astype(str).map(
         lambda s: (targets_map.get(s) or {}).get("num_analysts")
+    )
+    df["analyst_target_prev_mean"] = df["stock_id"].astype(str).map(
+        lambda s: (targets_map.get(s) or {}).get("previous_target_mean")
     )
     return df
 

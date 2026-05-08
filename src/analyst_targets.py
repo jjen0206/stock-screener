@@ -342,44 +342,76 @@ def upsert_analyst_target(
     sid: str,
     data: dict[str, Any],
     db_path: str | Path | None = None,
-) -> None:
-    """INSERT OR REPLACE INTO analyst_targets。
+) -> dict[str, Any] | None:
+    """INSERT OR REPLACE INTO analyst_targets,並把舊 target_mean 寫進
+    previous_target_mean(供 picks Δ 顯示 + 異動推播比對用)。
 
-    data 必有 source(yfinance / gemini_news);觸發 dump CSV snapshot。
+    Returns:
+        dict {old_target_mean, new_target_mean, sid, source, fetched_at} —
+        caller(scripts/fetch_analyst_targets.py)用來判斷異動推播。
+        缺 source / data 空 → None。
     """
     if not data or not data.get("source"):
-        return
+        return None
     db.init_db(db_path)
+    new_target_mean = data.get("target_mean")
+    new_fetched = _now_iso()
     with db.get_conn(db_path) as conn:
+        # 先撈舊值(同 sid + source)— 沒紀錄則 old=None
+        old_row = conn.execute(
+            "SELECT target_mean, fetched_at FROM analyst_targets "
+            "WHERE stock_id=? AND source=?",
+            (sid, data["source"]),
+        ).fetchone()
+        old_target_mean = (
+            float(old_row["target_mean"])
+            if old_row and old_row["target_mean"] is not None else None
+        )
+        old_fetched_at = old_row["fetched_at"] if old_row else None
+
         conn.execute(
             """
             INSERT INTO analyst_targets (
                 stock_id, target_mean, target_median, target_high, target_low,
-                num_analysts, source, fetched_at
+                num_analysts, source, fetched_at,
+                previous_target_mean, previous_fetched_at
             ) VALUES (
                 :stock_id, :target_mean, :target_median, :target_high, :target_low,
-                :num_analysts, :source, :fetched_at
+                :num_analysts, :source, :fetched_at,
+                :prev_mean, :prev_fetched
             )
             ON CONFLICT(stock_id, source) DO UPDATE SET
-                target_mean   = excluded.target_mean,
-                target_median = excluded.target_median,
-                target_high   = excluded.target_high,
-                target_low    = excluded.target_low,
-                num_analysts  = excluded.num_analysts,
-                fetched_at    = excluded.fetched_at
+                target_mean          = excluded.target_mean,
+                target_median        = excluded.target_median,
+                target_high          = excluded.target_high,
+                target_low           = excluded.target_low,
+                num_analysts         = excluded.num_analysts,
+                fetched_at           = excluded.fetched_at,
+                previous_target_mean = excluded.previous_target_mean,
+                previous_fetched_at  = excluded.previous_fetched_at
             """,
             {
                 "stock_id": sid,
-                "target_mean": data.get("target_mean"),
+                "target_mean": new_target_mean,
                 "target_median": data.get("target_median"),
                 "target_high": data.get("target_high"),
                 "target_low": data.get("target_low"),
                 "num_analysts": data.get("num_analysts"),
                 "source": data["source"],
-                "fetched_at": _now_iso(),
+                "fetched_at": new_fetched,
+                "prev_mean": old_target_mean,
+                "prev_fetched": old_fetched_at,
             },
         )
     db._dump_analyst_targets_snapshot(db_path)
+    return {
+        "sid": sid,
+        "source": data["source"],
+        "old_target_mean": old_target_mean,
+        "new_target_mean": float(new_target_mean) if new_target_mean else None,
+        "fetched_at": new_fetched,
+        "num_analysts": data.get("num_analysts"),
+    }
 
 
 def get_analyst_target(
@@ -396,7 +428,8 @@ def get_analyst_target(
         row = conn.execute(
             """
             SELECT stock_id, target_mean, target_median, target_high, target_low,
-                   num_analysts, source, fetched_at
+                   num_analysts, source, fetched_at,
+                   previous_target_mean, previous_fetched_at
             FROM analyst_targets
             WHERE stock_id=?
             ORDER BY CASE source WHEN 'yfinance' THEN 0 ELSE 1 END
@@ -425,7 +458,8 @@ def get_analyst_targets_for_sids(
         rows = conn.execute(
             f"""
             SELECT stock_id, target_mean, target_median, target_high, target_low,
-                   num_analysts, source, fetched_at
+                   num_analysts, source, fetched_at,
+                   previous_target_mean, previous_fetched_at
             FROM analyst_targets
             WHERE stock_id IN ({placeholders})
             """,
@@ -452,14 +486,19 @@ def fetch_and_store(
 ) -> dict[str, Any] | None:
     """先試 yfinance,失敗才走 Gemini 解析新聞;命中即寫 SQLite。
 
-    Returns: 寫進去的 data dict;兩來源都失敗 → None。
+    Returns: 寫進去的 data dict + 額外 keys old_target_mean / change_info
+             (供 caller 收集做異動推播);兩來源都失敗 → None。
     """
     data = fetch_analyst_target_yfinance(sid)
     if data is None and use_gemini_fallback:
         data = fetch_analyst_target_from_news(sid, name=name)
     if data is None:
         return None
-    upsert_analyst_target(sid, data, db_path=db_path)
+    change_info = upsert_analyst_target(sid, data, db_path=db_path)
+    # 把 change_info 放進回傳 dict 方便 caller 用(scripts/fetch_analyst_targets.py
+    # 收集後一次跑 notify_target_changes)
+    if change_info:
+        data["_change_info"] = change_info
     return data
 
 

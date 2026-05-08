@@ -202,6 +202,22 @@ def main() -> int:
     )
     print("[DAILY] 寫 last_update.txt", flush=True)
 
+    # === 觸目標價提醒(主公拍板 2026-05-08)===
+    # close 已更新到最新交易日,跑 notify_target_hits 比對法人共識目標。
+    # 內部 filter sid ∈ 6 類聯集 + 7 日冷卻 + close ≥ target × 100% → push。
+    try:
+        from src.analyst_target_alerts import notify_target_hits
+        hit_result = notify_target_hits()
+        print(
+            f"[DAILY] 觸目標推播 — 候選 {hit_result['n_candidates']} 筆 → "
+            f"通過 filter {hit_result['n_eligible']} 筆 → "
+            f"TG={hit_result['n_pushed_telegram']} / "
+            f"Discord={hit_result['n_pushed_discord']}",
+            flush=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[DAILY] 觸目標推播 step 失敗(忽略):{e}", flush=True)
+
     print("[DAILY] 完成", flush=True)
     return 0
 
