@@ -3524,19 +3524,30 @@ def _remove_watchlist_row(sid: str) -> None:
     st.toast(f"已移除 {sid}", icon="🗑️")
 
 
-def _jump_to_stock_query(sid: str) -> None:
-    """關注頁「🔍 查看」 button 的 callback — 跳「🔍 個股」頁並預填 sid。
+def _on_watchlist_jump_select() -> None:
+    """關注頁上方 selectbox 的 on_change callback — 跳「🔍 個股」頁並預填 sid。
 
-    on_click callback 在 Streamlit rerun 之前執行,session_state 寫入安全
-    (不會觸發 widget instantiate 衝突)。main() 在 segmented_control render
-    之前消費 pending_nav,完成跳頁。
+    selectbox 設計背景:57d4122 用 st.columns + per-row button,但手機(iPhone
+    narrow viewport)上 columns 完全 collapse 成 vertical stack,每 cell 獨佔
+    一行 → 完全沒表格感。改用 st.dataframe(純顯示)+ 上方 selectbox 跳轉:
+    - 桌面:selectbox 一行 + 對齊整齊的表
+    - 手機:selectbox 一行 + 表橫向 scroll(維持表格感不 stack)
 
-    用 callback 而非 in-place st.rerun 是為了避開 dataframe row-select
-    殘留問題(aaf1ada 撞無限迴圈) — explicit button click 是 user intent
-    的明確訊號,沒有 stale state 殘留。
+    selectbox 是 explicit user intent,跟 dataframe row-selection 不一樣不會
+    有 stale state 殘留問題。
+
+    options 格式 "{sid} {name}",取 sid 走 split(" ", 1)[0]。
     """
+    selected = st.session_state.get("wl_jump_select")
+    if not selected:
+        return
+    sid = str(selected).split(" ", 1)[0].strip()
+    if not sid:
+        return
     st.session_state["query_stock_id"] = sid
     st.session_state["pending_nav"] = "🔍 個股"
+    # Reset selectbox 值,避免回關注頁時殘留同檔選擇(影響重新跳同 sid 的場景)
+    st.session_state["wl_jump_select"] = None
 
 
 def _page_watchlist() -> None:
@@ -3656,40 +3667,47 @@ def _page_watchlist() -> None:
         rows.append({
             "編號": sid,
             "名稱": name_map.get(sid, "—"),
-            "目前股價": f"{close:.2f}" if close else "—",
-            "漲幅": f"{change_pct:+.2f}%" if change_pct is not None else "—",
+            # 數值欄存 float / None,讓 NumberColumn 對齊 + format 顯示
+            "目前股價": close,
+            "漲幅": change_pct,
             "分析建議": advice,
         })
-    # 表格用 st.columns + 每行 「🔍 查看」 button(取代 st.dataframe row select)
-    # 修法背景:aaf1ada 用 dataframe selection_mode="single-row" 跳頁,但
-    # streamlit dataframe selection 在 rerun / 跨頁切換間殘留 → 觸發無限導航
-    # 迴圈 + 兩邊空白(主公 cloud 撞到)。改 explicit button + on_click callback
-    # 完全避開 selection state 殘留問題。
-    header_cols = st.columns([1.2, 2.2, 1.5, 1.2, 2.5, 1.4])
-    for col, label in zip(
-        header_cols,
-        ["編號", "名稱", "目前股價", "漲幅", "分析建議", ""],
-    ):
-        col.markdown(f"**{label}**")
-    st.divider()
+    df = pd.DataFrame(rows)
 
-    for row in rows:
-        sid = row["編號"]
-        rcols = st.columns([1.2, 2.2, 1.5, 1.2, 2.5, 1.4])
-        rcols[0].markdown(f"`{sid}`")
-        rcols[1].markdown(row["名稱"])
-        rcols[2].markdown(row["目前股價"])
-        rcols[3].markdown(row["漲幅"])
-        rcols[4].markdown(row["分析建議"])
-        rcols[5].button(
-            "🔍 查看",
-            key=f"wl_view_{sid}",
-            on_click=_jump_to_stock_query,
-            args=(sid,),
-            use_container_width=True,
-        )
+    # === 跳個股查詢 selectbox(在表格之上,explicit user intent)===
+    # 設計背景:
+    # - 57d4122 用 st.columns + button 排版,手機(iPhone narrow)上 collapse
+    #   成 vertical stack,每 cell 獨佔一行 → 完全沒表格感。
+    # - 回到 st.dataframe 純顯示模式(手機自動橫向 scroll),跳轉移到 selectbox。
+    # - selectbox on_change 是 explicit user intent,沒 stale selection 殘留問題。
+    jump_options = [f"{r['編號']} {r['名稱']}" for r in rows]
+    st.selectbox(
+        "📊 跳到個股查詢",
+        options=jump_options,
+        index=None,
+        placeholder="— 請選擇個股 —",
+        key="wl_jump_select",
+        on_change=_on_watchlist_jump_select,
+    )
+
+    # === 純展示表格(no selection_mode)— 手機橫向 scroll 維持表格感 ===
+    st.dataframe(
+        df,
+        use_container_width=True, hide_index=True,
+        column_config={
+            "編號": st.column_config.TextColumn("編號", width="small"),
+            "名稱": st.column_config.TextColumn("名稱", width="medium"),
+            "目前股價": st.column_config.NumberColumn(
+                "目前股價", format="%.2f", width="small",
+            ),
+            "漲幅": st.column_config.NumberColumn(
+                "漲幅 %", format="%+.2f%%", width="small",
+            ),
+            "分析建議": st.column_config.TextColumn("分析建議", width="medium"),
+        },
+    )
     st.caption(
-        "💡 點「🔍 查看」 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。"
+        "💡 上方下拉選擇個股 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。"
     )
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
