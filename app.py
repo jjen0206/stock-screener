@@ -3591,12 +3591,10 @@ def _page_watchlist() -> None:
 
     # 算「分析建議」欄(技術綜合評估 summary,例「多頭整理」/ 「盤整待方向」)
     # 走 _compute_technical_summary cache,同 sid 60s 內只算一次。
+    # 歷史不足 / NaN → 顯「資料不足」(比「—」明顯,主公不會誤判成 bug)。
     from src.individual_sections import _compute_technical_summary
 
     target_prices: dict[str, dict | None] = {}  # 留給下方目標價區塊用
-    closes_map: dict[str, float | None] = {}    # 給下方展開卡片用
-    change_pct_map: dict[str, float | None] = {}
-    summary_map: dict[str, str] = {}
     for it in items:
         sid = it["stock_id"]
         # 取最新兩日 close 算漲跌
@@ -3619,26 +3617,26 @@ def _page_watchlist() -> None:
         else:
             close = prev_close = change_pct = None
         target_prices[sid] = compute_target_prices(sid)
-        closes_map[sid] = close
-        change_pct_map[sid] = change_pct
 
-        # 分析建議(歷史不足 / 無資料 → fallback「—」)
+        # 分析建議(歷史不足 / NaN → 顯「資料不足」;exception → 顯「分析失敗」)
         try:
             tech = _compute_technical_summary(sid)
-            summary_map[sid] = tech.get("summary") or "—"
+            advice = tech.get("summary")
+            if not advice:
+                advice = "資料不足"
         except Exception:  # noqa: BLE001
-            summary_map[sid] = "—"
+            advice = "分析失敗"
 
         rows.append({
             "編號": sid,
             "名稱": name_map.get(sid, "—"),
             "目前股價": f"{close:.2f}" if close else "—",
             "漲幅": f"{change_pct:+.2f}%" if change_pct is not None else "—",
-            "分析建議": summary_map[sid],
+            "分析建議": advice,
         })
     df = pd.DataFrame(rows)
 
-    # 5 欄表格 + single-row select → 點擊行展開卡片詳細
+    # 5 欄表格 + single-row select → 點擊跳「🔍 個股」頁(不在本頁展開)
     selection = st.dataframe(
         df, use_container_width=True, hide_index=True,
         on_select="rerun", selection_mode="single-row",
@@ -3647,53 +3645,26 @@ def _page_watchlist() -> None:
             "名稱": st.column_config.TextColumn("名稱", width="medium"),
             "目前股價": st.column_config.TextColumn("目前股價", width="small"),
             "漲幅": st.column_config.TextColumn("漲幅", width="small"),
-            "分析建議": st.column_config.TextColumn("分析建議"),
+            # 分析建議走 medium width — 中文 6-8 字不會被截
+            "分析建議": st.column_config.TextColumn("分析建議", width="medium"),
         },
     )
+    st.caption("💡 點擊任一行 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。")
 
-    # selection.selection.rows[0] 是 streamlit single-row select 的真相 —
-    # 行被選中即顯卡片,沒選中即不顯。要收起卡片就點「✕ 收起」 button。
-    selected_sid: str | None = None
+    # 點擊行 → 跳「🔍 個股」頁(設 session_state 兩個 key + rerun)。
+    # nav_segmented 是 widget key,active_page 是邏輯 key,兩者一起設。
+    # wl_last_jumped_sid 防 stale selection 重複觸發 jump。
     if selection and selection.selection.rows:
         idx = selection.selection.rows[0]
         if 0 <= idx < len(items):
-            selected_sid = items[idx]["stock_id"]
-
-    # 展開卡片詳細:rendering 完整 render_pick_card(含分析建議展開、移除按鈕)
-    if selected_sid:
-        from src.analyst_targets import get_analyst_target
-
-        tp = target_prices.get(selected_sid)
-        card = {
-            "stock_id": selected_sid,
-            "name": name_map.get(selected_sid, "—"),
-            "close": closes_map.get(selected_sid),
-            "change_pct": change_pct_map.get(selected_sid),
-        }
-        if tp is not None:
-            card.update({
-                "target_low": tp.get("target_low"),
-                "target_high": tp.get("target_high"),
-                "stop_loss": tp.get("stop_loss"),
-                "risk_reward": tp.get("risk_reward"),
-            })
-        at_row = get_analyst_target(selected_sid)
-        if at_row:
-            card.update({
-                "analyst_target_mean": at_row.get("target_mean"),
-                "analyst_num": at_row.get("num_analysts"),
-            })
-        # 盤中行情注入(非交易時段 no-op)
-        cards_for_inject = [card]
-        cards_for_inject = _inject_intraday_quotes(
-            cards_for_inject, [selected_sid],
-        )
-        render_picks_cards(
-            cards_for_inject,
-            show_signal=False, show_targets=True, show_change=True,
-            show_add_button=True,  # 卡片內含「🗑️ 移除關注」 toggle
-            button_key_prefix="watchlist_expand",
-        )
+            clicked_sid = items[idx]["stock_id"]
+            last_jumped = st.session_state.get("wl_last_jumped_sid")
+            if last_jumped != clicked_sid:
+                st.session_state["wl_last_jumped_sid"] = clicked_sid
+                st.session_state["query_stock_id"] = clicked_sid
+                st.session_state["active_page"] = "🔍 個股"
+                st.session_state["nav_segmented"] = "🔍 個股"
+                st.rerun()
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")
