@@ -265,6 +265,103 @@ def test_format_news_block_no_tags_renders_normally():
 
 # === get_short_picks_sids vs get_today_picks_sids 差異 ===
 
+def test_get_latest_picks_sids_returns_max_trade_date(tmp_db):
+    """DB 同時有 5/06 + 5/07 picks,get_latest_picks_sids 應只回 5/07
+    (MAX(trade_date)),不管系統時鐘是哪天。
+    """
+    with db.get_conn() as conn:
+        # 5/06 picks: A 命中 2 策略
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-06', 'pure_stock', 'macd_golden', 'OLD_A', "
+            "'default_v1', '2026-05-06')"
+        )
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-06', 'pure_stock', 'volume_kd', 'OLD_A', "
+            "'default_v1', '2026-05-06')"
+        )
+        # 5/07 picks: B 命中 2 策略
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-07', 'pure_stock', 'macd_golden', 'NEW_B', "
+            "'default_v1', '2026-05-07')"
+        )
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-07', 'pure_stock', 'volume_kd', 'NEW_B', "
+            "'default_v1', '2026-05-07')"
+        )
+
+    sids = nf.get_latest_picks_sids()
+    assert sids == {"NEW_B"}, (
+        f"應只回 5/07 那批 NEW_B(MAX trade_date),實際 {sids}"
+    )
+
+
+def test_get_today_picks_sids_alias_uses_latest(tmp_db):
+    """主公拍板 (2026-05-08): get_today_picks_sids 改成 get_latest_picks_sids
+    的 alias,行為對齊 latest(舊 caller 自動受惠,不用改 source)。
+    """
+    # 系統時鐘是 2026-05-08 (今天),DB 只有 5/07 picks
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-07', 'pure_stock', 'macd_golden', 'X', "
+            "'default_v1', '2026-05-07')"
+        )
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-07', 'pure_stock', 'volume_kd', 'X', "
+            "'default_v1', '2026-05-07')"
+        )
+
+    # 舊 alias 應拿到 5/07 X(舊邏輯綁 today=5/08 會回空)
+    today_sids = nf.get_today_picks_sids()
+    assert today_sids == {"X"}, (
+        f"alias 應回 latest=5/07 的 X,實際 {today_sids}"
+    )
+
+
+def test_eligible_sids_uses_latest_picks_when_today_empty(tmp_db, monkeypatch):
+    """today 沒 picks 但昨日有 → eligible 仍含昨日 picks(latest 語意)。"""
+    # DB 只有昨日 (5/07) picks,沒 today
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO daily_picks (trade_date, universe, strategy, sid, "
+            "params_hash, computed_at) "
+            "VALUES ('2026-05-07', 'pure_stock', 'macd_golden', 'YESTERDAY', "
+            "'default_v1', '2026-05-07')"
+        )
+
+    # 其他 5 類全空(專注驗 picks fallback 到 latest)
+    monkeypatch.setattr(
+        nf, "get_watchlist_sids", lambda db_path=None: set(),
+    )
+    monkeypatch.setattr(
+        nf, "get_long_picks_sids", lambda db_path=None: set(),
+    )
+    with (
+        patch("src.limit_movers.get_limit_up", return_value=pd.DataFrame()),
+        patch("src.limit_movers.get_limit_down_after_up",
+              return_value=pd.DataFrame()),
+        patch("src.limit_movers.get_hot_stocks", return_value=pd.DataFrame()),
+    ):
+        groups = nf.get_eligible_news_sids()
+
+    assert groups["short_picks"] == {"YESTERDAY"}, (
+        f"short_picks 應 fallback 到 latest=5/07 撈到 YESTERDAY,"
+        f"實際 {groups['short_picks']}"
+    )
+    assert "YESTERDAY" in groups["all"]
+
+
 def test_get_short_picks_threshold_1_includes_all(tmp_db):
     """get_short_picks_sids(min_strategies=1)應比 get_today_picks_sids
     (min_strategies=2) 更寬鬆 — 命中 1 策略即合格。
