@@ -528,9 +528,12 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     Input news dict 必有:sid, company_name, publish_date, publish_time, subject,
     article_no。description / fact_date 可選(目前不顯,只當 SQLite 紀錄)。
 
+    可選欄位 tags:list[str] — 由 list_unsent_important_news 注入,顯示
+    sid 的 6 類分組 tag(主公 2026-05-08 拍板)。
+
     格式(仿口袋台股):
-        🔔 *公司名 (sid)*        ⏰ HH:MM
-        📋 *第 N 款 · 條款說明簡稱*
+        🔔 *公司名 (sid)* [⭐ 關注 · 📋 短線 · 🚀 漲停]   ⏰ HH:MM
+        📋 *第 N 款*
         📰 主旨...
         🔗 [Google 新聞搜尋](url)
     """
@@ -540,6 +543,7 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     time_str = str(news.get("publish_time") or "")
     subject = str(news.get("subject") or "")
     article = str(news.get("article_no") or "")
+    tags = news.get("tags") or []
 
     # HHMMSS → HH:MM(若解析失敗顯原值)
     time_label = ""
@@ -551,8 +555,10 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
             padded = time_str.zfill(6)
             time_label = f"{padded[:2]}:{padded[2:4]}"
 
-    # 第一行:🔔 *公司名 (sid)*  ⏰ time
+    # 第一行:🔔 *公司名 (sid)* [tag1 · tag2 · ...]  ⏰ time
     header = f"🔔 {b(f'{name} ({sid})', channel)}"
+    if tags:
+        header += f" [{' · '.join(tags)}]"
     if time_label:
         header += f"  ⏰ {time_label}"
 

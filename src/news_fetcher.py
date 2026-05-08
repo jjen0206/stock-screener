@@ -266,6 +266,138 @@ def get_today_picks_sids(
     }
 
 
+def get_short_picks_sids(
+    trade_date: str | None = None,
+    db_path: str | Path | None = None,
+    min_strategies: int = 1,
+) -> set[str]:
+    """讀今日 daily_picks → set of sid(命中策略 ≥ min_strategies)。
+
+    短線 picks 來源,跟 get_today_picks_sids 同一張表,但門檻放寬到 ≥1 策略命中
+    (eligible_sids 不需要嚴格 confluence ≥2,只要被任一短線策略選中即合格)。
+    """
+    from datetime import date as _date
+    if trade_date is None:
+        trade_date = _date.today().isoformat()
+    try:
+        with db.get_conn(db_path) as conn:
+            rows = conn.execute(
+                "SELECT sid, COUNT(DISTINCT strategy) AS n "
+                "FROM daily_picks WHERE trade_date=? GROUP BY sid",
+                (trade_date,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return set()
+    return {
+        str(r["sid"]) for r in rows
+        if r["sid"] and r["n"] is not None and r["n"] >= min_strategies
+    }
+
+
+def get_long_picks_sids(db_path: str | Path | None = None) -> set[str]:
+    """跑 screen_long() → set of sid(高 ROE / 低 PE / 連續配息 / 殖利率)。
+
+    長線 picks 沒持久化在 daily_picks,只能 on-the-fly 跑;screen_long 純 SQL
+    aggregation 對 financials / dividend 表,~毫秒級。資料缺(token 模式 SQLite
+    空)→ 回空 set。
+    """
+    try:
+        from src.screener_long import screen_long
+        df = screen_long(db_path=db_path)
+        if df is None or df.empty or "stock_id" not in df.columns:
+            return set()
+        return {str(s) for s in df["stock_id"].astype(str).tolist() if s}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def get_eligible_news_sids(
+    trade_date: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, set[str]]:
+    """計算 6 類個股 sid set + 聯集,給新聞 filter / tag 用。
+
+    主公拍板(2026-05-08):重大新聞推播只推這 6 類個股聯集:
+      ⭐ 關注 / 📋 短線 picks / 💎 長線 picks /
+      🚀 漲停 / 💥 跌停反轉 / 🔥 熱門 (top 30 by trading_money)
+
+    Returns:
+        {
+          "watchlist": set, "short_picks": set, "long_picks": set,
+          "limit_up": set, "limit_down_after_up": set, "hot": set,
+          "all": set,  # 6 集合聯集(filter 用)
+        }
+
+    Caller(news_notify cron)batch 開始時呼叫一次,結果放進 ctx 裡跨筆 reuse。
+    """
+    from src.limit_movers import (
+        get_hot_stocks, get_limit_up, get_limit_down_after_up,
+    )
+
+    watchlist = get_watchlist_sids(db_path=db_path)
+    short_picks = get_short_picks_sids(trade_date=trade_date, db_path=db_path)
+    long_picks = get_long_picks_sids(db_path=db_path)
+
+    # limit_movers 回 DataFrame,取「編號」欄
+    def _df_sids(df) -> set[str]:
+        if df is None or df.empty or "編號" not in df.columns:
+            return set()
+        return {str(s) for s in df["編號"].astype(str).tolist() if s}
+
+    try:
+        hot = _df_sids(get_hot_stocks(n=30, db_path=db_path))
+    except Exception:  # noqa: BLE001
+        hot = set()
+    try:
+        limit_up = _df_sids(get_limit_up(db_path=db_path))
+    except Exception:  # noqa: BLE001
+        limit_up = set()
+    try:
+        limit_down = _df_sids(get_limit_down_after_up(db_path=db_path))
+    except Exception:  # noqa: BLE001
+        limit_down = set()
+
+    all_eligible = (
+        watchlist | short_picks | long_picks | limit_up | limit_down | hot
+    )
+    return {
+        "watchlist": watchlist,
+        "short_picks": short_picks,
+        "long_picks": long_picks,
+        "limit_up": limit_up,
+        "limit_down_after_up": limit_down,
+        "hot": hot,
+        "all": all_eligible,
+    }
+
+
+# Tag 顯示順序(主公拍板優先級遞減):⭐ → 📋 → 💎 → 🚀 → 💥 → 🔥
+_NEWS_TAG_ORDER: list[tuple[str, str]] = [
+    ("⭐ 關注", "watchlist"),
+    ("📋 短線", "short_picks"),
+    ("💎 長線", "long_picks"),
+    ("🚀 漲停", "limit_up"),
+    ("💥 跌停反轉", "limit_down_after_up"),
+    ("🔥 熱門", "hot"),
+]
+
+
+def compute_news_tags(
+    sid: str, eligible_groups: dict[str, set[str]],
+) -> list[str]:
+    """sid 在 eligible_groups 裡的哪幾個 set,就回對應 tag(固定優先級順序)。
+
+    例:sid 同時在 watchlist + short_picks + limit_up
+        → ["⭐ 關注", "📋 短線", "🚀 漲停"]
+    """
+    if not sid or not eligible_groups:
+        return []
+    return [
+        tag for tag, key in _NEWS_TAG_ORDER
+        if sid in (eligible_groups.get(key) or set())
+    ]
+
+
 def get_paper_trades_sids(db_path: str | Path | None = None) -> set[str]:
     """讀 paper_trades 表(active 狀態) → set of stock_id。
     主公正在試的部位,推播優先序最高之一(+800)。
@@ -483,9 +615,23 @@ def list_unsent_important_news(
     if not items:
         return []
 
-    # 一次 fetch 所有加權需要的 sid set(watchlist / picks / paper_trades /
-    # big_movers / target_hit),避免逐筆 query。
+    # 一次 fetch 所有加權需要的 sid set + eligible 6 類聯集,避免逐筆 query。
     ctx = build_priority_context(db_path=db_path)
+    eligible_groups = get_eligible_news_sids(db_path=db_path)
+    eligible_all = eligible_groups.get("all") or set()
+
+    # 主公拍板(2026-05-08)雙層 filter:
+    # 1. 條款白名單(SQL 已過濾)
+    # 2. **sid 必須在 6 類聯集內**(此處過濾)— 不在 watchlist / 短線 picks /
+    #    長線 picks / 漲停 / 跌停反轉 / 熱門 任一個的 sid 全部砍掉,
+    #    避免無關公司重訊吵主公。
+    items = [n for n in items if str(n.get("sid") or "") in eligible_all]
+    if not items:
+        return []
+
+    # Enrich 每筆 news 的 tags(供 format_news_block 顯示在 sid 後)
+    for n in items:
+        n["tags"] = compute_news_tags(str(n.get("sid") or ""), eligible_groups)
 
     items.sort(key=lambda n: (
         -_priority_score(n, ctx=ctx),
@@ -531,4 +677,8 @@ __all__ = [
     "get_big_movers_sids",
     "get_target_hit_sids",
     "build_priority_context",
+    "get_short_picks_sids",
+    "get_long_picks_sids",
+    "get_eligible_news_sids",
+    "compute_news_tags",
 ]
