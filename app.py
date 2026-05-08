@@ -100,7 +100,7 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "📊 大盤",
+    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "📊 大盤",
     "💼 交易紀錄", "🧪 實測追蹤", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -883,6 +883,8 @@ def main() -> None:
         _page_stock_query()
     elif page == "⭐ 關注":
         _page_watchlist()
+    elif page == "🌡️ 市場熱度":
+        _page_market_heat()
     elif page == "📊 大盤":
         _page_market_sentiment()
     elif page == "💼 交易紀錄":
@@ -1061,98 +1063,7 @@ def _page_dashboard() -> None:
             wl_cards, show_signal=False, show_targets=False, show_change=True,
         )
 
-    # === 4. 熱門 / 漲停 / 跌停反轉(本地 daily_prices,純 SQL,~毫秒)===
-    st.markdown("### 🌡️ 市場熱度")
-    from src.limit_movers import (
-        get_hot_stocks, get_limit_up, get_limit_down_after_up,
-    )
-    tab_hot, tab_up, tab_down = st.tabs(
-        ["🔥 熱門", "🚀 漲停", "💥 跌停反轉"],
-    )
-    with tab_hot:
-        df_hot = get_hot_stocks(n=30)
-        if df_hot.empty:
-            st.caption("📭 沒抓到熱門股(daily_prices 沒今日資料?)")
-        else:
-            _render_table_with_inline_detail(
-                df_hot,
-                state_prefix="dash_hot",
-                column_config={
-                    "編號": st.column_config.TextColumn("編號", width="small"),
-                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
-                    "目前股價": st.column_config.NumberColumn(
-                        "目前股價", format="%.2f", width="small",
-                    ),
-                    "漲幅": st.column_config.NumberColumn(
-                        "漲幅 %", format="%+.2f%%", width="small",
-                    ),
-                    "成交金額(億)": st.column_config.NumberColumn(
-                        "成交金額 (億)", format="%.1f", width="small",
-                    ),
-                },
-                back_label="← 返回熱門股列表",
-                table_caption=(
-                    "🔥 當日成交金額 Top 30。點任一行 → 展開完整卡片"
-                ),
-                detail_button_prefix="dash_hot_detail",
-            )
-    with tab_up:
-        df_up = get_limit_up()
-        if df_up.empty:
-            st.caption("📭 今日無漲停股(或資料尚未更新)")
-        else:
-            _render_table_with_inline_detail(
-                df_up,
-                state_prefix="dash_up",
-                column_config={
-                    "編號": st.column_config.TextColumn("編號", width="small"),
-                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
-                    "目前股價": st.column_config.NumberColumn(
-                        "目前股價", format="%.2f", width="small",
-                    ),
-                    "漲幅": st.column_config.NumberColumn(
-                        "漲幅 %", format="%+.2f%%", width="small",
-                    ),
-                    "成交金額(億)": st.column_config.NumberColumn(
-                        "成交金額 (億)", format="%.1f", width="small",
-                    ),
-                },
-                back_label="← 返回漲停股列表",
-                table_caption=(
-                    "🚀 當日 ret ≥ +9.95%。點任一行 → 展開完整卡片"
-                ),
-                detail_button_prefix="dash_up_detail",
-            )
-    with tab_down:
-        df_down = get_limit_down_after_up(window=5)
-        if df_down.empty:
-            st.caption("📭 今日無「跌停反轉」股(逃命波警訊條件未觸發)")
-        else:
-            _render_table_with_inline_detail(
-                df_down,
-                state_prefix="dash_down",
-                column_config={
-                    "編號": st.column_config.TextColumn("編號", width="small"),
-                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
-                    "目前股價": st.column_config.NumberColumn(
-                        "目前股價", format="%.2f", width="small",
-                    ),
-                    "漲幅": st.column_config.NumberColumn(
-                        "漲幅 %", format="%+.2f%%", width="small",
-                    ),
-                    "前 N 日漲停日": st.column_config.TextColumn(
-                        "前 5 日漲停日", width="medium",
-                    ),
-                },
-                back_label="← 返回跌停反轉列表",
-                table_caption=(
-                    "💥 當日 ret ≤ -9.95% AND 前 5 日內 ≥ 1 日漲停。"
-                    "「飆完反轉」/ 逃命波警訊。點任一行 → 展開完整卡片"
-                ),
-                detail_button_prefix="dash_down_detail",
-            )
-
-    # === 5. 系統狀態 ===
+    # === 4. 系統狀態 ===
     st.markdown("### 📅 系統狀態")
     health = db.cache_health_summary()
     b = health["buckets"]
@@ -3941,6 +3852,109 @@ def _page_watchlist() -> None:
         if db.remove_from_watchlist(edit_sid):
             st.toast(f"已移除 {edit_sid}", icon="🗑️")
             st.rerun()
+
+
+# === 🌡️ 市場熱度頁 ===
+
+def _page_market_heat() -> None:
+    """市場熱度三 tab:🔥 熱門 / 🚀 漲停 / 💥 跌停反轉。
+
+    純走 SQLite daily_prices(src.limit_movers),~ 毫秒。每 tab 用
+    _render_table_with_inline_detail 渲染:list mode 5 欄表格 + 點行 inline
+    展開完整卡片(不跳頁,跟關注頁同 pattern)。
+
+    跌停反轉 = 當日 ret ≤ -9.95% AND 前 5 日內 ≥ 1 日 ret ≥ +9.95%
+    (「飆完反轉」/ 逃命波警訊),跟普通跌停區別開。
+    """
+    st.header("🌡️ 市場熱度")
+    from src.limit_movers import (
+        get_hot_stocks, get_limit_up, get_limit_down_after_up,
+    )
+    tab_hot, tab_up, tab_down = st.tabs(
+        ["🔥 熱門", "🚀 漲停", "💥 跌停反轉"],
+    )
+    with tab_hot:
+        df_hot = get_hot_stocks(n=30)
+        if df_hot.empty:
+            st.caption("📭 沒抓到熱門股(daily_prices 沒今日資料?)")
+        else:
+            _render_table_with_inline_detail(
+                df_hot,
+                state_prefix="dash_hot",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "成交金額(億)": st.column_config.NumberColumn(
+                        "成交金額 (億)", format="%.1f", width="small",
+                    ),
+                },
+                back_label="← 返回熱門股列表",
+                table_caption=(
+                    "🔥 當日成交金額 Top 30。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_hot_detail",
+            )
+    with tab_up:
+        df_up = get_limit_up()
+        if df_up.empty:
+            st.caption("📭 今日無漲停股(或資料尚未更新)")
+        else:
+            _render_table_with_inline_detail(
+                df_up,
+                state_prefix="dash_up",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "成交金額(億)": st.column_config.NumberColumn(
+                        "成交金額 (億)", format="%.1f", width="small",
+                    ),
+                },
+                back_label="← 返回漲停股列表",
+                table_caption=(
+                    "🚀 當日 ret ≥ +9.95%。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_up_detail",
+            )
+    with tab_down:
+        df_down = get_limit_down_after_up(window=5)
+        if df_down.empty:
+            st.caption("📭 今日無「跌停反轉」股(逃命波警訊條件未觸發)")
+        else:
+            _render_table_with_inline_detail(
+                df_down,
+                state_prefix="dash_down",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "目前股價", format="%.2f", width="small",
+                    ),
+                    "漲幅": st.column_config.NumberColumn(
+                        "漲幅 %", format="%+.2f%%", width="small",
+                    ),
+                    "前 N 日漲停日": st.column_config.TextColumn(
+                        "前 5 日漲停日", width="medium",
+                    ),
+                },
+                back_label="← 返回跌停反轉列表",
+                table_caption=(
+                    "💥 當日 ret ≤ -9.95% AND 前 5 日內 ≥ 1 日漲停。"
+                    "「飆完反轉」/ 逃命波警訊。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="dash_down_detail",
+            )
 
 
 # === 📊 大盤情緒頁 ===
