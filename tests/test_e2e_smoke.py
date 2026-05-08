@@ -172,14 +172,9 @@ def test_watchlist_bulk_add_form_renders_and_submits(isolated_db):
     assert sids == {"2330", "2317", "00878"}, f"實際 watchlist={sids}"
 
 
-def test_watchlist_renders_one_button_per_stock(isolated_db):
-    """watchlist 頁渲染:每檔關注股一顆寬 button(label 含 sid + 名稱 +
-    股價 + 漲幅 + 建議),不再用 dataframe / selectbox / columns。
-
-    這次 refactor(主公明確要求點公司名直接跳):
-    - 主公否決 selectbox 下拉(a9991f4 撤回)
-    - 主公否決 columns 排版(57d4122 手機 collapse)
-    - 改成每筆股一條完整 button,explicit user intent,手機桌面都不 collapse。
+def test_watchlist_table_mode_renders_5_col_dataframe(isolated_db):
+    """watchlist table mode:5 欄 dataframe + on_select single-row。
+    主公拍板 final design — 不再有 selectbox / per-row button(點行 inline 展開)。
     """
     from src import database as db
     db.add_to_watchlist("2330")
@@ -189,56 +184,84 @@ def test_watchlist_renders_one_button_per_stock(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # 每檔關注股一個 wl_jump_{sid} button
-    btn_keys = {
-        b.key for b in at.button if b.key and b.key.startswith("wl_jump_")
-    }
-    assert btn_keys == {"wl_jump_2330", "wl_jump_2317"}, (
-        f"應為每檔關注股 render 一個 wl_jump button,實際 keys: {btn_keys}"
+    dfs = at.dataframe
+    assert len(dfs) >= 1, "watchlist table mode 應渲染 dataframe"
+    main_df = dfs[0].value
+    expected_cols = {"編號", "名稱", "目前股價", "漲幅", "分析建議"}
+    actual_cols = set(main_df.columns)
+    assert actual_cols == expected_cols, (
+        f"watchlist 表格欄位應只有 5 欄 {expected_cols},實際 {actual_cols}"
     )
 
-    # button label 內含 sid + 名稱(label 由所有欄位空格分隔組成)
-    labels_by_sid = {
-        b.key.replace("wl_jump_", ""): b.label
-        for b in at.button if b.key and b.key.startswith("wl_jump_")
-    }
-    assert "2330" in labels_by_sid["wl_jump_2330".replace("wl_jump_", "")] or (
-        "2330" in labels_by_sid.get("2330", "")
-    )
-    for sid, lbl in labels_by_sid.items():
-        assert sid in lbl, f"button label 應含 sid {sid},實際: {lbl}"
-        # label 含分析建議(fallback「資料不足」/「分析失敗」/真實 summary)
-        assert "📈" in lbl, f"button label 應含建議 emoji 📈,實際: {lbl}"
-
-    # 沒有 selectbox / dataframe(完全砍掉舊版)
+    # 沒有舊版 selectbox / per-row jump button
     select_keys = {s.key for s in at.selectbox if s.key}
-    assert "wl_jump_select" not in select_keys, (
-        "watchlist 不應再 render selectbox(已被否決)"
+    assert "wl_jump_select" not in select_keys
+    btn_keys = {b.key for b in at.button if b.key}
+    assert not any(k.startswith("wl_jump_") for k in btn_keys), (
+        f"不該再有 wl_jump_* per-row button,實際: {btn_keys}"
     )
 
 
-def test_watchlist_jump_button_sets_pending_nav(isolated_db):
-    """點任一 wl_jump_{sid} button → 觸發 _on_watchlist_jump callback →
-    session_state["pending_nav"] / ["query_stock_id"] 設好 → main() 下一輪
-    rerun 跳「🔍 個股」頁。
+def test_watchlist_detail_mode_renders_card_inline_no_jump(isolated_db):
+    """設 wl_detail_sid → 切 detail mode 在本頁渲染卡片 + 返回 button。
+    全程在「⭐ 關注」 tab,不寫 pending_nav(不再跳「🔍 個股」頁)。
     """
     from src import database as db
     db.add_to_watchlist("2330")
 
     at = _new_at("⭐ 關注")
+    at.session_state["wl_detail_sid"] = "2330"
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    at.button(key="wl_jump_2330").click().run()
-    assert not at.exception, (
-        f"點 wl_jump button 後不該炸,實際 exceptions: {_exc_msgs(at)}"
+    # 返回 button 應存在
+    btn_keys = {b.key for b in at.button if b.key}
+    assert "wl_back_to_table" in btn_keys, (
+        f"detail mode 應有「← 返回關注列表」 button,實際 keys: {btn_keys}"
     )
 
+    # detail mode 不該把 active_page 切離「⭐ 關注」
     active = (
         at.session_state["active_page"]
         if "active_page" in at.session_state else None
     )
-    assert active == "🔍 個股", f"active_page 應切到 個股,實際: {active}"
+    assert active == "⭐ 關注", (
+        f"detail mode 應仍在「⭐ 關注」 tab,實際 active_page: {active}"
+    )
+
+    # detail mode 不該設 pending_nav(不再跳頁)
+    has_pending = "pending_nav" in at.session_state
+    assert not has_pending, "detail mode 不該設 pending_nav(全程不跳頁)"
+
+
+def test_watchlist_back_button_clears_detail_and_bumps_version(isolated_db):
+    """detail mode 點返回 → wl_detail_sid 清掉 + wl_table_version +1
+    (bump 讓 dataframe key 改變,清 selection 殘留)。
+    """
+    from src import database as db
+    db.add_to_watchlist("2330")
+
+    at = _new_at("⭐ 關注")
+    at.session_state["wl_detail_sid"] = "2330"
+    at.session_state["wl_table_version"] = 3
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    at.button(key="wl_back_to_table").click().run()
+    assert not at.exception, (
+        f"點返回 button 後不該炸,實際: {_exc_msgs(at)}"
+    )
+
+    detail = (
+        at.session_state["wl_detail_sid"]
+        if "wl_detail_sid" in at.session_state else None
+    )
+    assert detail is None, f"返回後 wl_detail_sid 應為 None,實際: {detail}"
+
+    new_version = at.session_state["wl_table_version"]
+    assert new_version == 4, (
+        f"table_version 應 bump 到 4,實際: {new_version}"
+    )
 
 
 def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):
