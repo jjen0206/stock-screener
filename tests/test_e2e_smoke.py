@@ -193,6 +193,12 @@ def test_watchlist_renders_5_column_table(isolated_db):
         f"watchlist 表格欄位應只有 5 欄 {expected_cols},實際 {actual_cols}"
     )
 
+    # 「分析建議」欄不該全空 — 至少有 fallback「資料不足」/「分析失敗」/真實 summary
+    advice_col = main_df["分析建議"]
+    assert all(str(v).strip() for v in advice_col), (
+        f"分析建議欄不應有空白 cell,實際: {advice_col.tolist()}"
+    )
+
 
 def test_watchlist_bulk_add_handles_all_invalid_input(isolated_db):
     """全部無效格式 → 不炸 + DB 沒新增。"""
