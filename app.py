@@ -3524,30 +3524,21 @@ def _remove_watchlist_row(sid: str) -> None:
     st.toast(f"已移除 {sid}", icon="🗑️")
 
 
-def _on_watchlist_jump_select() -> None:
-    """關注頁上方 selectbox 的 on_change callback — 跳「🔍 個股」頁並預填 sid。
+def _on_watchlist_jump(sid: str) -> None:
+    """關注頁「行內寬 button」 on_click callback — 跳「🔍 個股」頁並預填 sid。
 
-    selectbox 設計背景:57d4122 用 st.columns + per-row button,但手機(iPhone
-    narrow viewport)上 columns 完全 collapse 成 vertical stack,每 cell 獨佔
-    一行 → 完全沒表格感。改用 st.dataframe(純顯示)+ 上方 selectbox 跳轉:
-    - 桌面:selectbox 一行 + 對齊整齊的表
-    - 手機:selectbox 一行 + 表橫向 scroll(維持表格感不 stack)
+    Callback 階段安全寫 non-widget session_state keys(pending_nav /
+    query_stock_id),main() 下一輪 rerun 消費 pending_nav + clear nav_segmented
+    完成跳頁。explicit button click 是 user intent,沒 selection 殘留問題。
 
-    selectbox 是 explicit user intent,跟 dataframe row-selection 不一樣不會
-    有 stale state 殘留問題。
-
-    options 格式 "{sid} {name}",取 sid 走 split(" ", 1)[0]。
+    設計演進(踩過的坑):
+    - 57d4122 用 st.columns 排版,手機 collapse 成 vertical stack ❌
+    - a9991f4 改 selectbox,主公否決(要的是「點公司名直接跳」)❌
+    - 現:每筆股一顆 use_container_width=True button,label 內含所有欄位
+      用空格分隔,手機/桌面都不 collapse,explicit click 沒 stale state。
     """
-    selected = st.session_state.get("wl_jump_select")
-    if not selected:
-        return
-    sid = str(selected).split(" ", 1)[0].strip()
-    if not sid:
-        return
     st.session_state["query_stock_id"] = sid
     st.session_state["pending_nav"] = "🔍 個股"
-    # Reset selectbox 值,避免回關注頁時殘留同檔選擇(影響重新跳同 sid 的場景)
-    st.session_state["wl_jump_select"] = None
 
 
 def _page_watchlist() -> None:
@@ -3667,48 +3658,45 @@ def _page_watchlist() -> None:
         rows.append({
             "編號": sid,
             "名稱": name_map.get(sid, "—"),
-            # 數值欄存 float / None,讓 NumberColumn 對齊 + format 顯示
-            "目前股價": close,
-            "漲幅": change_pct,
-            "分析建議": advice,
+            "目前股價": close,        # float | None
+            "漲幅": change_pct,       # float | None
+            "分析建議": advice,       # str
         })
-    df = pd.DataFrame(rows)
 
-    # === 跳個股查詢 selectbox(在表格之上,explicit user intent)===
-    # 設計背景:
-    # - 57d4122 用 st.columns + button 排版,手機(iPhone narrow)上 collapse
-    #   成 vertical stack,每 cell 獨佔一行 → 完全沒表格感。
-    # - 回到 st.dataframe 純顯示模式(手機自動橫向 scroll),跳轉移到 selectbox。
-    # - selectbox on_change 是 explicit user intent,沒 stale selection 殘留問題。
-    jump_options = [f"{r['編號']} {r['名稱']}" for r in rows]
-    st.selectbox(
-        "📊 跳到個股查詢",
-        options=jump_options,
-        index=None,
-        placeholder="— 請選擇個股 —",
-        key="wl_jump_select",
-        on_change=_on_watchlist_jump_select,
-    )
+    # === 每筆關注股一顆寬 button(點哪筆跳哪筆,手機桌面都不 collapse)===
+    # 設計演進:
+    # - 57d4122 st.columns 排版 — 手機 collapse 成 vertical stack ❌
+    # - a9991f4 selectbox + dataframe — 主公否決,要「點公司名直接跳」❌
+    # - 現:每行一顆 use_container_width=True button,label 含所有欄位用空格
+    #   分隔。explicit user intent,沒 selection 殘留;label 內非 markdown
+    #   但空格仍能視覺區隔欄位。
+    st.caption("👇 點任一檔跳「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價")
+    for row in rows:
+        sid = row["編號"]
+        name = row["名稱"]
+        close_val = row["目前股價"]
+        chg_val = row["漲幅"]
+        advice = row["分析建議"]
 
-    # === 純展示表格(no selection_mode)— 手機橫向 scroll 維持表格感 ===
-    st.dataframe(
-        df,
-        use_container_width=True, hide_index=True,
-        column_config={
-            "編號": st.column_config.TextColumn("編號", width="small"),
-            "名稱": st.column_config.TextColumn("名稱", width="medium"),
-            "目前股價": st.column_config.NumberColumn(
-                "目前股價", format="%.2f", width="small",
-            ),
-            "漲幅": st.column_config.NumberColumn(
-                "漲幅 %", format="%+.2f%%", width="small",
-            ),
-            "分析建議": st.column_config.TextColumn("分析建議", width="medium"),
-        },
-    )
-    st.caption(
-        "💡 上方下拉選擇個股 → 跳到「🔍 個股」頁查看完整 K 線 / 技術 / 法人目標價。"
-    )
+        close_str = f"${close_val:.2f}" if close_val is not None else "$—"
+        if chg_val is None:
+            chg_str = "—"
+        elif chg_val > 0:
+            chg_str = f"▲ {chg_val:.2f}%"
+        elif chg_val < 0:
+            chg_str = f"▼ {abs(chg_val):.2f}%"
+        else:
+            chg_str = "→ 0.00%"
+
+        # button label:🔍 編號 名稱  $股價  漲幅  📈 建議(空格區隔欄位)
+        label = f"🔍 {sid} {name}  •  {close_str}  •  {chg_str}  •  📈 {advice}"
+        st.button(
+            label,
+            key=f"wl_jump_{sid}",
+            on_click=_on_watchlist_jump,
+            args=(sid,),
+            use_container_width=True,
+        )
 
     # === 🎯 目標價參考(每檔一行 markdown bullet,跟 Telegram 推播格式一致) ===
     st.markdown("### 🎯 目標價參考")

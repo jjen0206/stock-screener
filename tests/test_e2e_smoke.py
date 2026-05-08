@@ -172,11 +172,14 @@ def test_watchlist_bulk_add_form_renders_and_submits(isolated_db):
     assert sids == {"2330", "2317", "00878"}, f"實際 watchlist={sids}"
 
 
-def test_watchlist_renders_5_column_table(isolated_db):
-    """watchlist 頁渲染:純展示 dataframe(5 欄)+ 上方 selectbox 跳轉。
+def test_watchlist_renders_one_button_per_stock(isolated_db):
+    """watchlist 頁渲染:每檔關注股一顆寬 button(label 含 sid + 名稱 +
+    股價 + 漲幅 + 建議),不再用 dataframe / selectbox / columns。
 
-    ffbda0a 後改用 st.dataframe(no selection_mode) + 上方 selectbox 跳轉,
-    手機上 columns 不再 collapse、表橫向 scroll 維持表格感。
+    這次 refactor(主公明確要求點公司名直接跳):
+    - 主公否決 selectbox 下拉(a9991f4 撤回)
+    - 主公否決 columns 排版(57d4122 手機 collapse)
+    - 改成每筆股一條完整 button,explicit user intent,手機桌面都不 collapse。
     """
     from src import database as db
     db.add_to_watchlist("2330")
@@ -186,31 +189,36 @@ def test_watchlist_renders_5_column_table(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # 跳轉 selectbox 應有 wl_jump_select key
+    # 每檔關注股一個 wl_jump_{sid} button
+    btn_keys = {
+        b.key for b in at.button if b.key and b.key.startswith("wl_jump_")
+    }
+    assert btn_keys == {"wl_jump_2330", "wl_jump_2317"}, (
+        f"應為每檔關注股 render 一個 wl_jump button,實際 keys: {btn_keys}"
+    )
+
+    # button label 內含 sid + 名稱(label 由所有欄位空格分隔組成)
+    labels_by_sid = {
+        b.key.replace("wl_jump_", ""): b.label
+        for b in at.button if b.key and b.key.startswith("wl_jump_")
+    }
+    assert "2330" in labels_by_sid["wl_jump_2330".replace("wl_jump_", "")] or (
+        "2330" in labels_by_sid.get("2330", "")
+    )
+    for sid, lbl in labels_by_sid.items():
+        assert sid in lbl, f"button label 應含 sid {sid},實際: {lbl}"
+        # label 含分析建議(fallback「資料不足」/「分析失敗」/真實 summary)
+        assert "📈" in lbl, f"button label 應含建議 emoji 📈,實際: {lbl}"
+
+    # 沒有 selectbox / dataframe(完全砍掉舊版)
     select_keys = {s.key for s in at.selectbox if s.key}
-    assert "wl_jump_select" in select_keys, (
-        f"應 render wl_jump_select 跳轉 selectbox,實際 keys: {select_keys}"
-    )
-
-    # 表格 — 5 欄 schema(純展示,沒 row select)
-    dfs = at.dataframe
-    assert len(dfs) >= 1, "watchlist 應渲染表格"
-    main_df = dfs[0].value
-    expected_cols = {"編號", "名稱", "目前股價", "漲幅", "分析建議"}
-    actual_cols = set(main_df.columns)
-    assert actual_cols == expected_cols, (
-        f"watchlist 表格欄位應只有 5 欄 {expected_cols},實際 {actual_cols}"
-    )
-
-    # 「分析建議」欄不該全空 — 至少有 fallback「資料不足」/「分析失敗」/真實 summary
-    advice_col = main_df["分析建議"]
-    assert all(str(v).strip() for v in advice_col), (
-        f"分析建議欄不應有空白 cell,實際: {advice_col.tolist()}"
+    assert "wl_jump_select" not in select_keys, (
+        "watchlist 不應再 render selectbox(已被否決)"
     )
 
 
-def test_watchlist_jump_select_sets_pending_nav(isolated_db):
-    """選跳轉 selectbox → 觸發 _on_watchlist_jump_select callback →
+def test_watchlist_jump_button_sets_pending_nav(isolated_db):
+    """點任一 wl_jump_{sid} button → 觸發 _on_watchlist_jump callback →
     session_state["pending_nav"] / ["query_stock_id"] 設好 → main() 下一輪
     rerun 跳「🔍 個股」頁。
     """
@@ -221,18 +229,11 @@ def test_watchlist_jump_select_sets_pending_nav(isolated_db):
     at.run()
     assert not at.exception, _exc_msgs(at)
 
-    # 模擬 user 選了 "2330 台積電"(option 字串以「sid 名稱」格式)
-    sb = at.selectbox(key="wl_jump_select")
-    assert sb is not None, "wl_jump_select selectbox 不存在"
-    options = sb.options
-    target_opt = next((o for o in options if str(o).startswith("2330")), None)
-    assert target_opt is not None, f"沒找到 2330 開頭的選項,實際: {options}"
-    sb.set_value(target_opt).run()
+    at.button(key="wl_jump_2330").click().run()
     assert not at.exception, (
-        f"選 selectbox 後不該炸,實際 exceptions: {_exc_msgs(at)}"
+        f"點 wl_jump button 後不該炸,實際 exceptions: {_exc_msgs(at)}"
     )
 
-    # 新一輪 main() 已消費 pending_nav,active_page 已切到「🔍 個股」
     active = (
         at.session_state["active_page"]
         if "active_page" in at.session_state else None
