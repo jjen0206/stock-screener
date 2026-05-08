@@ -299,6 +299,7 @@ def _select_top_picks(
         analyst_target_mean = at_row.get("target_mean")
         analyst_num = at_row.get("num_analysts")
         analyst_source = at_row.get("source")
+        analyst_target_prev = at_row.get("previous_target_mean")
         qualified.append({
             "rank": 0,  # caller fills
             "sid": sid,
@@ -321,6 +322,7 @@ def _select_top_picks(
             "analyst_target_low": at_row.get("target_low"),
             "analyst_num": analyst_num,
             "analyst_source": analyst_source,
+            "analyst_target_prev_mean": analyst_target_prev,
         })
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
@@ -387,6 +389,8 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     if ml_prob is not None:
         lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
     # 法人共識目標價(yfinance / Gemini news)— 在勝率之前
+    # 加 Δ 標示(主公 2026-05-08 拍板):跟 previous_target_mean 比 |Δ| ≥ 1%
+    # 才顯示「(↑ +5.1%)」/「(↓ -3.2%)」,小變動省略避免雜訊。
     analyst_mean = pick.get("analyst_target_mean")
     if analyst_mean:
         n_analyst = pick.get("analyst_num") or "?"
@@ -395,9 +399,17 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
             upside = (analyst_mean - close) / close * 100
             sign = "+" if upside >= 0 else "-"
             upside_str = f" ({sign}{abs(upside):.0f}%)"
+        delta_str = ""
+        prev_mean = pick.get("analyst_target_prev_mean")
+        if prev_mean and float(prev_mean) > 0:
+            delta_pct = (analyst_mean - float(prev_mean)) / float(prev_mean) * 100
+            if abs(delta_pct) >= 1.0:
+                arrow = "↑" if delta_pct > 0 else "↓"
+                sign_d = "+" if delta_pct > 0 else "-"
+                delta_str = f" ({arrow} {sign_d}{abs(delta_pct):.1f}%)"
         lines.append(
             f"   📊 共識目標 {b(f'{analyst_mean:.0f}', channel)}"
-            f"{upside_str}(券商 {n_analyst} 家)"
+            f"{upside_str}(券商 {n_analyst} 家){delta_str}"
         )
     # 歷史勝率(126 日回測平均,跟卡片勝率欄同來源)
     win_rate = pick.get("win_rate")
