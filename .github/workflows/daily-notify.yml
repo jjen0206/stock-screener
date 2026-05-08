@@ -71,6 +71,12 @@ jobs:
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 加 TG/Discord secrets 因為 fetch_analyst_targets.py 內部會呼叫
+          # notify_target_changes(主公拍板 2026-05-08 的法人異動推播);沒 expose
+          # 會 silently TG=0 / Discord=0(此 yaml 修法之前的 root cause)。
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python scripts/fetch_analyst_targets.py --scope=watchlist
           python scripts/fetch_analyst_targets.py --scope=picks
@@ -103,6 +109,12 @@ jobs:
       - name: Fetch TWSE OpenAPI market data (refresh snapshot)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          # daily_market_update.py 結尾會呼叫 notify_target_hits(主公拍板
+          # 2026-05-08 觸目標價推播);沒 expose 會 silently TG=0 / Discord=0
+          # (此 yaml 修法之前的 root cause)。
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/daily_market_update.py
         continue-on-error: true
 
