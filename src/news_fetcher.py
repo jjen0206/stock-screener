@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 TWSE_NEWS_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 _USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 stock-screener/1.0"
 
-# 白名單條款 — 推哪些(基於市場關注度 + 對股價影響度)。主公拍板 16 款。
+# 白名單條款 — 推哪些(基於市場關注度 + 對股價影響度)。主公拍板 17 款。
 # 2026-05-08 修正(對齊真實條文 + 砍雜訊):
 #   砍:第 6 款 (董監事人事變動,雜訊多) / 第 7 款 (換會計師,低頻意義不大)
 #       / 第 8 款 (發言人異動,IR 小位置雜訊高) / 第 14 款 (股利決議,
@@ -43,22 +43,51 @@ _USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 stock-screener/1.0"
 #       / 第 39 款 (TWSE 已刪除此款,白名單留著等同無效)
 #   加:第 1 款 (取得/處分重大資產) / 第 4 款 (重大背書保證)
 #       / 第 19 款 (現金增資/私募) / 第 53 款 (庫藏股) / 第 55 款 (鉅額交易揭露)
-# 2026-05-08 二修:第 20 款主公拍 A 整款砍(雜訊主訴「子公司+固定收益」3 筆/90 天
-#   只佔 4%,但主公接受誤殺 77 筆其他訊號),剩 16 款。
+# 2026-05-08 二修:第 20 款先 A 整款砍(雜訊「子公司+固定收益」3/77),又改 B —
+#   回補 + 主旨黑名單精準砍 3 筆雜訊保 77 筆有訊號。見 SUBJECT_BLACKLIST_BY_ARTICLE。
 IMPORTANT_ARTICLES: frozenset[str] = frozenset({
     "第1款",  "第3款",  "第4款",  "第10款", "第11款", "第12款",
-    "第15款", "第18款", "第19款", "第22款", "第23款",
+    "第15款", "第18款", "第19款", "第20款", "第22款", "第23款",
     "第25款", "第30款", "第41款", "第53款", "第55款",
 })
 
-# 條款 base score(對齊真實條文,2026-05-08 修勘誤;二修砍第 20 款):
+# 主旨黑名單:某款內精準過濾特定主旨關鍵字組合(主公拍板 2026-05-08 B 方案)
+# 結構:{article_no: {required_keyword: [any-of-these-extra-keywords]}}
+# 邏輯:訊息主旨同時含 required_keyword AND 任一 extra → skip
+# 第 20 款唯一條目:子公司+(固定收益/公司債/短期票券/金融債)→ 例如
+#   「本公司代子公司 TSMC Global Ltd. 公告取得固定收益證券」這類純例行公告
+SUBJECT_BLACKLIST_BY_ARTICLE: dict[str, dict[str, tuple[str, ...]]] = {
+    "第20款": {
+        "子公司": ("固定收益", "公司債", "短期票券", "金融債"),
+    },
+}
+
+
+def is_blacklisted_subject(article_no: str, subject: str) -> bool:
+    """B 方案精準過濾:該款 + 主旨關鍵字組合命中 → skip。
+
+    例:第 20 款「本公司代子公司... 公告取得固定收益證券」→ True(雜訊)
+        第 20 款「土地交易」/ 「設備採購」 → False(放行)
+        第 11 款「凱基金代子公司公告發行公司債」→ False(限定第 20 款才套用)
+    """
+    if not article_no or not subject:
+        return False
+    rules = SUBJECT_BLACKLIST_BY_ARTICLE.get(article_no)
+    if not rules:
+        return False
+    for required, extras in rules.items():
+        if required in subject and any(kw in subject for kw in extras):
+            return True
+    return False
+
+# 條款 base score(對齊真實條文,2026-05-08 修勘誤;第 20 款回補):
 #   100 第30款 財報延遲 / 非無保留意見(股價殺手等級警訊)
 #    95 第1款  取得/處分重大資產 / 第10款 重大契約/MOU/策略合作
 #    90 第11款 減資/合併/分割/收購 / 第15款 重大投資計畫(達20%資本或10億)
 #       第19款 現金增資/私募(稀釋風險) / 第55款 鉅額交易揭露(主力訊號)
 #    85 第3款  嚴重減產/停工/主資產質押 / 第18款 股東會決議
 #       第53款 庫藏股(明確利多)
-#    80 第25款 主要客戶/供應商斷單
+#    80 第20款 資產取得/處分達門檻 / 第25款 主要客戶/供應商斷單
 #    70 第4款  重大背書保證(預設;有時例行)
 #    60 第22款 資金貸與 / 第23款 背書保證(門檻通過,例行佔多數)
 #    50 第12款 法說會預告(預告型噪音較大,基線壓低)
@@ -67,12 +96,11 @@ ARTICLE_PRIORITY: dict[str, int] = {
     "第1款": 95,  "第10款": 95,
     "第11款": 90, "第15款": 90, "第19款": 90, "第55款": 90,
     "第3款": 85,  "第18款": 85, "第53款": 85,
-    "第25款": 80,
+    "第20款": 80, "第25款": 80,
     "第4款": 70,
     "第22款": 60, "第23款": 60,
     "第12款": 50,
     # 第 41 款(投資控股公司家數變動)用 _DEFAULT_ARTICLE_SCORE=70
-    # 第 20 款 2026-05-08 主公拍 A 整款砍,從白名單 + ARTICLE_PRIORITY 移除
 }
 _DEFAULT_ARTICLE_SCORE = 70  # 白名單內未列在 ARTICLE_PRIORITY 表的條款預設分數
 
@@ -629,6 +657,17 @@ def list_unsent_important_news(
     if not items:
         return []
 
+    # 主旨黑名單過濾(主公拍 B 方案 2026-05-08):限定特定款 + 主旨關鍵字組合 → skip
+    # 例:第 20 款「子公司+固定收益」是雜訊,別款主旨不影響。
+    items = [
+        n for n in items
+        if not is_blacklisted_subject(
+            str(n.get("article_no") or ""), str(n.get("subject") or ""),
+        )
+    ]
+    if not items:
+        return []
+
     # 一次 fetch 所有加權需要的 sid set + eligible 6 類聯集,避免逐筆 query。
     ctx = build_priority_context(db_path=db_path)
     eligible_groups = get_eligible_news_sids(db_path=db_path)
@@ -692,6 +731,8 @@ __all__ = [
     "get_big_movers_sids",
     "get_target_hit_sids",
     "build_priority_context",
+    "SUBJECT_BLACKLIST_BY_ARTICLE",
+    "is_blacklisted_subject",
     "get_short_picks_sids",
     "get_long_picks_sids",
     "get_eligible_news_sids",
