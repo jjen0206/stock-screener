@@ -84,17 +84,22 @@ def test_whitelist_新增_1_4_19_53_55():
         assert art in nf.IMPORTANT_ARTICLES, f"{art} 應已新加進白名單"
 
 
-def test_whitelist_size_eq_16():
-    """主公拍板總數 16 款(2026-05-08 二修砍第 20 款 — A 方案整款砍)。"""
-    assert len(nf.IMPORTANT_ARTICLES) == 16
+def test_whitelist_size_eq_17():
+    """主公拍板 17 款(2026-05-08 三修:第 20 款 B 方案回補 + 主旨黑名單)。"""
+    assert len(nf.IMPORTANT_ARTICLES) == 17
 
 
-def test_article_20_dropped_from_whitelist():
-    """第 20 款主公拍 A 整款砍(雜訊主訴「子公司+固定收益」3/77,
-    接受誤殺 96%)— 不在白名單,也不在 ARTICLE_PRIORITY。
+def test_article_20_in_whitelist_with_subject_blacklist():
+    """第 20 款 B 方案:回補白名單 + ARTICLE_PRIORITY,但用主旨黑名單
+    精準過濾「子公司+固定收益/公司債」這類雜訊;其他主旨放行。
     """
-    assert "第20款" not in nf.IMPORTANT_ARTICLES, "第 20 款應已移除"
-    assert "第20款" not in nf.ARTICLE_PRIORITY, "ARTICLE_PRIORITY 同步移除"
+    assert "第20款" in nf.IMPORTANT_ARTICLES, "第 20 款應已回補"
+    assert nf.ARTICLE_PRIORITY.get("第20款") == 80, "base score 80"
+    # 第 20 款的黑名單規則必須存在
+    assert "第20款" in nf.SUBJECT_BLACKLIST_BY_ARTICLE
+    rules = nf.SUBJECT_BLACKLIST_BY_ARTICLE["第20款"]
+    assert "子公司" in rules
+    assert "固定收益" in rules["子公司"]
 
 
 def test_article_priority_新加5款_base_score():
