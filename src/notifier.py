@@ -16,6 +16,7 @@ Telegram Bot 推播模組。
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date as _date
 from urllib.parse import quote_plus
@@ -129,9 +130,27 @@ def _empty_pick_suffix() -> str:
 _SEPARATOR = "━" * 16
 
 
+# Telegram legacy Markdown 會把以下字元當特殊語法:* (bold) / _ (italic) /
+# [ (link 開頭) / ` (inline code)。TWSE 公司名常帶 *(如「國巨*」庫藏股標記),
+# 主旨內也常含 ()[] 等字元 — 不 escape 直接送 Telegram 會回 400「can't parse
+# entities」整批訊息死光(2026-05-09 主公手機 24 小時 silence root cause)。
+_TG_MD_ESCAPE_RE = re.compile(r"([\*_\[`])")
+
+
+def _md_escape(text: str, channel: str) -> str:
+    """Escape Telegram legacy Markdown 特殊字元。Discord 走 ** 雙星標記不受影響,
+    no-op 直接回原字串。"""
+    if channel != "telegram":
+        return text
+    return _TG_MD_ESCAPE_RE.sub(r"\\\1", text)
+
+
 def _bold(text: str, channel: str) -> str:
-    """**bold**(Discord)/ *bold*(Telegram Markdown legacy)。"""
-    return f"**{text}**" if channel == "discord" else f"*{text}*"
+    """**bold**(Discord)/ *bold*(Telegram Markdown legacy)。Telegram 端會先
+    escape 內文特殊字元避免 parse 錯誤。"""
+    if channel == "discord":
+        return f"**{text}**"
+    return f"*{_md_escape(text, channel)}*"
 
 
 def _select_top_picks(
@@ -570,7 +589,10 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     # 第一行:🔔 *公司名 (sid)* [tag1 · tag2 · ...]  ⏰ time
     header = f"🔔 {b(f'{name} ({sid})', channel)}"
     if tags:
-        header += f" [{' · '.join(tags)}]"
+        # tags 內容 + 外圍 [] 都對 Telegram 做 escape — `[` 是 link 開頭,不 escape
+        # parser 會找不到匹配 `(...)` 而炸 400。
+        tags_safe = [_md_escape(t, channel) for t in tags]
+        header += f" {_md_escape('[', channel)}{' · '.join(tags_safe)}]"
     if time_label:
         header += f"  ⏰ {time_label}"
 
@@ -580,7 +602,7 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     if subject:
         # subject 太長截斷(訊息整體要顧 4096 / 2000 字限制)
         subj_display = subject if len(subject) <= 200 else subject[:197] + "..."
-        lines.append(f"📰 {subj_display}")
+        lines.append(f"📰 {_md_escape(subj_display, channel)}")
     # Google News 深連結 — TWSE OpenAPI 無原文 URL,搜尋當替代
     url = _build_news_search_url(news)
     lines.append(f"🔗 [Google 新聞搜尋]({url})")
