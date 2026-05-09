@@ -69,9 +69,9 @@ def _push_channel(
         print(f"\n=== END {channel.upper()} ({len(unsent)} 則) ===\n", flush=True)
         return len(unsent), 0
 
-    # 真送
+    # 真送 — Telegram news 走 HTML 避開 Markdown entity 解析炸 400
     if channel == "telegram":
-        ok = send_telegram_message(msg)
+        ok = send_telegram_message(msg, parse_mode="HTML")
     else:
         from src.discord_notifier import send_discord_message
         ok = send_discord_message(msg)

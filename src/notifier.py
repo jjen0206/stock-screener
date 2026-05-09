@@ -43,11 +43,15 @@ def send_telegram_message(
     text: str,
     bot_token: str | None = None,
     chat_id: str | None = None,
+    parse_mode: str = "Markdown",
 ) -> bool:
-    """發送 Telegram 訊息(Markdown)。
+    """發送 Telegram 訊息。
 
     參數優先順序:傳入參數 > config(由 .env / Streamlit Secrets 載入)。
     缺 token 或 chat_id 印 warning 回 False;網路/API 錯誤回 False。
+
+    parse_mode:Telegram 解析模式 — "Markdown"(legacy)/ "MarkdownV2" /
+    "HTML" / "" 純文字。news_notify 走 HTML 避開 Markdown entity 解析坑。
     """
     token = bot_token or config.TELEGRAM_BOT_TOKEN
     cid = chat_id or config.TELEGRAM_CHAT_ID
@@ -59,7 +63,9 @@ def send_telegram_message(
         return False
 
     url = TELEGRAM_API_URL.format(token=token)
-    payload = {"chat_id": cid, "text": text, "parse_mode": "Markdown"}
+    payload: dict = {"chat_id": cid, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
     # 失敗 retry:網路 exception 或 5xx 才重試,4xx 是 client error 不重試
     for attempt in range(_MAX_ATTEMPTS):
@@ -554,7 +560,14 @@ def _build_news_search_url(news: dict) -> str:
 
 
 def format_news_block(news: dict, channel: str = "telegram") -> str:
-    """組單則重大訊息的訊息區塊。Telegram(*bold*)+ Discord(**bold**)共用。
+    """組單則重大訊息的訊息區塊。
+
+    Telegram 走 HTML(`<b>...</b>` / `<a href="url">text</a>`,搭配 send_telegram_message
+    parse_mode="HTML"),Discord 走 Markdown(`**bold**`)。
+
+    HTML 切換背景:Telegram legacy Markdown 對 *_[` 等字元 escape 規則繁瑣
+    (主公 5/9-5/10 silence root cause 之一),改用 HTML 只需 escape <>& 三字元
+    就能避開所有 entity 解析錯誤(2026-05-09 主公拍板)。
 
     Input news dict 必有:sid, company_name, publish_date, publish_time, subject,
     article_no。description / fact_date 可選(目前不顯,只當 SQLite 紀錄)。
@@ -563,12 +576,11 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     sid 的 6 類分組 tag(主公 2026-05-08 拍板)。
 
     格式(仿口袋台股):
-        🔔 *公司名 (sid)* [⭐ 關注 · 📋 短線 · 🚀 漲停]   ⏰ HH:MM
-        📋 *第 N 款*
+        🔔 公司名 (sid) [⭐ 關注 · 📋 短線 · 🚀 漲停]   ⏰ HH:MM
+        第 N 款
         📰 主旨...
-        🔗 [Google 新聞搜尋](url)
+        🔗 Google 新聞搜尋
     """
-    b = _bold
     sid = str(news.get("sid") or "")
     name = str(news.get("company_name") or "")
     time_str = str(news.get("publish_time") or "")
@@ -586,13 +598,29 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
             padded = time_str.zfill(6)
             time_label = f"{padded[:2]}:{padded[2:4]}"
 
-    # 第一行:🔔 *公司名 (sid)* [tag1 · tag2 · ...]  ⏰ time
+    if channel == "telegram":
+        from html import escape as _h
+        header = f"🔔 <b>{_h(name)} ({_h(sid)})</b>"
+        if tags:
+            header += f" [{_h(' · '.join(tags))}]"
+        if time_label:
+            header += f"  ⏰ {_h(time_label)}"
+        lines = [header]
+        if article:
+            lines.append(f"📋 <b>{_h(article)}</b>")
+        if subject:
+            subj_display = subject if len(subject) <= 200 else subject[:197] + "..."
+            lines.append(f"📰 {_h(subj_display)}")
+        url = _build_news_search_url(news)
+        # URL inside href= 也要 html-escape(處理 & → &amp;)
+        lines.append(f'🔗 <a href="{_h(url, quote=True)}">Google 新聞搜尋</a>')
+        return "\n".join(lines)
+
+    # Discord:沿用 markdown
+    b = _bold
     header = f"🔔 {b(f'{name} ({sid})', channel)}"
     if tags:
-        # tags 內容 + 外圍 [] 都對 Telegram 做 escape — `[` 是 link 開頭,不 escape
-        # parser 會找不到匹配 `(...)` 而炸 400。
-        tags_safe = [_md_escape(t, channel) for t in tags]
-        header += f" {_md_escape('[', channel)}{' · '.join(tags_safe)}]"
+        header += f" [{' · '.join(tags)}]"
     if time_label:
         header += f"  ⏰ {time_label}"
 
@@ -600,10 +628,8 @@ def format_news_block(news: dict, channel: str = "telegram") -> str:
     if article:
         lines.append(f"📋 {b(article, channel)}")
     if subject:
-        # subject 太長截斷(訊息整體要顧 4096 / 2000 字限制)
         subj_display = subject if len(subject) <= 200 else subject[:197] + "..."
-        lines.append(f"📰 {_md_escape(subj_display, channel)}")
-    # Google News 深連結 — TWSE OpenAPI 無原文 URL,搜尋當替代
+        lines.append(f"📰 {subj_display}")
     url = _build_news_search_url(news)
     lines.append(f"🔗 [Google 新聞搜尋]({url})")
     return "\n".join(lines)
@@ -620,13 +646,13 @@ def format_news_message(
     """
     if not news_list:
         return ""
-    b = _bold
     today = _date.today().isoformat()
-    lines = [
-        f"🔔 {b(f'重大訊息 · {today}', channel)}",
-        _SEPARATOR,
-        "",
-    ]
+    if channel == "telegram":
+        from html import escape as _h
+        header_line = f"🔔 <b>{_h(f'重大訊息 · {today}')}</b>"
+    else:
+        header_line = f"🔔 {_bold(f'重大訊息 · {today}', channel)}"
+    lines = [header_line, _SEPARATOR, ""]
     for news in news_list:
         lines.append(format_news_block(news, channel=channel))
         lines.append("")
