@@ -671,17 +671,19 @@ def list_unsent_important_news(
     # 一次 fetch 所有加權需要的 sid set + eligible 6 類聯集,避免逐筆 query。
     ctx = build_priority_context(db_path=db_path)
     eligible_groups = get_eligible_news_sids(db_path=db_path)
-    eligible_all = eligible_groups.get("all") or set()
 
-    # 主公拍板(2026-05-08)雙層 filter:
-    # 1. 條款白名單(SQL 已過濾)
-    # 2. **sid 必須在 6 類聯集內**(此處過濾)— 不在 watchlist / 短線 picks /
-    #    長線 picks / 漲停 / 跌停反轉 / 熱門 任一個的 sid 全部砍掉,
-    #    避免無關公司重訊吵主公。
-    items = [n for n in items if str(n.get("sid") or "") in eligible_all]
-    if not items:
-        return []
-
+    # 6 類 eligible_sids 從 hard filter 改 soft priority(2026-05-09 主公二修)
+    # 修正背景:
+    #   `658602a` 加 hard filter「sid 必須在 6 類聯集內」,但 production 6 類
+    #   聯集 ~324 sids 只 cover 全市場 ~14%,90% 白名單訊息被砍光。主公 5/9
+    #   06:00 後手機沒推播 — 30+ 筆 unsent whitelist 卡住(都不在 6 類)。
+    # 新策略:
+    #   - 不 hard filter sid,讓所有白名單訊息可推
+    #   - 6 類聯集成員透過 _priority_score 拿 bonus 排前面
+    #     (+1000 watchlist / +800 paper_trades / +500 picks / +200 big_movers
+    #      / +300 target_hit)
+    #   - 單批 cap by limit(default 5)防洗版
+    #
     # Enrich 每筆 news 的 tags(供 format_news_block 顯示在 sid 後)
     for n in items:
         n["tags"] = compute_news_tags(str(n.get("sid") or ""), eligible_groups)

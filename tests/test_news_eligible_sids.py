@@ -148,15 +148,19 @@ def _seed_news(sid: str, article: str, time_hms: str = "100000") -> None:
     nf.upsert_news(rows)
 
 
-def test_list_unsent_filters_out_news_not_in_eligible(tmp_db, monkeypatch):
-    """sid 不在 6 類聯集任一個 → 整筆 filter 掉(不出現在 unsent 結果)。"""
-    _seed_news("2330", "第10款")  # in watchlist 內
-    _seed_news("9999", "第10款")  # 不在任何 set → 應被 filter
+def test_list_unsent_eligible_sorts_first_no_hard_filter(tmp_db, monkeypatch):
+    """6 類聯集成員透過 priority bonus 排前面,不在的仍會推但排後(2026-05-09 修正)。
+
+    背景:`658602a` 加 hard filter 後 production 5/9 06:00 主公手機沒推
+    (30+ 筆 unsent whitelist 全被砍光因為不在 6 類)。改 soft priority 後,
+    眾多白名單訊息都可推,只是 6 類聯集成員排前面。
+    """
+    _seed_news("2330", "第10款")  # in watchlist 內 → +1000 排前
+    _seed_news("9999", "第10款")  # 不在任何 set → 排後但仍可推
 
     monkeypatch.setattr(
         nf, "get_watchlist_sids", lambda db_path=None: {"2330"},
     )
-    # 其他 5 類全空
     monkeypatch.setattr(
         nf, "get_short_picks_sids",
         lambda trade_date=None, db_path=None: set(),
@@ -172,8 +176,8 @@ def test_list_unsent_filters_out_news_not_in_eligible(tmp_db, monkeypatch):
     ):
         unsent = nf.list_unsent_important_news(channel="telegram")
     sids = [r["sid"] for r in unsent]
-    assert sids == ["2330"], (
-        f"應只剩 2330(watchlist),9999 應被 filter 掉,實際 {sids}"
+    assert sids == ["2330", "9999"], (
+        f"2330 watchlist (+1000) 應排第一,9999 仍可推但排後;實際 {sids}"
     )
 
 
@@ -203,12 +207,16 @@ def test_list_unsent_attaches_tags(tmp_db, monkeypatch):
     assert unsent[0]["tags"] == ["⭐ 關注", "📋 短線", "🚀 漲停"]
 
 
-def test_list_unsent_all_filtered_when_eligible_empty(tmp_db, monkeypatch):
-    """6 類都空 → 所有 news 都被 filter 掉(系統剛啟動的 edge case)。"""
+def test_list_unsent_pushes_even_when_eligible_empty(tmp_db, monkeypatch):
+    """6 類都空(系統剛啟動 / 週末沒 picks)→ 仍照白名單推
+    (2026-05-09 修正:hard filter → soft priority,避免 silence)。
+
+    主公 5/9 06:00 silence 事故就是 hard filter 在 eligible 不含時把所有
+    白名單訊息全砍光。新策略:eligible 只是排序加分,不擋。
+    """
     _seed_news("2330", "第10款")
     _seed_news("2317", "第30款")
 
-    # 全部 6 類都空
     monkeypatch.setattr(
         nf, "get_watchlist_sids", lambda db_path=None: set(),
     )
@@ -226,7 +234,10 @@ def test_list_unsent_all_filtered_when_eligible_empty(tmp_db, monkeypatch):
         patch("src.limit_movers.get_hot_stocks", return_value=pd.DataFrame()),
     ):
         unsent = nf.list_unsent_important_news(channel="telegram")
-    assert unsent == []
+    sids = sorted([r["sid"] for r in unsent])
+    assert sids == ["2317", "2330"], (
+        f"6 類全空時兩筆白名單 news 仍應推,實際 {sids}"
+    )
 
 
 # === format_news_block 顯示 tags ===
