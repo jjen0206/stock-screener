@@ -1,55 +1,55 @@
 {
   "strategy": "volume_breakout",
-  "trained_at": "2026-05-04T11:15:29+00:00",
-  "samples": 539,
-  "wins": 218,
-  "win_rate": 0.4044526901669759,
+  "trained_at": "2026-05-10T15:23:42+00:00",
+  "samples": 630,
+  "wins": 256,
+  "win_rate": 0.40634920634920635,
   "status": "trained",
-  "oob_score": 0.5844155844155844,
+  "oob_score": 0.5523809523809524,
   "feature_importances": [
     {
       "name": "vol_ratio",
-      "importance": 0.17048115097989905
-    },
-    {
-      "name": "atr_normalized",
-      "importance": 0.15478490618689184
-    },
-    {
-      "name": "kd_d",
-      "importance": 0.1521643904996624
+      "importance": 0.16237472756643528
     },
     {
       "name": "bias_pct",
-      "importance": 0.14639309076710605
+      "importance": 0.15878029202257815
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.1459651498874637
     },
     {
       "name": "kd_k",
-      "importance": 0.14108416937570673
+      "importance": 0.1410258403049999
+    },
+    {
+      "name": "kd_d",
+      "importance": 0.12900579121871594
     },
     {
       "name": "macd_dif",
-      "importance": 0.1078824685823646
+      "importance": 0.1246837756233105
     },
     {
       "name": "macd_osc",
-      "importance": 0.10659499521081688
+      "importance": 0.11398261525411489
     },
     {
       "name": "bb_position",
-      "importance": 0.012781323377769518
+      "importance": 0.019086458438014774
     },
     {
       "name": "ma_alignment",
-      "importance": 0.0061641324268548086
+      "importance": 0.004504768893057507
     },
     {
       "name": "inst_10d",
-      "importance": 0.0011172124276710978
+      "importance": 0.000590580791309479
     },
     {
       "name": "inst_5d",
-      "importance": 0.0005521601652571693
+      "importance": 0.0
     }
   ],
   "feature_names": [

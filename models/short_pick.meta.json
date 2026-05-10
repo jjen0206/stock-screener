@@ -1,8 +1,8 @@
 {
-  "trained_at": "2026-05-03T19:03:56+00:00",
-  "samples": 344,
-  "n_train": 275,
-  "n_test": 69,
+  "trained_at": "2026-05-10T15:11:05+00:00",
+  "samples": 540,
+  "n_train": 432,
+  "n_test": 108,
   "features_count": 11,
   "feature_names": [
     "kd_k",
@@ -19,11 +19,11 @@
   ],
   "min_history_days": 45,
   "metrics": {
-    "base_win_rate": 0.39825581395348836,
-    "accuracy": 0.6666666666666666,
-    "precision": 0.5714285714285714,
-    "recall": 0.5925925925925926,
-    "f1": 0.5818181818181818
+    "base_win_rate": 0.43703703703703706,
+    "accuracy": 0.6759259259259259,
+    "precision": 0.625,
+    "recall": 0.6382978723404256,
+    "f1": 0.631578947368421
   },
   "model_type": "RandomForestClassifier",
   "version": "v2"
