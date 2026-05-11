@@ -381,6 +381,24 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_target_hit_log_sid_date "
     "ON target_hit_log(sid, hit_date DESC)",
+    # shareholder_concentration:TDCC 股權分散表「持股 ≥ 1000 張」週快照
+    # 每週六凌晨從 TDCC opendata 抓上週五公布,獨立 workflow(別塞 daily-fetch)
+    # holders_delta_w 是「本週 - 上週」的人數變化(fetcher 算好寫入,App 端零成本讀)
+    # MVP:不納入 ML,只當 Telegram 推播 + Streamlit 長線卡附加資訊
+    """
+    CREATE TABLE IF NOT EXISTS shareholder_concentration (
+        sid                   TEXT NOT NULL,
+        week_end              TEXT NOT NULL,    -- YYYY-MM-DD,週五日期
+        holders_1000up_count  INTEGER NOT NULL, -- 持股 ≥ 1000 張的股東人數
+        total_holders         INTEGER NOT NULL, -- 全部股東人數(全分級加總)
+        holders_pct           REAL,             -- 千張戶 / 總股東(0-1)
+        holders_delta_w       INTEGER,          -- 本週 - 上週(人)
+        fetched_at            TEXT NOT NULL,
+        PRIMARY KEY (sid, week_end)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_shareholder_concentration_week "
+    "ON shareholder_concentration(week_end DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -586,6 +604,109 @@ def upsert_institutional(rows: Iterable[dict], db_path: str | Path | None = None
             ],
         )
     return len(rows_list)
+
+
+def upsert_shareholder_concentration(
+    rows: Iterable[dict], db_path: str | Path | None = None,
+) -> int:
+    """寫入 / 更新「千張大戶」週快照(TDCC 股權分散表)。
+
+    rows 每筆需有:sid, week_end, holders_1000up_count, total_holders。
+    holders_pct / holders_delta_w 可選(fetcher 算好寫入,App 端讀)。
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    now = _now_iso()
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO shareholder_concentration
+                (sid, week_end, holders_1000up_count, total_holders,
+                 holders_pct, holders_delta_w, fetched_at)
+            VALUES
+                (:sid, :week_end, :holders_1000up_count, :total_holders,
+                 :holders_pct, :holders_delta_w, :fetched_at)
+            ON CONFLICT(sid, week_end) DO UPDATE SET
+                holders_1000up_count=excluded.holders_1000up_count,
+                total_holders=excluded.total_holders,
+                holders_pct=excluded.holders_pct,
+                holders_delta_w=excluded.holders_delta_w,
+                fetched_at=excluded.fetched_at
+            """,
+            [
+                {
+                    "sid": str(r["sid"]),
+                    "week_end": str(r["week_end"]),
+                    "holders_1000up_count": int(r["holders_1000up_count"]),
+                    "total_holders": int(r["total_holders"]),
+                    "holders_pct": (
+                        float(r["holders_pct"])
+                        if r.get("holders_pct") is not None else None
+                    ),
+                    "holders_delta_w": (
+                        int(r["holders_delta_w"])
+                        if r.get("holders_delta_w") is not None else None
+                    ),
+                    "fetched_at": r.get("fetched_at") or now,
+                }
+                for r in rows_list
+            ],
+        )
+    return len(rows_list)
+
+
+def get_latest_shareholder_concentration(
+    sid: str, db_path: str | Path | None = None,
+) -> dict | None:
+    """撈該 sid 最新一筆千張戶資料。沒資料回 None。
+
+    給 notifier / Streamlit 長線卡 enrich 用 — 沒資料 graceful skip 不顯該欄。
+    """
+    with get_conn(db_path) as conn:
+        try:
+            row = conn.execute(
+                "SELECT sid, week_end, holders_1000up_count, total_holders, "
+                "holders_pct, holders_delta_w, fetched_at "
+                "FROM shareholder_concentration "
+                "WHERE sid=? ORDER BY week_end DESC LIMIT 1",
+                (str(sid),),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    if row is None:
+        return None
+    return dict(row)
+
+
+def get_shareholder_concentration_for_sids(
+    sids: Iterable[str], db_path: str | Path | None = None,
+) -> dict[str, dict]:
+    """批量撈多檔最新千張戶資料(回 {sid: row_dict})。
+
+    給 _select_top_picks / render_picks_cards 一次 enrich 一批 picks 用,
+    比 N 次 get_latest_shareholder_concentration 省 N 次 connect overhead。
+    """
+    sids_list = [str(s) for s in sids if s]
+    if not sids_list:
+        return {}
+    placeholders = ",".join("?" * len(sids_list))
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                f"SELECT sc.sid, sc.week_end, sc.holders_1000up_count, "
+                f"sc.total_holders, sc.holders_pct, sc.holders_delta_w, "
+                f"sc.fetched_at "
+                f"FROM shareholder_concentration sc "
+                f"JOIN (SELECT sid, MAX(week_end) AS mw "
+                f"      FROM shareholder_concentration "
+                f"      WHERE sid IN ({placeholders}) GROUP BY sid) latest "
+                f"  ON sc.sid=latest.sid AND sc.week_end=latest.mw",
+                sids_list,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    return {r["sid"]: dict(r) for r in rows}
 
 
 def upsert_daily_metrics(
@@ -1219,6 +1340,49 @@ def preload_snapshots(
         if records:
             upsert_institutional(records, db_path=db_path)
             counts["institutional"] = len(records)
+
+    # 5b. shareholder_concentration(TDCC 千張大戶週快照)— 從 weekly-shareholder-fetch
+    # workflow dump 進 repo 的 CSV reload。沒檔(第一次部署 / fetch fail)→ skip。
+    sc_csv = snapshot_dir / "shareholder_concentration.csv"
+    if sc_csv.exists():
+        try:
+            df = pd.read_csv(sc_csv, dtype={"sid": str, "week_end": str})
+        except pd.errors.EmptyDataError:
+            df = pd.DataFrame()
+        if not df.empty:
+            rows = []
+            for _, r in df.iterrows():
+                sid_v = r.get("sid")
+                week_v = r.get("week_end")
+                cnt_v = r.get("holders_1000up_count")
+                tot_v = r.get("total_holders")
+                if (
+                    not sid_v or pd.isna(sid_v)
+                    or not week_v or pd.isna(week_v)
+                    or pd.isna(cnt_v) or pd.isna(tot_v)
+                ):
+                    continue
+                rows.append({
+                    "sid": str(sid_v),
+                    "week_end": str(week_v),
+                    "holders_1000up_count": int(cnt_v),
+                    "total_holders": int(tot_v),
+                    "holders_pct": (
+                        float(r["holders_pct"])
+                        if pd.notna(r.get("holders_pct")) else None
+                    ),
+                    "holders_delta_w": (
+                        int(r["holders_delta_w"])
+                        if pd.notna(r.get("holders_delta_w")) else None
+                    ),
+                    "fetched_at": (
+                        str(r["fetched_at"])
+                        if pd.notna(r.get("fetched_at")) else None
+                    ),
+                })
+            if rows:
+                upsert_shareholder_concentration(rows, db_path=db_path)
+                counts["shareholder_concentration"] = len(rows)
 
     # 6. TAIEX(獨立 csv,from daily_market_update)
     taiex_csv = snapshot_dir / "taiex.csv"
@@ -1858,6 +2022,53 @@ def get_unrealized_pnl(
     return (current_price - pos["avg_cost"]) * pos["quantity"]
 
 
+def dump_shareholder_concentration_csv(
+    snapshot_dir: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """SQLite shareholder_concentration → CSV(覆寫)。回行數(skip 時回 -1)。
+
+    給 fetcher 跑完後寫 data/twse_snapshot/shareholder_concentration.csv,
+    workflow commit 進 repo 後雲端 / 本機 boot 都能 reload。
+
+    Silent skip(回 -1):
+    - 預設 snapshot_dir + DB 不在 PROJECT_ROOT 底下(pytest tmp_path)→ 不寫真實 CSV
+    """
+    import pandas as pd
+
+    if snapshot_dir is None:
+        # 模仿 analyst_targets_snapshot._db_inside_project 的 silent-skip 邏輯
+        raw = str(db_path) if db_path is not None else str(config.DATABASE_PATH)
+        p = Path(raw)
+        if not p.is_absolute():
+            p = config.PROJECT_ROOT / p
+        try:
+            p.resolve().relative_to(config.PROJECT_ROOT.resolve())
+        except ValueError:
+            return -1
+        snapshot_dir = config.PROJECT_ROOT / "data" / "twse_snapshot"
+
+    snapshot_dir = Path(snapshot_dir)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT sid, week_end, holders_1000up_count, total_holders, "
+            "holders_pct, holders_delta_w, fetched_at "
+            "FROM shareholder_concentration "
+            "ORDER BY sid ASC, week_end DESC"
+        ).fetchall()
+    df = pd.DataFrame(
+        [dict(r) for r in rows],
+        columns=[
+            "sid", "week_end", "holders_1000up_count", "total_holders",
+            "holders_pct", "holders_delta_w", "fetched_at",
+        ],
+    )
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / "shareholder_concentration.csv"
+    df.to_csv(path, index=False)
+    return len(df)
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -1867,6 +2078,10 @@ __all__ = [
     "upsert_financials",
     "upsert_dividend",
     "upsert_daily_metrics",
+    "upsert_shareholder_concentration",
+    "get_latest_shareholder_concentration",
+    "get_shareholder_concentration_for_sids",
+    "dump_shareholder_concentration_csv",
     "add_to_watchlist",
     "bulk_add_to_watchlist",
     "remove_from_watchlist",

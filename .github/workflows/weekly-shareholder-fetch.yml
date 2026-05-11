@@ -1,0 +1,72 @@
+name: Weekly Shareholder Concentration Fetch
+
+# 每週六凌晨抓 TDCC 集保「股權分散表」上週五公布資料。
+# - cron: "0 18 * * 6" → UTC 18:00 週六 = 台灣時間 02:00 週日(GitHub Actions
+#   schedule 用 UTC。TDCC 通常週六上午公佈,18 UTC 抓給足夠 publication buffer)
+# - 主公拍板:獨立 workflow,別塞 daily-fetch(避免 weekly job 拖累每日推播鏈)
+on:
+  schedule:
+    - cron: "0 18 * * 6"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "限制檔數(debug / smoke 用,留空 = 全部)"
+        required: false
+        default: ""
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write  # commit snapshot CSV
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 先 preload snapshot 讓 SQLite 有上週舊資料 → fetcher 算 delta_w 有基準。
+      # 第一次跑時 snapshot CSV 不存在,preload 跳過,delta_w 寫 None(預期行為)。
+      - name: Preload existing snapshot (for delta_w baseline)
+        run: |
+          python -c "from src import database as db; r=db.preload_snapshots(); print('[PRELOAD]', r)"
+
+      - name: Fetch TDCC shareholder concentration
+        run: |
+          if [ -n "${{ inputs.limit }}" ]; then
+            python scripts/fetch_shareholder_concentration.py --limit "${{ inputs.limit }}"
+          else
+            python scripts/fetch_shareholder_concentration.py
+          fi
+
+      # push race retry:跟其他 workflow 同 pattern,跨 workflow 同時段推 main
+      # 用 rebase + retry 5 次避免 [rejected] (fetch first) 把 CSV 吃掉。
+      - name: Commit shareholder snapshot CSV if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/shareholder_concentration.csv || true
+          if git diff --quiet --staged; then
+            echo "No shareholder_concentration snapshot changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): weekly TDCC shareholder concentration [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[SHAREHOLDER] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::shareholder snapshot push 失敗 5 次"
