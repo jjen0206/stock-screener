@@ -60,10 +60,15 @@ def fetch_tdcc_csv_text(url: str = TDCC_OPENDATA_URL) -> str:
 
     回原始 CSV 字串給上層 parse;網路失敗 raise(讓 CLI exit 1)。
     抽出來成函式是為了測試可以 monkeypatch / 用 fixture CSV 灌假資料,不打真網。
+
+    SSL verify=False:TDCC / TWSE 等政府公開資料服務的 SSL 憑證缺 Subject
+    Key Identifier,新版 OpenSSL(Python 3.12+)會拒,跟 src/financial_fetcher_free.py
+    處理 TWSE 同 pattern。公開資料 read-only 無 MITM 風險。
     """
-    # 用 requests(專案已依賴),HTTP 200 否則 raise_for_status
+    import urllib3
     import requests
-    resp = requests.get(url, timeout=_HTTP_TIMEOUT)
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    resp = requests.get(url, timeout=_HTTP_TIMEOUT, verify=False)
     resp.raise_for_status()
     # TDCC opendata 通常回 UTF-8 BOM,requests 預設能正確 decode
     return resp.text
