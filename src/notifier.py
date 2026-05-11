@@ -280,6 +280,11 @@ def _select_top_picks(
     from src.analyst_targets import get_analyst_targets_for_sids
     analyst_target_map = get_analyst_targets_for_sids(qualified_sids)
 
+    # 撈 shareholder_concentration(TDCC 千張大戶週快照)— 週六凌晨 weekly-
+    # shareholder-fetch.yml 抓進 SQLite。沒資料(該檔當週沒公布 / 還沒抓過)→
+    # enrich 後 holders_1000up_count 為 None → format_pick_block graceful skip
+    sc_map = db.get_shareholder_concentration_for_sids(qualified_sids)
+
     qualified: list[dict] = []
     for sid, info in agg.items():
         matched = list((info.get("details") or {}).keys())
@@ -325,6 +330,11 @@ def _select_top_picks(
         analyst_num = at_row.get("num_analysts")
         analyst_source = at_row.get("source")
         analyst_target_prev = at_row.get("previous_target_mean")
+        # 千張大戶(TDCC 週快照):無資料 → None,format_pick_block graceful skip
+        sc_row = sc_map.get(sid) or {}
+        holders_1000up_count = sc_row.get("holders_1000up_count")
+        holders_delta_w = sc_row.get("holders_delta_w")
+        holders_pct = sc_row.get("holders_pct")
         qualified.append({
             "rank": 0,  # caller fills
             "sid": sid,
@@ -348,6 +358,9 @@ def _select_top_picks(
             "analyst_num": analyst_num,
             "analyst_source": analyst_source,
             "analyst_target_prev_mean": analyst_target_prev,
+            "holders_1000up_count": holders_1000up_count,
+            "holders_delta_w": holders_delta_w,
+            "holders_pct": holders_pct,
         })
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
@@ -453,6 +466,32 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         rr_str = f"  (R:R {rr:.1f}:1)" if rr else ""
         sign = "+" if ev >= 0 else ""
         lines.append(f"   📈 期望值 {sign}{ev * 100:.1f}%{rr_str}")
+    # 千張大戶(TDCC 週快照)— 主公拍板:不納入 ML,只當附加資訊
+    # 沒資料(該檔當週沒公布 / 還沒抓過) → 整行 graceful skip 不顯
+    # delta_w=None(第一次抓,沒上週可比) → 省略「週變」段
+    holders_count = pick.get("holders_1000up_count")
+    if holders_count is not None:
+        try:
+            count_int = int(holders_count)
+            delta_w = pick.get("holders_delta_w")
+            pct = pick.get("holders_pct")
+            parts = [f"👥 千張戶 {count_int}"]
+            sub: list[str] = []
+            if delta_w is not None:
+                try:
+                    sub.append(f"週變 {int(delta_w):+d}")
+                except (TypeError, ValueError):
+                    pass
+            if pct is not None:
+                try:
+                    sub.append(f"占比 {float(pct):.1%}")
+                except (TypeError, ValueError):
+                    pass
+            if sub:
+                parts.append(f" ({', '.join(sub)})")
+            lines.append(f"   {''.join(parts)}")
+        except (TypeError, ValueError):
+            pass  # 任何 cast 失敗 silent skip,不擋整段推播
     return "\n".join(lines)
 
 

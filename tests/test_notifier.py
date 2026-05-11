@@ -545,6 +545,80 @@ def test_format_pick_block_skips_win_rate_when_zero():
     assert "勝率" not in block
 
 
+# === 千張大戶推播(TDCC 週快照,主公拍板:不納入 ML 只當附加資訊)===
+
+def test_format_pick_block_includes_shareholder_line_with_delta_and_pct():
+    """有完整千張戶資料 → 顯「👥 千張戶 N (週變 +M, 占比 X.X%)」。"""
+    pick = _make_top_pick()
+    pick["holders_1000up_count"] = 2050
+    pick["holders_delta_w"] = 15
+    pick["holders_pct"] = 0.00674
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "👥 千張戶 2050" in block
+    assert "週變 +15" in block
+    assert "占比 0.7%" in block
+
+
+def test_format_pick_block_shareholder_delta_negative_shows_minus():
+    """delta_w 是 - 號(大戶減少 → 籌碼鬆動)。"""
+    pick = _make_top_pick()
+    pick["holders_1000up_count"] = 1980
+    pick["holders_delta_w"] = -23
+    pick["holders_pct"] = 0.00650
+    block = notifier.format_pick_block(pick)
+    assert "👥 千張戶 1980" in block
+    assert "週變 -23" in block
+
+
+def test_format_pick_block_shareholder_skips_delta_when_none():
+    """第一次抓沒上週基準 → delta_w=None → 省略「週變」段但仍顯人數 + 占比。"""
+    pick = _make_top_pick()
+    pick["holders_1000up_count"] = 720
+    pick["holders_delta_w"] = None
+    pick["holders_pct"] = 0.00551
+    block = notifier.format_pick_block(pick)
+    assert "👥 千張戶 720" in block
+    assert "週變" not in block
+    assert "占比 0.6%" in block
+
+
+def test_format_pick_block_shareholder_skips_entire_line_when_no_data():
+    """無 holders_1000up_count(該檔當週沒公布 / 還沒抓過)→ 整行 graceful skip。"""
+    pick = _make_top_pick()
+    # 不設任何 holders_* 欄位
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "👥" not in block
+    assert "千張戶" not in block
+
+
+def test_format_pick_block_shareholder_handles_zero_count():
+    """holders_1000up_count=0(該檔小公司無千張戶)→ 仍顯該行(0 也是有意義的資訊)。"""
+    pick = _make_top_pick()
+    pick["holders_1000up_count"] = 0
+    pick["holders_delta_w"] = 0
+    pick["holders_pct"] = 0.0
+    block = notifier.format_pick_block(pick)
+    assert "👥 千張戶 0" in block
+
+
+def test_format_pick_block_shareholder_does_not_break_other_fields():
+    """加千張戶行不該影響原有欄位(ML / 目標 / 期望值 / 勝率)。"""
+    pick = _make_top_pick()
+    pick["holders_1000up_count"] = 1500
+    pick["holders_delta_w"] = 10
+    pick["holders_pct"] = 0.005
+    pick["win_rate"] = 0.62
+    block = notifier.format_pick_block(pick, channel="telegram")
+    # 既有欄位仍在
+    assert "ML 機率 72%" in block
+    assert "保守 893" in block
+    assert "停損 825" in block
+    assert "期望值" in block
+    assert "勝率" in block
+    # 新欄位也在
+    assert "千張戶 1500" in block
+
+
 def test_format_top_picks_message_includes_separator_and_stats():
     picks = [_make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)]
     msg = notifier.format_top_picks_message(
