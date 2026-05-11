@@ -1935,6 +1935,17 @@ def _page_long() -> None:
                     enrich_with_analyst_target as _enrich_at,
                 )
                 long_cards = _enrich_at(result).to_dict("records")
+                # enrich 千張大戶(TDCC 週快照,主公拍板長線卡才顯)— 批量
+                # lookup 一次比 N 張卡片各 N 次 SQL 高效。沒資料 →
+                # render_pick_card 內 _render_shareholder_inline 自動 skip。
+                _sc_map = db.get_shareholder_concentration_for_sids(
+                    [r.get("stock_id") for r in long_cards if r.get("stock_id")]
+                )
+                for _r in long_cards:
+                    _sid = _r.get("stock_id")
+                    _sc = _sc_map.get(_sid) or {}
+                    _r["holders_1000up_count"] = _sc.get("holders_1000up_count")
+                    _r["holders_delta_w"] = _sc.get("holders_delta_w")
                 render_picks_cards(
                     long_cards,
                     show_signal=False, show_targets=False, show_change=False,

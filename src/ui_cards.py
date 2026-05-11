@@ -338,6 +338,14 @@ def render_pick_card(
             sid=sid,
         )
 
+        # 千張大戶 inline 行(只在有資料時顯)— 主公拍板:不納入 ML、只當附加資訊
+        # Mobile-first:單行文字,不用 st.columns / st.metric 多欄(手機會 collapse)
+        # 格式 `👥 千張戶 12 (+3)`,delta=None 時只顯人數
+        _render_shareholder_inline(
+            holders_1000up_count=row.get("holders_1000up_count"),
+            holders_delta_w=row.get("holders_delta_w"),
+        )
+
         # Row 3:button 列(加入關注 / 展開詳細分析)+ 右側 metadata
         # st.columns 把 row 3 分成 3 區塊:button | button | metadata
         if show_add_button:
@@ -437,6 +445,55 @@ def _render_analyst_target_inline(
         f"<span style='color:{color};font-size:14px;'>"
         f"📊 <strong>法人共識 {mean_val:.0f}{upside_str}</strong>"
         f" · 券商 {n_str} 家{source_label}"
+        f"</span>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_shareholder_inline(
+    holders_1000up_count: int | None,
+    holders_delta_w: int | None,
+) -> None:
+    """卡片內顯眼的「千張大戶」行 — 主公拍板:長線卡才顯,有資料才渲。
+
+    格式(緊湊,主公手機 iPhone 用,字元短):
+      👥 千張戶 12 (+3)        # 有 delta
+      👥 千張戶 12             # 沒 delta(第一次抓,沒上週可比)
+      (整行不渲)              # 沒人數資料
+
+    染色(delta 方向):
+      delta > 0 → 紅 #d62728(大戶進場,看漲台股慣例)
+      delta < 0 → 綠 #2ca02c(大戶減少,籌碼鬆動)
+      delta = 0 / None → 灰 #555(中性)
+
+    Mobile-first(主公主要 iPhone 用):
+      - 用 st.markdown 單行文字 + inline color,不用 st.columns / st.metric
+        (手機 narrow viewport 多欄會 collapse 變難讀)
+    """
+    if holders_1000up_count is None:
+        return
+    try:
+        count_int = int(holders_1000up_count)
+    except (TypeError, ValueError):
+        return
+
+    delta_str = ""
+    color = "#555"
+    if holders_delta_w is not None:
+        try:
+            delta_int = int(holders_delta_w)
+            delta_str = f" ({delta_int:+d})"
+            if delta_int > 0:
+                color = "#d62728"
+            elif delta_int < 0:
+                color = "#2ca02c"
+        except (TypeError, ValueError):
+            pass
+
+    import streamlit as st
+    st.markdown(
+        f"<span style='color:{color};font-size:14px;'>"
+        f"👥 <strong>千張戶 {count_int}{delta_str}</strong>"
         f"</span>",
         unsafe_allow_html=True,
     )
