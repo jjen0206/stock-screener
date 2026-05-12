@@ -100,7 +100,7 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "📊 大盤",
+    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 大盤",
     "💼 交易紀錄", "🧪 實測追蹤", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -899,6 +899,8 @@ def main() -> None:
         _page_watchlist()
     elif page == "🌡️ 市場熱度":
         _page_market_heat()
+    elif page == "👥 大戶入場":
+        _page_big_buyer()
     elif page == "📊 大盤":
         _page_market_sentiment()
     elif page == "💼 交易紀錄":
@@ -3979,6 +3981,139 @@ def _page_market_heat() -> None:
                     "「飆完反轉」/ 逃命波警訊。點任一行 → 展開完整卡片"
                 ),
                 detail_button_prefix="dash_down_detail",
+            )
+
+
+# === 👥 大戶入場頁 ===
+
+def _page_big_buyer() -> None:
+    """大戶入場三 tab:🚀 本週暴增 / 📈 連續增加 / 🏰 絕對占比。
+
+    純走 SQLite shareholder_concentration JOIN stocks JOIN daily_prices,
+    全部 helpers 已 LEFT JOIN ML 分數 / 收盤,App 端直接攤平成 DataFrame
+    + _render_table_with_inline_detail 渲染(同關注 / 市場熱度頁 pattern)。
+
+    Mobile-first:純 st.dataframe,不用 st.columns 分區塊
+    (參考 src/ui_cards.py:469 已定的桌面 + iPhone narrow 兩種版型準則)。
+
+    第一次跑時資料只一週 → 「連續增加」tab 顯 st.info「資料累積中」提示。
+    """
+    st.header("👥 大戶入場")
+
+    db.init_db()  # 雲端容器重啟 / 第一次 boot 時保險
+
+    tab_movers, tab_streak, tab_top = st.tabs(
+        ["🚀 本週暴增", "📈 連續增加", "🏰 絕對占比"],
+    )
+
+    # 共用 column_config:7 欄(代號 / 名稱 / 收盤 / 千張戶 / 週變 / 占比 / ML 分數)
+    _col_cfg = {
+        "編號": st.column_config.TextColumn("編號", width="small"),
+        "名稱": st.column_config.TextColumn("名稱", width="medium"),
+        "目前股價": st.column_config.NumberColumn(
+            "收盤", format="%.2f", width="small",
+        ),
+        "千張戶": st.column_config.NumberColumn(
+            "千張戶", format="%d", width="small",
+        ),
+        "週變": st.column_config.TextColumn("週變", width="small"),
+        "占比": st.column_config.TextColumn("占比", width="small"),
+        "ML 分數": st.column_config.TextColumn("ML 分數", width="small"),
+        # 漲幅(隱藏欄位)是給 inline detail 卡 reuse 算 change_pct 用,
+        # NumberColumn 必須 keep 否則 _render_table_with_inline_detail 拿不到。
+        "漲幅": None,
+    }
+
+    def _to_df(rows: list[dict]) -> "pd.DataFrame":
+        """helper rows → UI DataFrame。週變 / 占比 / ML 缺資料顯「—」/「N/A」。"""
+        if not rows:
+            return pd.DataFrame(columns=[
+                "編號", "名稱", "目前股價", "千張戶", "週變",
+                "占比", "ML 分數", "漲幅",
+            ])
+        out: list[dict] = []
+        for r in rows:
+            dw = r.get("holders_delta_w")
+            pct = r.get("holders_pct")
+            ml = r.get("ml_prob")
+            out.append({
+                "編號": r["sid"],
+                "名稱": r.get("name") or "—",
+                "目前股價": r.get("close"),
+                "千張戶": (
+                    int(r["holders_1000up_count"])
+                    if r.get("holders_1000up_count") is not None else None
+                ),
+                "週變": (
+                    f"{dw:+d}" if dw is not None else "—"
+                ),
+                "占比": (
+                    f"{pct * 100:.2f}%" if pct is not None else "—"
+                ),
+                "ML 分數": (
+                    f"{ml:.2f}" if ml is not None else "N/A"
+                ),
+                "漲幅": None,   # 暫不算每日漲幅(週快照 cross-sid 排行不需要)
+            })
+        return pd.DataFrame(out)
+
+    with tab_movers:
+        rows = db.get_top_shareholder_movers(limit=30)
+        df = _to_df(rows)
+        if df.empty:
+            st.caption("📭 沒抓到大戶暴增股(shareholder_concentration 沒資料?)")
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="bb_mover",
+                column_config=_col_cfg,
+                back_label="← 返回暴增列表",
+                table_caption=(
+                    "🚀 本週千張戶增加最多 Top 30(delta_w > 0)。"
+                    "點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="bb_mover_detail",
+            )
+
+    with tab_streak:
+        # 資料只一週時這 tab 永遠回空 — 顯資料累積中提示
+        st.info(
+            "📅 資料累積中,下週六起『週變』欄位會有完整數據"
+        )
+        rows = db.get_consecutive_shareholder_increases(weeks=2, limit=30)
+        df = _to_df(rows)
+        if df.empty:
+            st.caption(
+                "📭 目前沒有「連 2 週千張戶增加」的個股"
+                "(需等資料累積至少兩週)"
+            )
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="bb_streak",
+                column_config=_col_cfg,
+                back_label="← 返回連續增加列表",
+                table_caption=(
+                    "📈 連續 ≥ 2 週千張戶增加。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="bb_streak_detail",
+            )
+
+    with tab_top:
+        rows = db.get_top_shareholder_concentration(limit=30)
+        df = _to_df(rows)
+        if df.empty:
+            st.caption("📭 沒抓到大戶占比資料")
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="bb_top",
+                column_config=_col_cfg,
+                back_label="← 返回占比列表",
+                table_caption=(
+                    "🏰 千張戶占比最高 Top 30。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="bb_top_detail",
             )
 
 
