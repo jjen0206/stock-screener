@@ -174,8 +174,8 @@ def test_get_other_industries_excludes_mainstream():
     all_inds = ["半導體業", "電子零組件業", "水泥工業", "塑膠工業", "ETF"]
     other = get_other_industries(all_inds, MAINSTREAM_INDUSTRIES)
     assert "半導體業" not in other  # mainstream
-    assert "ETF" not in other  # mainstream
     assert "電子零組件業" not in other  # mainstream
     assert "水泥工業" in other
     assert "塑膠工業" in other
+    assert "ETF" in other  # ETF 已從 mainstream 排除,落到 other
     assert other == sorted(other)

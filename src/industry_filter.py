@@ -24,17 +24,15 @@ INDUSTRY_CANONICAL_MAP: dict[str, str] = {
 
 
 # Top 15 canonical industries by stock count, computed from data/cache.db
-# on 2026-05-12. Hardcoded because the stocks table changes rarely; refresh
-# this list when stocks table mass-updates (new listings batch).
+# on 2026-05-12. 已排除 ETF / 上櫃ETF / 其他 這 3 個非個股分類,只取真正類股。
+# Hardcoded because the stocks table changes rarely; refresh this list when
+# stocks table mass-updates (new listings batch).
 MAINSTREAM_INDUSTRIES: list[str] = [
-    "ETF",
     "電子零組件業",
     "半導體業",
     "生技醫療",
     "光電業",
-    "其他",
     "電腦及週邊設備業",
-    "上櫃ETF",
     "其他電子",
     "電機機械",
     "通信網路業",
@@ -42,6 +40,9 @@ MAINSTREAM_INDUSTRIES: list[str] = [
     "金融保險",
     "紡織纖維",
     "鋼鐵工業",
+    "觀光餐旅",
+    "汽車工業",
+    "資訊服務業",
 ]
 
 
