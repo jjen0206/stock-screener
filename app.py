@@ -4719,9 +4719,9 @@ def _render_system_health() -> None:
 
     # === 🤖 AI 模型(短線勝率預測) ===
     st.markdown("### 🤖 AI 模型(短線勝率預測)")
+    ml_pkl = config.PROJECT_ROOT / "models" / "short_pick.pkl"
     try:
         from src.ml_predictor import load_model_meta
-        ml_pkl = config.PROJECT_ROOT / "models" / "short_pick.pkl"
         meta = load_model_meta(ml_pkl)
     except Exception:  # noqa: BLE001
         meta = None
