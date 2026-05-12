@@ -69,6 +69,10 @@ from src.market_sentiment import (
     fetch_taiex,
     fetch_vix,
 )
+from src.industry_filter import (
+    filter_picks_by_industry,
+    get_available_industries,
+)
 from src.screener_short import DEFAULT_SHORT_PARAMS
 
 # 以下 3 個只在特定頁 / 特定按鈕用,改 lazy import 省 cold load ~290ms:
@@ -1020,14 +1024,30 @@ def _page_dashboard() -> None:
                     )
                     rows_full = df_full.to_dict("records")
                     rows_filtered, total = _apply_confidence_filter(rows_full)
-                    df_picks = pd.DataFrame(rows_filtered[:3])
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"掃描失敗:{type(e).__name__}: {e}")
-                    df_picks = pd.DataFrame()
+                    rows_filtered = []
                     rows_full = []
                     total = 0
+            # 產業 filter — 在 Top 3 截前套用,否則過濾完不足 3 檔。
+            # multiselect 走 session_state key,切換 industry 不會把
+            # _run_all_strategies_cached 的結果作廢(cache key 不含 industry)。
+            available_industries = get_available_industries(rows_filtered)
+            selected_industries = st.multiselect(
+                "產業篩選",
+                available_industries,
+                default=[],
+                key="dash_short_industry",
+                help="複選後只看這幾個產業的推薦,空白 = 不過濾",
+            )
+            rows_after_industry = filter_picks_by_industry(
+                rows_filtered, selected_industries
+            )
+            df_picks = pd.DataFrame(rows_after_industry[:3])
             if df_picks.empty:
-                if total > 0:
+                if selected_industries and rows_filtered:
+                    st.info("此產業組合下無 picks,試試換產業。")
+                elif total > 0:
                     st.caption(
                         f"📭 高信心過濾後無入選(原 {total} 檔,可調 sidebar 門檻)。"
                     )
