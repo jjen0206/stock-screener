@@ -978,11 +978,11 @@ def test_short_commit3_new_strategies_sliders_render(isolated_db):
 
 
 def test_short_sixteen_strategies_registered():
-    """run_all_strategies 應認得全 16 套策略 keys(11 短線 + 5 Phase 1)。"""
+    """run_all_strategies 應認得全 17 套策略 keys(11 短線 + 5 Phase 1 + 1 千張)。"""
     from src import strategies as strat
 
-    assert len(strat.ALL_STRATEGIES) == 16
-    assert len(strat.STRATEGY_LABELS) == 16
+    assert len(strat.ALL_STRATEGIES) == 17
+    assert len(strat.STRATEGY_LABELS) == 17
     expected = {
         # 短線 11
         "volume_kd", "ma_alignment", "bias_convergence",
@@ -992,13 +992,15 @@ def test_short_sixteen_strategies_registered():
         # Phase 1 加 5
         "eps_acceleration", "high_yield_stable", "inst_oversold_reversal",
         "taiex_alpha", "revenue_acceleration",
+        # 籌碼:千張戶進場(TDCC 千張大戶週快照)
+        "big_holder_inflow",
     }
     assert set(strat.ALL_STRATEGIES.keys()) == expected
     assert set(strat.STRATEGY_LABELS.keys()) == expected
 
 
 def test_short_strategy_category_covers_all_sixteen():
-    """app._STRATEGY_CATEGORY 必須涵蓋全 16 套策略,否則 tabs 篩選會漏。"""
+    """app._STRATEGY_CATEGORY 必須涵蓋全 17 套策略,否則 tabs 篩選會漏。"""
     sys.modules.pop("app", None)
     import app as app_mod
     from src import strategies as strat
