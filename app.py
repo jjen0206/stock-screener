@@ -1790,6 +1790,13 @@ def _page_short() -> None:
             filtered_all, total_all = _apply_confidence_filter(all_rows)
             if st.session_state.get("high_confidence_mode", True):
                 st.caption(f"🎯 高信心:{len(filtered_all)}/{total_all} 檔顯示")
+                show_all = st.checkbox(
+                    f"📋 顯示全部 {total_all} 檔",
+                    value=False,
+                    key="short_show_all_overall",
+                )
+                if show_all:
+                    filtered_all = all_rows
             # 盤中行情注入(非交易時段 no-op)
             filtered_all = _inject_intraday_quotes(
                 filtered_all,
@@ -1865,6 +1872,13 @@ def _page_short() -> None:
             filtered_sub, total_sub = _apply_confidence_filter(sub_rows)
             if st.session_state.get("high_confidence_mode", True):
                 st.caption(f"🎯 高信心:{len(filtered_sub)}/{total_sub} 檔顯示")
+                show_all = st.checkbox(
+                    f"📋 顯示全部 {total_sub} 檔",
+                    value=False,
+                    key=f"short_show_all_cat_{cat}",
+                )
+                if show_all:
+                    filtered_sub = sub_rows
             render_picks_cards_paginated(
                 filtered_sub,
                 state_key=f"short_{cat}",
