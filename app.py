@@ -1698,6 +1698,25 @@ def _page_short() -> None:
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
 
+    # 產業 filter — 套在 enrich 完 df 上、各 tab render 前。available
+    # industries 從未過濾的 df 抽,空 selected = 不過濾。
+    _all_rows_for_industries = df.to_dict("records")
+    available_industries = get_available_industries(_all_rows_for_industries)
+    selected_industries = st.multiselect(
+        "產業篩選",
+        available_industries,
+        default=[],
+        key="page_short_industry",
+        help="複選後只看這幾個產業的推薦,空白 = 不過濾",
+    )
+    if selected_industries:
+        _filtered_rows = filter_picks_by_industry(
+            _all_rows_for_industries, selected_industries
+        )
+        df = pd.DataFrame(_filtered_rows)
+        if df.empty:
+            st.info("此產業組合下無 picks,試試換產業。")
+
     _tic("short_render_picks")
     # 5 tabs by category — 同一檔可在多個 tab 重複出現(被多策略同時選中)。
     # 「全部」tab 保留完整功能(view_mode / row select / 推播 / 批量加入);
@@ -1799,6 +1818,10 @@ def _page_short() -> None:
                 ),
             )
             sub_rows = sub_df.to_dict("records")
+            sub_rows = filter_picks_by_industry(sub_rows, selected_industries)
+            if selected_industries and not sub_rows:
+                st.info("此產業組合下本分類無 picks。")
+                continue
             filtered_sub, total_sub = _apply_confidence_filter(sub_rows)
             if st.session_state.get("high_confidence_mode", True):
                 st.caption(f"🎯 高信心:{len(filtered_sub)}/{total_sub} 檔顯示")
