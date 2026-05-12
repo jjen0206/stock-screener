@@ -122,6 +122,13 @@ DEFAULT_REV_ACCEL_PARAMS: dict[str, Any] = {
     # 加速條件:當月 YoY > 上月 YoY(無下限,只需嚴格遞增)
 }
 
+# 策略 17:千張戶進場(big_holder_inflow)
+# Phase 1(目前資料只有 1 週):holders_delta_w > 0 + 落在 P80 以上
+# Phase 2(資料 ≥ 4 週後 TODO,不做):突破 4 週滾動平均 + 1σ
+DEFAULT_BIG_HOLDER_PARAMS: dict[str, Any] = {
+    "percentile": 0.80,            # P80(本週 holders_delta_w Top 20%)
+}
+
 
 # === 策略 1:量價 + KD + 法人(包裝既有 screen_short) ===
 
@@ -1502,6 +1509,134 @@ def screen_revenue_acceleration(
     return _enrich_with_targets(raw, date)
 
 
+# === 策略 17:千張戶進場(big_holder_inflow) ===
+
+def screen_big_holder_inflow(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 17:千張戶(持股 ≥ 1000 張)本週人數增加且落在 Top 20%(P80 以上)。
+
+    意義:大戶進場 — 千張戶人數週增是「籌碼集中往大戶手裡跑」的訊號,
+    通常領先股價 1-2 週(TDCC 週五公佈,週六凌晨入庫)。
+
+    Phase 1(目前資料只有 1 週):取最新一週 holders_delta_w > 0 的檔,
+    用 P80 切 Top 20%。
+    TODO Phase 2(資料 ≥ 4 週後升級):用 holders_delta_w 突破歷史 4 週滾動
+    平均 + 1σ 作為更嚴格的進場訊號。
+
+    NULL / 缺資料處理:
+    - 首週 holders_delta_w 全 NULL → return [](對齊 ML predict graceful skip)
+    - 沒 shareholder 資料的 sid → 不命中(不算空訊號)
+
+    參數 date 在此策略單純是傳給 _enrich_with_targets 的 ATR 計算基準日。
+    資料來源:shareholder_concentration 表最新一週(以 MAX(week_end) 為準)。
+    """
+    p = {**DEFAULT_BIG_HOLDER_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "holders_delta_w", "holders_pct", "week_end", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    percentile = float(p["percentile"])
+
+    import sqlite3
+
+    with db.get_conn() as conn:
+        # name_map
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+
+        # 撈最新一週 week_end + 該週所有 sid 的 holders_delta_w / holders_pct
+        try:
+            latest_week_row = conn.execute(
+                "SELECT MAX(week_end) AS w FROM shareholder_concentration"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return pd.DataFrame(columns=cols)
+        if latest_week_row is None or latest_week_row["w"] is None:
+            return pd.DataFrame(columns=cols)
+        week_end = latest_week_row["w"]
+
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            sc_rows = conn.execute(
+                f"SELECT sid, holders_delta_w, holders_pct "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end=? AND sid IN ({placeholders})",
+                (week_end, *sids),
+            ).fetchall()
+        else:
+            sc_rows = conn.execute(
+                "SELECT sid, holders_delta_w, holders_pct "
+                "FROM shareholder_concentration WHERE week_end=?",
+                (week_end,),
+            ).fetchall()
+
+        prices_by_sid = bulk_load_prices(conn, sids, date, 5)
+
+    # 過濾出 delta_w > 0 的 candidates(同時把 None 排掉,首週全 NULL → [])
+    candidates: list[dict] = []
+    for r in sc_rows:
+        delta = r["holders_delta_w"]
+        if delta is None or delta <= 0:
+            continue
+        candidates.append({
+            "sid": r["sid"],
+            "delta": int(delta),
+            "pct": float(r["holders_pct"]) if r["holders_pct"] is not None else None,
+        })
+
+    if not candidates:
+        # 首週 delta 全 NULL 或全 ≤ 0 → graceful empty
+        return pd.DataFrame(columns=cols)
+
+    # P80 threshold:取 candidates 的 delta 第 (percentile) 分位數
+    # 用 pandas 的 quantile 為單一真實來源,避免自寫 sort 邊界錯
+    deltas = pd.Series([c["delta"] for c in candidates])
+    threshold = float(deltas.quantile(percentile))
+
+    # 只保留 delta >= threshold 的(Top 20%);threshold 本身也算 hit(>=)
+    rows: list[dict] = []
+    for c in candidates:
+        if c["delta"] < threshold:
+            continue
+        sid = c["sid"]
+        if sid not in set(sids):
+            # candidates 已經是 IN (sids) 過濾過,但 universe 走 ELSE 分支時保險
+            continue
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "holders_delta_w": c["delta"],
+            "holders_pct": c["pct"],
+            "week_end": week_end,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -1577,6 +1712,8 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "inst_oversold_reversal": screen_inst_oversold_reversal,
     "taiex_alpha": screen_taiex_alpha,
     "revenue_acceleration": screen_revenue_acceleration,
+    # 籌碼:千張戶進場(TDCC 千張大戶週快照)
+    "big_holder_inflow": screen_big_holder_inflow,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -1597,6 +1734,8 @@ STRATEGY_LABELS: dict[str, str] = {
     "inst_oversold_reversal": "法人反轉",
     "taiex_alpha": "獨立行情",
     "revenue_acceleration": "營收加速",
+    # 籌碼:千張戶進場
+    "big_holder_inflow": "千張戶進場",
 }
 
 
@@ -1869,6 +2008,8 @@ STRATEGY_CATEGORY: dict[str, str] = {
     "inst_oversold_reversal": "籌碼",
     "taiex_alpha": "大盤",
     "revenue_acceleration": "基本面",
+    # 籌碼:千張戶進場
+    "big_holder_inflow": "籌碼",
 }
 
 # regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
@@ -1897,6 +2038,7 @@ __all__ = [
     "screen_inst_silent_accum",
     "screen_volume_breakout",
     "screen_gap_up",
+    "screen_big_holder_inflow",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
@@ -1919,6 +2061,7 @@ __all__ = [
     "DEFAULT_INST_SILENT_PARAMS",
     "DEFAULT_VOL_BREAKOUT_PARAMS",
     "DEFAULT_GAP_UP_PARAMS",
+    "DEFAULT_BIG_HOLDER_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
     "STOP_LOSS_MULT",

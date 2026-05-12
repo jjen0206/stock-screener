@@ -1258,6 +1258,8 @@ _STRATEGY_CATEGORY: dict[str, str] = {
     "inst_oversold_reversal": "籌碼",
     "taiex_alpha": "大盤",
     "revenue_acceleration": "基本面",
+    # 籌碼:千張戶進場(TDCC 千張大戶週快照)
+    "big_holder_inflow": "籌碼",
 }
 
 
