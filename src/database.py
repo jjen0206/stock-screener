@@ -709,6 +709,179 @@ def get_shareholder_concentration_for_sids(
     return {r["sid"]: dict(r) for r in rows}
 
 
+# ====================================================================
+# 千張大戶「跨 sid 排行」helpers — 給 _page_big_buyer 用
+# ====================================================================
+#
+# 3 個 helper 都回 list[dict],schema 統一:
+#   sid / name / close / holders_1000up_count / holders_delta_w /
+#   holders_pct / ml_prob / week_end
+# 沒對應資料的欄位走 NULL(Streamlit 顯 N/A),不 raise。
+#
+# 設計考量:
+# - JOIN stocks 帶名稱(沒對應 → name=None)
+# - LEFT JOIN 最新 close(daily_prices 每 sid 取 MAX(date) 那行)
+# - LEFT JOIN 最新 ml_prob(daily_picks 每 sid 取 MAX(trade_date) MAX(ml_prob))
+# - 連續增加用 window function ROW_NUMBER() — SQLite 3.25+ 支援,Python 3.11
+#   ships sqlite3 ≥ 3.39 OK
+# ====================================================================
+
+_RANKING_COLUMNS = [
+    "sid", "name", "close", "holders_1000up_count",
+    "holders_delta_w", "holders_pct", "ml_prob", "week_end",
+]
+
+# 抽出來給 3 個 helper 共用 — SELECT 帶 close + name + ml_prob enrich
+_RANKING_SELECT = """
+    sc.sid AS sid,
+    s.name AS name,
+    (SELECT close FROM daily_prices
+       WHERE stock_id = sc.sid
+       ORDER BY date DESC LIMIT 1) AS close,
+    sc.holders_1000up_count AS holders_1000up_count,
+    sc.holders_delta_w AS holders_delta_w,
+    sc.holders_pct AS holders_pct,
+    (SELECT MAX(ml_prob) FROM daily_picks
+       WHERE sid = sc.sid AND ml_prob IS NOT NULL) AS ml_prob,
+    sc.week_end AS week_end
+"""
+
+
+def _empty_ranking_rows() -> list[dict]:
+    """空結果統一回 [],caller 自行 build pd.DataFrame(empty df 也保有 columns)。"""
+    return []
+
+
+def get_top_shareholder_movers(
+    limit: int = 30,
+    week_end: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """跨 sid 排行:本週千張戶人數增加 Top N(filter delta_w > 0)。
+
+    week_end None → shareholder_concentration 最新一週。
+    JOIN stocks 帶名稱、LEFT JOIN daily_prices 帶最新收盤、daily_picks 帶 ML 分數。
+    沒對應 sid / 沒資料 → 空 list。
+    """
+    with get_conn(db_path) as conn:
+        try:
+            if week_end is None:
+                row = conn.execute(
+                    "SELECT MAX(week_end) AS w FROM shareholder_concentration "
+                    "WHERE holders_delta_w IS NOT NULL AND holders_delta_w > 0"
+                ).fetchone()
+                week_end = row["w"] if row and row["w"] else None
+            if not week_end:
+                return _empty_ranking_rows()
+            rows = conn.execute(
+                f"""
+                SELECT {_RANKING_SELECT}
+                FROM shareholder_concentration sc
+                LEFT JOIN stocks s ON s.stock_id = sc.sid
+                WHERE sc.week_end = ?
+                  AND sc.holders_delta_w IS NOT NULL
+                  AND sc.holders_delta_w > 0
+                ORDER BY sc.holders_delta_w DESC, sc.sid ASC
+                LIMIT ?
+                """,
+                (week_end, int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+    return [dict(r) for r in rows]
+
+
+def get_top_shareholder_concentration(
+    limit: int = 30,
+    week_end: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """跨 sid 排行:千張戶占比 Top N(ORDER BY holders_pct DESC)。
+
+    week_end None → shareholder_concentration 最新一週。同 movers 的 enrich
+    JOIN(stocks / daily_prices / daily_picks)。
+    """
+    with get_conn(db_path) as conn:
+        try:
+            if week_end is None:
+                row = conn.execute(
+                    "SELECT MAX(week_end) AS w FROM shareholder_concentration"
+                ).fetchone()
+                week_end = row["w"] if row and row["w"] else None
+            if not week_end:
+                return _empty_ranking_rows()
+            rows = conn.execute(
+                f"""
+                SELECT {_RANKING_SELECT}
+                FROM shareholder_concentration sc
+                LEFT JOIN stocks s ON s.stock_id = sc.sid
+                WHERE sc.week_end = ?
+                  AND sc.holders_pct IS NOT NULL
+                ORDER BY sc.holders_pct DESC, sc.sid ASC
+                LIMIT ?
+                """,
+                (week_end, int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+    return [dict(r) for r in rows]
+
+
+def get_consecutive_shareholder_increases(
+    weeks: int = 2,
+    limit: int = 30,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """連續 ≥ N 週 holders_delta_w > 0 的個股(以最新 N 週 per sid 判斷)。
+
+    用 window function ROW_NUMBER() OVER (PARTITION BY sid ORDER BY week_end DESC)
+    取每 sid 最新 N 週 → GROUP BY HAVING COUNT == N AND MIN(delta_w) > 0 篩選。
+
+    資料不足 N 週 → 不入選(回空 list)。資料只一週時 weeks=2 永遠回空,
+    符合「資料累積中」的預期行為。
+    """
+    if weeks < 1:
+        return _empty_ranking_rows()
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT sid, week_end, holders_delta_w,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY sid ORDER BY week_end DESC
+                           ) AS rn
+                    FROM shareholder_concentration
+                    WHERE holders_delta_w IS NOT NULL
+                ),
+                qualified AS (
+                    SELECT sid
+                    FROM ranked
+                    WHERE rn <= ?
+                    GROUP BY sid
+                    HAVING COUNT(*) = ? AND MIN(holders_delta_w) > 0
+                ),
+                latest_per_sid AS (
+                    SELECT sid, MAX(week_end) AS mw
+                    FROM shareholder_concentration
+                    GROUP BY sid
+                )
+                SELECT {_RANKING_SELECT}
+                FROM shareholder_concentration sc
+                INNER JOIN qualified q ON q.sid = sc.sid
+                INNER JOIN latest_per_sid lp
+                    ON lp.sid = sc.sid AND lp.mw = sc.week_end
+                LEFT JOIN stocks s ON s.stock_id = sc.sid
+                ORDER BY sc.holders_delta_w DESC, sc.sid ASC
+                LIMIT ?
+                """,
+                (int(weeks), int(weeks), int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+    return [dict(r) for r in rows]
+
+
 def upsert_daily_metrics(
     rows: Iterable[dict],
     db_path: str | Path | None = None,
@@ -2081,6 +2254,9 @@ __all__ = [
     "upsert_shareholder_concentration",
     "get_latest_shareholder_concentration",
     "get_shareholder_concentration_for_sids",
+    "get_top_shareholder_movers",
+    "get_top_shareholder_concentration",
+    "get_consecutive_shareholder_increases",
     "dump_shareholder_concentration_csv",
     "add_to_watchlist",
     "bulk_add_to_watchlist",
