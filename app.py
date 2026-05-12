@@ -70,8 +70,10 @@ from src.market_sentiment import (
     fetch_vix,
 )
 from src.industry_filter import (
-    filter_picks_by_industry,
-    get_available_industries,
+    MAINSTREAM_INDUSTRIES,
+    filter_sids_by_industry,
+    get_all_canonical_industries,
+    get_other_industries,
 )
 from src.screener_short import DEFAULT_SHORT_PARAMS
 
@@ -986,6 +988,31 @@ def _page_dashboard() -> None:
     else:
         target_date = _get_default_screen_date()
         today_iso = target_date.isoformat()
+
+        # === 產業 pre-filter (universe-level) ===
+        # 標籤先選 → 點按鈕 → strategy 只跑這些產業的 sids。空 selected = 全市場。
+        # pills 上方主流 Top 15、下方 expander 冷門類。
+        dash_mainstream = st.pills(
+            "產業",
+            MAINSTREAM_INDUSTRIES,
+            selection_mode="multi",
+            default=[],
+            key="dash_mainstream",
+            help="先選產業 tag、再按下方按鈕,strategy 只跑這些產業。空白 = 全市場。",
+        )
+        with st.expander("➕ 其他產業"):
+            with db.get_conn() as _conn:
+                _all_inds = get_all_canonical_industries(_conn)
+            dash_other = st.pills(
+                "其他",
+                get_other_industries(_all_inds),
+                selection_mode="multi",
+                default=[],
+                key="dash_other",
+                label_visibility="collapsed",
+            )
+        selected_industries = list(dash_mainstream or []) + list(dash_other or [])
+
         # session_state flag 控制是否啟動掃描 — streamlit cache_data 沒有
         # cache-only lookup API,只能用 flag 自己擋。flag 設過後,後續 rerun
         # 就走 _run_all_strategies_cached(同 universe / day cache hit 0 SQL)。
@@ -1003,60 +1030,60 @@ def _page_dashboard() -> None:
                 use_container_width=True,
             )
         else:
-            with st.spinner(f"掃描 {len(eligible_sids)} 檔(20+ 天 / 純股票)..."):
-                try:
-                    agg = _run_all_strategies_cached(
-                        today_iso,
-                        tuple(eligible_sids),
-                        None,
-                        None,
+            # 套產業 pre-filter:從 eligible_sids 砍出 strategy 真正要跑的 sids。
+            if selected_industries:
+                with db.get_conn() as _conn:
+                    filtered_sids = filter_sids_by_industry(
+                        list(eligible_sids), selected_industries, _conn,
                     )
-                    # 先 enrich 全部(不限 head 3),才能對 ML 過濾後再取 Top 3
-                    df_full = _enrich_df_with_matched_strategies(
-                        _enrich_df_with_ml_prob(
-                            _enrich_df_with_win_rate(
-                                aggregated_to_dataframe(agg), agg,
-                            ),
-                            trade_date=today_iso,
-                            agg=agg,
-                        ),
-                        agg,
-                    )
-                    rows_full = df_full.to_dict("records")
-                    rows_filtered, total = _apply_confidence_filter(rows_full)
-                except Exception as e:  # noqa: BLE001
-                    st.caption(f"掃描失敗:{type(e).__name__}: {e}")
-                    rows_filtered = []
-                    rows_full = []
-                    total = 0
-            # 產業 filter — 在 Top 3 截前套用,否則過濾完不足 3 檔。
-            # multiselect 走 session_state key,切換 industry 不會把
-            # _run_all_strategies_cached 的結果作廢(cache key 不含 industry)。
-            available_industries = get_available_industries(rows_filtered)
-            selected_industries = st.multiselect(
-                "產業篩選",
-                available_industries,
-                default=[],
-                key="dash_short_industry",
-                help="複選後只看這幾個產業的推薦,空白 = 不過濾",
-            )
-            rows_after_industry = filter_picks_by_industry(
-                rows_filtered, selected_industries
-            )
-            df_picks = pd.DataFrame(rows_after_industry[:3])
-            if df_picks.empty:
-                if selected_industries and rows_filtered:
-                    st.info("此產業組合下無 picks,試試換產業。")
-                elif total > 0:
-                    st.caption(
-                        f"📭 高信心過濾後無入選(原 {total} 檔,可調 sidebar 門檻)。"
-                    )
-                else:
-                    st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
             else:
-                if st.session_state.get("high_confidence_mode", True):
-                    st.caption(f"🎯 高信心:{len(df_picks)}/{total} 檔顯示")
-                render_picks_cards(df_picks.to_dict("records"))
+                filtered_sids = list(eligible_sids)
+
+            if not filtered_sids:
+                st.info("此產業組合下無 picks(filter 後 universe 為空)。")
+            else:
+                with st.spinner(
+                    f"掃描 {len(filtered_sids)} 檔(20+ 天 / 純股票)..."
+                ):
+                    try:
+                        agg = _run_all_strategies_cached(
+                            today_iso,
+                            tuple(filtered_sids),
+                            None,
+                            None,
+                        )
+                        # 先 enrich 全部(不限 head 3),才能對 ML 過濾後再取 Top 3
+                        df_full = _enrich_df_with_matched_strategies(
+                            _enrich_df_with_ml_prob(
+                                _enrich_df_with_win_rate(
+                                    aggregated_to_dataframe(agg), agg,
+                                ),
+                                trade_date=today_iso,
+                                agg=agg,
+                            ),
+                            agg,
+                        )
+                        rows_full = df_full.to_dict("records")
+                        rows_filtered, total = _apply_confidence_filter(rows_full)
+                    except Exception as e:  # noqa: BLE001
+                        st.caption(f"掃描失敗:{type(e).__name__}: {e}")
+                        rows_filtered = []
+                        rows_full = []
+                        total = 0
+                df_picks = pd.DataFrame(rows_filtered[:3])
+                if df_picks.empty:
+                    if selected_industries:
+                        st.info("此產業組合下無 picks,試試換產業。")
+                    elif total > 0:
+                        st.caption(
+                            f"📭 高信心過濾後無入選(原 {total} 檔,可調 sidebar 門檻)。"
+                        )
+                    else:
+                        st.caption("📭 今日無入選。可切「🔥 短線」放寬參數試試。")
+                else:
+                    if st.session_state.get("high_confidence_mode", True):
+                        st.caption(f"🎯 高信心:{len(df_picks)}/{total} 檔顯示")
+                    render_picks_cards(df_picks.to_dict("records"))
 
     # === 3. 我的關注 Top 3 ===
     st.markdown("### ⭐ 我的關注 (前 3 檔)")
@@ -1507,6 +1534,31 @@ def _page_short() -> None:
     # ma_alignment 需 MA60 但 backfill 90 calendar days 只能換 ~54 交易日)
     eligible_stocks = health["buckets"]["60+"] + health["buckets"]["20-59"]
 
+    # === 產業 pre-filter (universe-level) ===
+    # 標籤先選 → 點「執行選股」→ strategy 只跑這些產業的 sids。空 selected = 全市場。
+    page_short_mainstream = st.pills(
+        "產業",
+        MAINSTREAM_INDUSTRIES,
+        selection_mode="multi",
+        default=[],
+        key="page_short_mainstream",
+        help="先選產業 tag、再按「執行選股」,strategy 只跑這些產業。空白 = 全市場。",
+    )
+    with st.expander("➕ 其他產業"):
+        with db.get_conn() as _conn:
+            _all_inds = get_all_canonical_industries(_conn)
+        page_short_other = st.pills(
+            "其他",
+            get_other_industries(_all_inds),
+            selection_mode="multi",
+            default=[],
+            key="page_short_other",
+            label_visibility="collapsed",
+        )
+    selected_industries = (
+        list(page_short_mainstream or []) + list(page_short_other or [])
+    )
+
     # 上方控制列
     cols = st.columns([2, 3, 1])
     target_date = cols[0].date_input("選股日期", value=_get_default_screen_date())
@@ -1642,6 +1694,15 @@ def _page_short() -> None:
         st.warning("⚠️ 至少要選一套策略")
         return
     sids_only = [s for s, _ in universe]
+    # 套產業 pre-filter:strategy 只跑被選產業內的 sids。
+    if selected_industries:
+        with db.get_conn() as _conn:
+            sids_only = filter_sids_by_industry(
+                sids_only, selected_industries, _conn,
+            )
+        if not sids_only:
+            st.info("此產業組合下無 picks(filter 後 universe 為空)。")
+            return
     _tic("short_run_all_strategies")
     with st.spinner(
         f"掃描 {len(sids_only)} 檔 × {len(enabled_keys)} 套策略 "
@@ -1699,25 +1760,6 @@ def _page_short() -> None:
     )
     _toc("short_aggregated_to_df")
     t3 = _time.perf_counter()
-
-    # 產業 filter — 套在 enrich 完 df 上、各 tab render 前。available
-    # industries 從未過濾的 df 抽,空 selected = 不過濾。
-    _all_rows_for_industries = df.to_dict("records")
-    available_industries = get_available_industries(_all_rows_for_industries)
-    selected_industries = st.multiselect(
-        "產業篩選",
-        available_industries,
-        default=[],
-        key="page_short_industry",
-        help="複選後只看這幾個產業的推薦,空白 = 不過濾",
-    )
-    if selected_industries:
-        _filtered_rows = filter_picks_by_industry(
-            _all_rows_for_industries, selected_industries
-        )
-        df = pd.DataFrame(_filtered_rows)
-        if df.empty:
-            st.info("此產業組合下無 picks,試試換產業。")
 
     _tic("short_render_picks")
     # 5 tabs by category — 同一檔可在多個 tab 重複出現(被多策略同時選中)。
@@ -1820,10 +1862,6 @@ def _page_short() -> None:
                 ),
             )
             sub_rows = sub_df.to_dict("records")
-            sub_rows = filter_picks_by_industry(sub_rows, selected_industries)
-            if selected_industries and not sub_rows:
-                st.info("此產業組合下本分類無 picks。")
-                continue
             filtered_sub, total_sub = _apply_confidence_filter(sub_rows)
             if st.session_state.get("high_confidence_mode", True):
                 st.caption(f"🎯 高信心:{len(filtered_sub)}/{total_sub} 檔顯示")

@@ -68,6 +68,14 @@ def get_other_industries(
     return sorted({i for i in (all_industries or []) if i and i not in main_set})
 
 
+def get_all_canonical_industries(conn: sqlite3.Connection) -> list[str]:
+    """All distinct canonical industries present in the stocks table, sorted."""
+    cur = conn.execute(
+        "SELECT DISTINCT industry FROM stocks WHERE industry IS NOT NULL"
+    )
+    return sorted({canonicalize_industry(row[0]) for row in cur.fetchall() if row[0]})
+
+
 def filter_sids_by_industry(
     sids: list[int],
     selected: list[str] | None,
