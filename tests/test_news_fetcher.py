@@ -240,8 +240,8 @@ def test_format_news_block_telegram_includes_fields():
     assert "14:30" in block
     assert "第10款" in block
     assert "盈餘分配" in block
-    # Telegram = single asterisk bold
-    assert "*台積電 (2330)*" in block
+    # Telegram = HTML bold (842b196: switched from Markdown to HTML parse_mode)
+    assert "<b>台積電 (2330)</b>" in block
 
 
 def test_format_news_block_discord_uses_double_asterisk():
