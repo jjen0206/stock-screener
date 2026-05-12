@@ -20,9 +20,13 @@ from src.industry_filter import (
 def stocks_conn():
     """In-memory SQLite with a tiny stocks table for pre-filter tests."""
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE stocks (sid TEXT PRIMARY KEY, industry TEXT)")
+    # Mirror production schema: stocks 表用 stock_id (TEXT) 當 PK,不是 sid。
+    # 之前用錯欄位名 → filter_sids_by_industry 真的炸了也測不出來。
+    conn.execute(
+        "CREATE TABLE stocks (stock_id TEXT PRIMARY KEY, industry TEXT)"
+    )
     conn.executemany(
-        "INSERT INTO stocks (sid, industry) VALUES (?, ?)",
+        "INSERT INTO stocks (stock_id, industry) VALUES (?, ?)",
         [
             ("2330", "半導體業"),
             ("1101", "水泥工業"),

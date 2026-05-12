@@ -90,10 +90,13 @@ def filter_sids_by_industry(
         return list(sids or [])
     selected_set = set(selected)
 
-    # Single round-trip: pull (sid, industry) for the candidate sids only.
+    # Single round-trip: pull (stock_id, industry) for the candidate sids only.
+    # NOTE: stocks table column is `stock_id`, not `sid` — caller-side var
+    # is named `sid` but the DB column is `stock_id`.
     placeholders = ",".join("?" * len(sids))
     cur = conn.execute(
-        f"SELECT sid, industry FROM stocks WHERE sid IN ({placeholders})",
+        f"SELECT stock_id, industry FROM stocks "
+        f"WHERE stock_id IN ({placeholders})",
         [str(s) for s in sids],
     )
     by_sid: dict[str, str] = {row[0]: row[1] or "" for row in cur.fetchall()}
