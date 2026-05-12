@@ -1,5 +1,5 @@
 # 介面
-streamlit>=1.32.0
+streamlit>=1.34.0  # st.pills 需要 1.34+(產業 pre-filter UI)
 
 # 資料來源
 finmind>=1.9.0
