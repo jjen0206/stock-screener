@@ -619,6 +619,42 @@ def test_format_pick_block_shareholder_does_not_break_other_fields():
     assert "千張戶 1500" in block
 
 
+# === U3 進場區間建議(ATR / BB based)===
+
+def test_format_pick_block_includes_entry_range():
+    """有 entry_low + entry_high → 顯「💰 進場區間 X ~ Y」。"""
+    pick = _make_top_pick()
+    pick["entry_low"] = 1232.5
+    pick["entry_high"] = 1245.0
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "💰 進場區間" in block
+    assert "1232.50" in block
+    assert "1245.00" in block
+
+
+def test_format_pick_block_skips_entry_range_when_missing():
+    """無 entry_low / entry_high(資料不足)→ 整行 graceful skip。"""
+    pick = _make_top_pick()
+    # 不設 entry_low / entry_high
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "💰" not in block
+    assert "進場區間" not in block
+
+
+def test_format_pick_block_entry_range_does_not_break_other_fields():
+    """加進場區間不影響既有欄位。"""
+    pick = _make_top_pick()
+    pick["entry_low"] = 893.0
+    pick["entry_high"] = 850.0
+    pick["win_rate"] = 0.62
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert "💰 進場區間" in block
+    assert "ML 機率 72%" in block
+    assert "保守 893" in block
+    assert "停損 825" in block
+    assert "勝率" in block
+
+
 def test_format_top_picks_message_includes_separator_and_stats():
     picks = [_make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)]
     msg = notifier.format_top_picks_message(

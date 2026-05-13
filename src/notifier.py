@@ -474,6 +474,16 @@ def _select_top_picks(
     out = qualified[:top_n]
     for i, p in enumerate(out, start=1):
         p["rank"] = i
+
+    # U3 進場區間建議:對 top N picks 算 (entry_low, entry_high)
+    # 只算 out 內的 picks(top N,通常 ≤ 10),省 DB query。
+    # 算不出(< 20 天歷史)→ 不寫欄位,format_pick_block graceful skip
+    if out:
+        with db.get_conn() as conn:
+            for p in out:
+                rng = compute_entry_range(p["sid"], p.get("close"), conn)
+                if rng is not None:
+                    p["entry_low"], p["entry_high"] = rng
     return out
 
 
@@ -556,6 +566,16 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         lines.append(
             f"   {emoji} 勝率 {b(f'{win_rate * 100:.0f}%', channel)}(126d 回測)"
         )
+    # U3 進場區間建議(ATR/BB based)— 沒算出來(< 20 天歷史)graceful skip
+    entry_low = pick.get("entry_low")
+    entry_high = pick.get("entry_high")
+    if entry_low is not None and entry_high is not None:
+        try:
+            lines.append(
+                f"   💰 進場區間 {float(entry_low):.2f} ~ {float(entry_high):.2f}"
+            )
+        except (TypeError, ValueError):
+            pass
     # 目標 / 停損
     if target_low and target_high and stop:
         lines.append(
