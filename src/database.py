@@ -399,6 +399,29 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_shareholder_concentration_week "
     "ON shareholder_concentration(week_end DESC)",
+    # pick_outcomes:把 daily_picks 的每筆策略 fire 跑出實際 1/3/5/10 日報酬,
+    # 給 daily-notify「昨日複盤」section 跟 weekly backtest 用。
+    # 每筆 (pick_date, sid, strategy) 唯一,UPSERT(報酬窗口拉長後可覆蓋舊值)。
+    # hit_target / stopped_out 0/1 表是否在 d1~d10 內觸 +3% / -3% — 用 REAL 方便
+    # AVG() 算命中率(主公拍板 schema 用 REAL)。
+    """
+    CREATE TABLE IF NOT EXISTS pick_outcomes (
+        pick_date    TEXT NOT NULL,    -- 推薦日 YYYY-MM-DD
+        sid          TEXT NOT NULL,
+        strategy     TEXT NOT NULL,    -- 命中策略 key(對應 STRATEGY_LABELS)
+        entry_close  REAL,             -- 推薦日收盤價
+        return_d1    REAL,             -- 隔交易日收盤報酬 %(close_d1/entry - 1)
+        return_d3    REAL,             -- 3 交易日累積
+        return_d5    REAL,             -- 5 交易日累積
+        return_d10   REAL,             -- 10 交易日累積
+        hit_target   REAL,             -- 0/1:d1~d10 區間 high 達 +3%
+        stopped_out  REAL,             -- 0/1:d1~d10 區間 low 觸 -3%
+        evaluated_at TEXT NOT NULL,
+        PRIMARY KEY (pick_date, sid, strategy)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pick_outcomes_date "
+    "ON pick_outcomes(pick_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -1827,7 +1850,9 @@ def preload_snapshots(
       stocks.csv / daily_metrics.csv / financials_quarterly.csv /
       daily_prices.csv / institutional.csv / taiex.csv /
       watchlist.csv(2026-05-07 加,讓 actions runner 看到主公的關注股
-      → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)
+      → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)/
+      pick_outcomes.csv(weekly backtest_picks.py dump,讓 daily-notify
+      的「昨日複盤」section 直接吃 SQLite 不用每天重算)
 
     回 {csv stem: rows loaded} 給 caller 用 log。任何 csv 不存在 → skip。
     """
@@ -2215,6 +2240,43 @@ def preload_snapshots(
                 )
             counts["strategy_backtest"] = len(records)
 
+    # 10. pick_outcomes(weekly backtest_picks.py 跑後 dump CSV)— daily-notify
+    # 的「昨日複盤」section 從這撈昨天的 picks 實際報酬。
+    po_csv = snapshot_dir / "pick_outcomes.csv"
+    if po_csv.exists():
+        df = pd.read_csv(po_csv, dtype={"sid": str, "pick_date": str, "strategy": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            with get_conn(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO pick_outcomes (
+                        pick_date, sid, strategy, entry_close,
+                        return_d1, return_d3, return_d5, return_d10,
+                        hit_target, stopped_out, evaluated_at
+                    ) VALUES (
+                        :pick_date, :sid, :strategy, :entry_close,
+                        :return_d1, :return_d3, :return_d5, :return_d10,
+                        :hit_target, :stopped_out, :evaluated_at
+                    )
+                    ON CONFLICT(pick_date, sid, strategy) DO UPDATE SET
+                        entry_close=excluded.entry_close,
+                        return_d1=excluded.return_d1,
+                        return_d3=excluded.return_d3,
+                        return_d5=excluded.return_d5,
+                        return_d10=excluded.return_d10,
+                        hit_target=excluded.hit_target,
+                        stopped_out=excluded.stopped_out,
+                        evaluated_at=excluded.evaluated_at
+                    """,
+                    records,
+                )
+            counts["pick_outcomes"] = len(records)
+
     return counts
 
 
@@ -2407,6 +2469,90 @@ def clear_daily_picks_for_date(
             "DELETE FROM daily_picks WHERE trade_date=?", (trade_date,),
         )
         return cur.rowcount
+
+
+# === pick_outcomes:把 daily_picks 撈出來算實際報酬(weekly backtest) ===
+
+def dump_pick_outcomes(
+    rows: list[dict],
+    db_path: str | Path | None = None,
+) -> int:
+    """bulk UPSERT pick_outcomes rows。
+
+    rows 每筆需含:pick_date, sid, strategy, entry_close, return_d1/d3/d5/d10,
+    hit_target, stopped_out, evaluated_at。同 (pick_date, sid, strategy) 重跑
+    覆蓋(報酬窗口拉長後重算的場景)。
+
+    回 written row count(empty rows → 0)。
+    """
+    if not rows:
+        return 0
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO pick_outcomes (
+                pick_date, sid, strategy, entry_close,
+                return_d1, return_d3, return_d5, return_d10,
+                hit_target, stopped_out, evaluated_at
+            ) VALUES (
+                :pick_date, :sid, :strategy, :entry_close,
+                :return_d1, :return_d3, :return_d5, :return_d10,
+                :hit_target, :stopped_out, :evaluated_at
+            )
+            ON CONFLICT(pick_date, sid, strategy) DO UPDATE SET
+                entry_close=excluded.entry_close,
+                return_d1=excluded.return_d1, return_d3=excluded.return_d3,
+                return_d5=excluded.return_d5, return_d10=excluded.return_d10,
+                hit_target=excluded.hit_target,
+                stopped_out=excluded.stopped_out,
+                evaluated_at=excluded.evaluated_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def get_pick_outcomes_for_date(
+    pick_date: str,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """撈某日所有 pick_outcomes(per-strategy fire,跟 daily_picks 同 granularity)。
+
+    給 notifier.format_yesterday_recap 用 — caller 自己 dedupe by sid /
+    aggregate by strategy。empty → 空 list(該日還沒 evaluate 過或 daily_picks
+    空)。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT pick_date, sid, strategy, entry_close,
+                   return_d1, return_d3, return_d5, return_d10,
+                   hit_target, stopped_out, evaluated_at
+            FROM pick_outcomes
+            WHERE pick_date=?
+            ORDER BY sid, strategy
+            """,
+            (pick_date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_last_evaluated_pick_date(
+    db_path: str | Path | None = None,
+) -> str | None:
+    """回 pick_outcomes 內最新一筆 pick_date(讓 notifier 自動找最近可用複盤日)。
+
+    pick_outcomes 空 → None。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT MAX(pick_date) AS d FROM pick_outcomes "
+            "WHERE return_d1 IS NOT NULL"
+        ).fetchone()
+    return row["d"] if row and row["d"] else None
 
 
 # === strategy_backtest:歷史回測勝率(週一 nightly 跑) ===

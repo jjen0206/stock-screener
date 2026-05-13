@@ -579,3 +579,129 @@ def test_preload_daily_picks_csv_without_ml_prob_column(tmp_db, tmp_path):
     loaded = db.load_daily_picks("2026-05-04", "pure_stock")
     assert loaded is not None
     assert loaded["2330"]["ml_prob"] is None  # 舊 CSV 補 NULL
+
+
+# === pick_outcomes(M4 weekly backtest)===
+
+def test_pick_outcomes_schema_exists(tmp_db):
+    """init_db 後 pick_outcomes 表 + index 存在,欄位齊全。"""
+    with db.get_conn() as conn:
+        names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "pick_outcomes" in names
+
+        cols = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(pick_outcomes)"
+            ).fetchall()
+        }
+        assert cols == {
+            "pick_date", "sid", "strategy", "entry_close",
+            "return_d1", "return_d3", "return_d5", "return_d10",
+            "hit_target", "stopped_out", "evaluated_at",
+        }
+
+        idx_names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_pick_outcomes_date" in idx_names
+
+
+def _fake_outcome_row(
+    pick_date: str = "2026-05-08",
+    sid: str = "2330",
+    strategy: str = "volume_kd",
+    **overrides,
+) -> dict:
+    base = {
+        "pick_date": pick_date, "sid": sid, "strategy": strategy,
+        "entry_close": 600.0,
+        "return_d1": 1.0, "return_d3": 2.5,
+        "return_d5": 3.2, "return_d10": None,
+        "hit_target": 1.0, "stopped_out": 0.0,
+        "evaluated_at": "2026-05-13T14:00:00+00:00",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_dump_pick_outcomes_roundtrip(tmp_db):
+    """dump → get_pick_outcomes_for_date roundtrip,欄位值對齊。"""
+    rows = [
+        _fake_outcome_row(),
+        _fake_outcome_row(strategy="ma_alignment", return_d1=0.5),
+        _fake_outcome_row(sid="2317", entry_close=200.0, return_d1=-0.8),
+    ]
+    n = db.dump_pick_outcomes(rows)
+    assert n == 3
+
+    loaded = db.get_pick_outcomes_for_date("2026-05-08")
+    assert len(loaded) == 3
+    # 排序穩定:sid asc, strategy asc
+    sids = [r["sid"] for r in loaded]
+    assert sids == ["2317", "2330", "2330"]
+
+    # 找 2330 / volume_kd 那筆
+    target = next(
+        r for r in loaded if r["sid"] == "2330" and r["strategy"] == "volume_kd"
+    )
+    assert target["entry_close"] == pytest.approx(600.0)
+    assert target["return_d1"] == pytest.approx(1.0)
+    assert target["return_d10"] is None
+    assert target["hit_target"] == pytest.approx(1.0)
+
+
+def test_dump_pick_outcomes_on_conflict_replaces(tmp_db):
+    """同 (pick_date, sid, strategy) 重 dump → 覆蓋舊值(報酬窗口拉長後重算)。"""
+    db.dump_pick_outcomes([_fake_outcome_row(return_d10=None)])
+    # 補上 d10
+    db.dump_pick_outcomes([_fake_outcome_row(return_d10=5.5)])
+
+    loaded = db.get_pick_outcomes_for_date("2026-05-08")
+    assert len(loaded) == 1  # 沒重複插入
+    assert loaded[0]["return_d10"] == pytest.approx(5.5)
+
+
+def test_dump_pick_outcomes_empty_returns_zero(tmp_db):
+    assert db.dump_pick_outcomes([]) == 0
+
+
+def test_get_pick_outcomes_for_date_empty(tmp_db):
+    """沒資料 → 空 list,不炸。"""
+    assert db.get_pick_outcomes_for_date("2026-05-08") == []
+
+
+def test_get_last_evaluated_pick_date(tmp_db):
+    """回最近一筆有 return_d1 的 pick_date(沒資料 → None)。"""
+    assert db.get_last_evaluated_pick_date() is None
+
+    # 一筆 return_d1 NULL 的(尚未 evaluate)→ 不算入
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-12", return_d1=None),
+    ])
+    assert db.get_last_evaluated_pick_date() is None
+
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-08", return_d1=1.0),
+        _fake_outcome_row(pick_date="2026-05-11", return_d1=0.5),
+    ])
+    assert db.get_last_evaluated_pick_date() == "2026-05-11"
+
+
+def test_preload_pick_outcomes_csv(tmp_db, tmp_path):
+    """pick_outcomes.csv 走 preload → DB 內可查到。"""
+    import pandas as pd
+    csv_path = tmp_path / "pick_outcomes.csv"
+    pd.DataFrame([
+        _fake_outcome_row(),
+        _fake_outcome_row(sid="2317", entry_close=200.0, return_d1=-0.8),
+    ]).to_csv(csv_path, index=False)
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("pick_outcomes") == 2
+    loaded = db.get_pick_outcomes_for_date("2026-05-08")
+    assert len(loaded) == 2
