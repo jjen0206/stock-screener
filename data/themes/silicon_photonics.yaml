@@ -1,0 +1,40 @@
+# 矽光子概念股 / Silicon Photonics + CPO + 光通訊 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://www.stockfeel.com.tw/%E7%9F%BD%E5%85%89%E5%AD%90-%E7%9F%BD%E5%85%89%E5%AD%90%E6%A6%82%E5%BF%B5%E8%82%A1-%E7%9F%BD%E5%85%89%E5%AD%90%E4%BE%9B%E6%87%89%E9%8F%88/ (StockFeel 矽光子供應鏈)
+#   - https://www.sinotrade.com.tw/richclub/hotstock/%E7%9F%BD%E5%85%89%E5%AD%90%E5%9C%8B%E5%AE%B6%E9%9A%8A%E5%85%A8%E8%A7%A3%E6%9E%90-%E5%8F%B0%E7%A9%8D%E9%9B%BB-%E6%B3%A2%E8%8B%A5%E5%A8%81-%E4%B8%8A%E8%A9%AE%E4%B8%89%E5%A4%A7%E9%BE%8D%E9%A0%AD%E8%82%A1%E5%B8%83%E5%B1%80%E8%88%872025%E5%B1%95%E6%9C%9B--%E8%82%A1%E5%B8%82%E8%A9%B1%E9%A1%8C-690038f99d971b01236f3442 (元大豐雲 矽光子國家隊)
+#   - https://www.sinotrade.com.tw/richclub/industry/2026%E5%B9%B4CPO%E5%85%89%E9%80%9A%E8%A8%8A%E5%95%86%E8%BD%89%E5%85%83%E5%B9%B4 (元大豐雲 2026 CPO 商轉元年)
+#   - https://money.udn.com/money/story/124512/7437332 (經濟日報 矽光子聯盟整理包)
+#   - https://money.udn.com/money/story/5607/9215006 (經濟日報 光通訊概念股)
+#   - https://statementdog.com/news/16135 (財報狗 矽光子族群漲停名單)
+#   - https://cmnews.com.tw/article/cmoney-c9716e35-33e5-11f1-bcd3-9a4bbf22f8f5 (CMoney 矽光子商轉元年 8檔)
+#   - https://cmnews.com.tw/article/cmoney-f30cce57-d4d6-11f0-8f65-2d31e6af0996 (CMoney 矽光子 2026 7檔)
+#   - https://www.gvm.com.tw/article/128642 (遠見 矽光子概念股拆解)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 覆蓋: 矽光子晶圓/COUPE、CPO 先進封裝、光收發模組、光纖被動元件、
+#          化合物半導體磊晶 (InP/GaAs)、雷射、CPO 測試介面/探針、矽光子封測、檢測分析
+sids:
+  - "2330"  # 台積電 — 矽光子晶圓代工 (COUPE)
+  - "2345"  # 智邦 — AI交換器/光通訊
+  - "2455"  # 全新 — 化合物半導體磊晶 (GaAs)
+  - "3081"  # 聯亞 — InP 磷化銦磊晶
+  - "3105"  # 穩懋 — 化合物半導體代工
+  - "3163"  # 波若威 — 光纖被動元件
+  - "3234"  # 光環 — 光通訊
+  - "3265"  # 台星科 — 矽光子封測
+  - "3363"  # 上詮 — CPO 光纖封裝 (台積合作夥伴)
+  - "3450"  # 聯鈞 — 雷射封裝/AOC
+  - "3583"  # 辛耘 — 矽光子製程設備
+  - "3711"  # 日月光投控 — CPO 先進封裝
+  - "4908"  # 前鼎 — 光通訊
+  - "4977"  # 眾達-KY — 光收發模組
+  - "4979"  # 華星光 — 雷射/光收發模組
+  - "6223"  # 旺矽 — CPO 測試介面/探針卡
+  - "6257"  # 矽格 — 矽光子封測
+  - "6442"  # 光聖 — 光通訊
+  - "6451"  # 訊芯-KY — 光電整合封裝
+  - "6515"  # 穎崴 — CPO 測試介面
+  - "6821"  # 聯寶 — 光通訊/磁性元件
+  - "6830"  # 汎銓 — 矽光子檢測分析
