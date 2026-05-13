@@ -4234,6 +4234,7 @@ def _page_strong_follower() -> None:
     - 法人共識榜 → db.get_top_inst_consensus(min_days=2)
     - 千張大戶進場榜 → db.get_top_shareholder_movers(reuse 大戶入場頁)
     - 綜合排行 → db.get_strong_follower_composite(交集 + rank-normalize)
+    - 高信心精選 → db.get_strong_follower_premium(三維交集 + 推薦理由)
     """
     st.header("📊 強者跟蹤")
     st.caption(
@@ -4248,8 +4249,8 @@ def _page_strong_follower() -> None:
 
     db.init_db()  # 雲端容器重啟 / 第一次 boot 時保險(同 _page_big_buyer)
 
-    tab_inst, tab_holders, tab_combined = st.tabs(
-        ["🏛️ 法人共識榜", "🐋 千張大戶進場榜", "🎯 綜合排行"],
+    tab_inst, tab_holders, tab_combined, tab_premium = st.tabs(
+        ["🏛️ 法人共識榜", "🐋 千張大戶進場榜", "🎯 綜合排行", "✨ 高信心精選"],
     )
 
     # 共用 column_config(對齊 _page_big_buyer 的 7 欄但欄位語意調整):
@@ -4336,6 +4337,33 @@ def _page_strong_follower() -> None:
                 ),
                 "千張週變": (f"{dw:+d}" if dw is not None else "—"),
                 "ML 分數": (f"{ml:.2f}" if ml is not None else "N/A"),
+                "漲幅": None,
+            })
+        return pd.DataFrame(out)
+
+    def _to_df_premium(rows: list[dict]) -> "pd.DataFrame":
+        """高信心精選 rows → UI DataFrame(三維交集 + composite score)。"""
+        if not rows:
+            return pd.DataFrame(columns=[
+                "編號", "名稱", "目前股價", "法人天數", "千張戶", "週變",
+                "ML分數", "綜合分", "漲幅",
+            ])
+        out: list[dict] = []
+        for r in rows:
+            cd = r.get("consensus_days")
+            h1k = r.get("holders_1000up_count")
+            dw = r.get("holders_delta_w")
+            ml = r.get("ml_prob")
+            score = r.get("composite_score")
+            out.append({
+                "編號": r["sid"],
+                "名稱": r.get("name") or "—",
+                "目前股價": r.get("close"),
+                "法人天數": (f"{cd} 日" if cd is not None else "—"),
+                "千張戶": (int(h1k) if h1k is not None else None),
+                "週變": (f"{dw:+d}" if dw is not None else "—"),
+                "ML分數": (f"{ml:.2f}" if ml is not None else "N/A"),
+                "綜合分": (f"{score:.2f}" if score is not None else "—"),
                 "漲幅": None,
             })
         return pd.DataFrame(out)
@@ -4458,6 +4486,64 @@ def _page_strong_follower() -> None:
                 ),
                 detail_button_prefix="sf_combined_detail",
             )
+
+    with tab_premium:
+        st.caption(
+            "✨ **三維交集精選**:法人連買 ≥ 3 天 + 千張戶週增 + ML 高信心。"
+            "綜合分 = 法人 0.4 + 千張 0.4 + ML 0.2 rank-normalize 加權。"
+        )
+        st.caption(
+            "📌 註:DB 無 ML cache 時自動 fallback 用前 2 維(0.5 / 0.5),"
+            "推薦理由會省略 ML 段。"
+        )
+        rows = db.get_strong_follower_premium(
+            min_inst_days=3, min_delta_w=1, top_n=10,
+        )
+        df = _to_df_premium(rows)
+        if df.empty:
+            st.info(
+                "📋 今日無三維交集標的,"
+                "可去 🎯 綜合排行 看放寬條件版本"
+            )
+        else:
+            showed_detail = _render_table_with_inline_detail(
+                df,
+                state_prefix="sf_premium",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "收盤", format="%.2f", width="small",
+                    ),
+                    "法人天數": st.column_config.TextColumn(
+                        "法人", width="small",
+                    ),
+                    "千張戶": st.column_config.NumberColumn(
+                        "千張戶", format="%d", width="small",
+                    ),
+                    "週變": st.column_config.TextColumn("週變", width="small"),
+                    "ML分數": st.column_config.TextColumn(
+                        "ML", width="small",
+                    ),
+                    "綜合分": st.column_config.TextColumn(
+                        "綜合", width="small",
+                    ),
+                    "漲幅": None,
+                },
+                back_label="← 返回高信心精選",
+                table_caption=(
+                    "✨ 三維交集 Top 10,綜合分數 desc。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="sf_premium_detail",
+            )
+            # 表格模式才顯示推薦理由(detail mode 不重複)
+            if not showed_detail:
+                st.caption("**🎯 推薦理由**")
+                for r in rows:
+                    name = r.get("name") or "—"
+                    st.caption(
+                        f"`{r['sid']}` {name} — {r.get('reason_text', '')}"
+                    )
 
 
 # === 📊 大盤情緒頁 ===
