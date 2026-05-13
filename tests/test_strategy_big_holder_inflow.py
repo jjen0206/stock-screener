@@ -325,3 +325,55 @@ def test_phase2_mixed_with_phase1_fallback(tmp_db):
     assert "A" in hit_sids, "A 應該走 Phase 2 命中"
     assert "B" in hit_sids, "B 應該走 Phase 1 fallback 命中(P80 內 Top 20%)"
     assert "C" not in hit_sids, "C 雖然 fallback 但 delta 太低,不該命中"
+
+
+# === Phase 2 case 5:min_delta_floor — σ 突破 + delta >= floor → 命中 ===
+
+def test_phase2_floor_pass_hits(tmp_db):
+    """前 4 週平穩 → σ 突破很容易過,本週 delta=5 剛好 >= floor(預設 5)→ 命中。
+
+    prior=[1,1,1,1] → μ=1、σ=0 → threshold=1,本週 5 > 1 過 σ 突破,
+    且 5 >= min_delta_floor=5 → 過 floor → Phase 2 命中。"""
+    sid = "FLOOR_PASS"
+    _seed_stocks_and_prices([sid], date=_FIVE_WEEKS[-1])
+    _seed_concentration_multi({
+        sid: [
+            (_FIVE_WEEKS[0], 1),
+            (_FIVE_WEEKS[1], 1),
+            (_FIVE_WEEKS[2], 1),
+            (_FIVE_WEEKS[3], 1),
+            (_FIVE_WEEKS[4], 5),
+        ],
+    })
+
+    df = strat.screen_big_holder_inflow(_FIVE_WEEKS[-1], stock_ids=[sid])
+    assert not df.empty, "本週 delta=5 過 σ 突破且 >= floor=5,應該命中"
+    assert set(df["stock_id"].tolist()) == {sid}
+    assert df.iloc[0]["holders_delta_w"] == 5
+
+
+# === Phase 2 case 6:min_delta_floor — σ 突破但 delta < floor → 被 floor 擋 ===
+
+def test_phase2_floor_blocks_small_delta(tmp_db):
+    """前 4 週平穩,本週 delta=3 過了 σ 突破但 < floor(預設 5)→ 不命中。
+
+    prior=[1,1,1,1] → μ=1、σ=0 → threshold=1,本週 3 > 1 過 σ 突破,
+    但 3 < min_delta_floor=5 → 被 floor 擋掉 → 不命中
+    (歷史已足 ≥ rolling_weeks=4,不會 fallback)。"""
+    sid = "FLOOR_BLOCK"
+    _seed_stocks_and_prices([sid], date=_FIVE_WEEKS[-1])
+    _seed_concentration_multi({
+        sid: [
+            (_FIVE_WEEKS[0], 1),
+            (_FIVE_WEEKS[1], 1),
+            (_FIVE_WEEKS[2], 1),
+            (_FIVE_WEEKS[3], 1),
+            (_FIVE_WEEKS[4], 3),
+        ],
+    })
+
+    df = strat.screen_big_holder_inflow(_FIVE_WEEKS[-1], stock_ids=[sid])
+    assert df.empty, (
+        "本週 delta=3 雖然過 σ 突破但 < floor=5,Phase 2 不該命中、"
+        "且不可 fallback 到 Phase 1(歷史已足夠)"
+    )

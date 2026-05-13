@@ -130,6 +130,7 @@ DEFAULT_BIG_HOLDER_PARAMS: dict[str, Any] = {
     "percentile": 0.80,            # Phase 1 fallback:P80(holders_delta_w Top 20%)
     "rolling_weeks": 4,            # Phase 2:前 4 週滾動視窗算 mean / std
     "sigma_threshold": 1.0,        # Phase 2:命中門檻 = mean + sigma_threshold × std
+    "min_delta_floor": 5,          # Phase 2 絕對下限:本週 delta 必須 ≥ 此值,過濾小型股雜訊
 }
 
 
@@ -1544,6 +1545,8 @@ def screen_big_holder_inflow(
       percentile (float): Phase 1 fallback 用的 quantile,預設 0.80
       rolling_weeks (int): Phase 2 滾動視窗(前期週數),預設 4
       sigma_threshold (float): Phase 2 σ 倍數,預設 1.0
+      min_delta_floor (int): Phase 2 絕對下限,本週 delta 必須 ≥ 此值,預設 5
+        (只作用於 Phase 2 命中分支;Phase 1 fallback 不套用)
 
     date 在此策略單純是傳給 _enrich_with_targets 的 ATR 計算基準日。
     資料來源:shareholder_concentration 表最近 N 週(以 week_end DESC 取)。
@@ -1560,6 +1563,7 @@ def screen_big_holder_inflow(
     percentile = float(p["percentile"])
     rolling_weeks = int(p["rolling_weeks"])
     sigma_threshold = float(p["sigma_threshold"])
+    min_delta_floor = int(p["min_delta_floor"])
     needed_weeks = rolling_weeks + 1  # 前期 N 週 + 本週
 
     import sqlite3
@@ -1663,7 +1667,7 @@ def screen_big_holder_inflow(
             if pd.isna(sigma):  # 理論上 n>=4 不會發生,保險
                 sigma = 0.0
             threshold = mu + sigma_threshold * sigma
-            if latest_delta > threshold:
+            if latest_delta > threshold and latest_delta >= min_delta_floor:
                 phase2_hits.append({
                     "sid": sid,
                     "delta": latest_delta,
