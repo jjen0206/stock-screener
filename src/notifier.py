@@ -536,6 +536,129 @@ def format_premium_picks_block(
     return "\n".join(lines)
 
 
+def format_yesterday_recap(
+    channel: str = "telegram",
+    top_n: int = 5,
+    confluence_n: int = 2,
+) -> str:
+    """組「昨日 picks 複盤」section,放每日推播訊息頂部(headers 下、picks 上)。
+
+    Source:db.get_pick_outcomes_for_date(yesterday) + db.load_daily_picks(yesterday)。
+    Mirror `_select_top_picks` 的 confluence + ML threshold filter,讓 recap 算
+    出來的 picks 跟昨天實際 Telegram 推的那組相同(top_n by ml_prob desc)。
+
+    回空字串時 caller 應 graceful skip 不顯該 section:
+        - pick_outcomes 空(weekly backtest 還沒跑過 / pre-launch 過渡期)
+        - 該日 daily_picks 沒 precompute
+        - 過濾後沒有 qualified picks
+        - top picks 在 pick_outcomes 內查不到 return_d1(報酬窗口未到位)
+    """
+    # 不在 module 頂層 import 避免循環依賴(database 也 import 不到 notifier)
+    from src.strategies import STRATEGY_LABELS, STRATEGY_ML_THRESHOLDS
+
+    pick_date = db.get_last_evaluated_pick_date()
+    if not pick_date:
+        return ""
+
+    outcomes = db.get_pick_outcomes_for_date(pick_date)
+    if not outcomes:
+        return ""
+
+    # daily_picks 撈當日 agg(用 pure_stock,跟 _select_top_picks 預設一致)
+    agg = db.load_daily_picks(pick_date, "pure_stock")
+    if not agg:
+        return ""
+
+    # Confluence ≥ N + per-sid strictest ML threshold(mirror _select_top_picks)
+    qualified: list[tuple[str, float, list[str]]] = []  # (sid, ml_prob, matched)
+    for sid, info in agg.items():
+        matched = list((info.get("details") or {}).keys())
+        if len(matched) < confluence_n:
+            continue
+        prob = info.get("ml_prob")
+        ths = [
+            STRATEGY_ML_THRESHOLDS[s] for s in matched
+            if STRATEGY_ML_THRESHOLDS.get(s) is not None
+        ]
+        strict_thr = max(ths) if ths else None
+        if strict_thr is not None and (prob is None or prob < strict_thr):
+            continue
+        qualified.append((sid, prob or 0.0, matched))
+
+    if not qualified:
+        return ""
+
+    # Sort 跟 _select_top_picks 對齊(略 analyst_target 加分以保持簡潔)
+    qualified.sort(key=lambda x: (-x[1], -len(x[2]), x[0]))
+    top_picks = qualified[:top_n]
+
+    # Lookup return_d1 from outcomes(同 sid 跨多策略 → r1 一樣,取第一個 non-null)
+    outcome_map: dict[tuple[str, str], float | None] = {}
+    for r in outcomes:
+        outcome_map[(r["sid"], r["strategy"])] = r["return_d1"]
+
+    pick_results: list[tuple[str, float, list[str]]] = []
+    for sid, _, matched in top_picks:
+        r1: float | None = None
+        for s in matched:
+            v = outcome_map.get((sid, s))
+            if v is not None:
+                r1 = v
+                break
+        if r1 is None:
+            continue  # backtest 還沒 evaluate
+        pick_results.append((sid, r1, matched))
+
+    if not pick_results:
+        return ""
+
+    n = len(pick_results)
+    up = sum(1 for _, r1, _ in pick_results if r1 > 0)
+    hit_rate = up / n * 100
+    avg_ret = sum(r1 for _, r1, _ in pick_results) / n
+    best = max(pick_results, key=lambda x: x[1])
+    worst = min(pick_results, key=lambda x: x[1])
+
+    # Per-strategy hit rate(從 outcomes 算,涵蓋全 fires 不限 top_n;min 3 fires)
+    strategy_results: dict[str, list[float]] = {}
+    for r in outcomes:
+        v = r["return_d1"]
+        if v is None:
+            continue
+        strategy_results.setdefault(r["strategy"], []).append(v)
+    strategy_hit: list[tuple[str, float, int]] = []
+    for strat, rets in strategy_results.items():
+        if len(rets) < 3:
+            continue
+        ups = sum(1 for v in rets if v > 0)
+        strategy_hit.append((strat, ups / len(rets) * 100, len(rets)))
+    strategy_hit.sort(key=lambda x: (-x[1], -x[2]))
+
+    def _fmt_ret(v: float) -> str:
+        sgn = "+" if v >= 0 else ""
+        return f"{sgn}{v:.1f}%"
+
+    b = _bold
+    avg_sign = "+" if avg_ret >= 0 else ""
+    lines = [
+        f"📈 {b(f'昨日 picks 複盤({pick_date})', channel)}",
+        f"✅ {up}/{n} picks 上漲(命中率 {hit_rate:.0f}%)",
+        (
+            f"平均報酬:{avg_sign}{avg_ret:.2f}% "
+            f"(最佳 {best[0]} {_fmt_ret(best[1])} / "
+            f"最差 {worst[0]} {_fmt_ret(worst[1])})"
+        ),
+    ]
+    if strategy_hit:
+        top3 = strategy_hit[:3]
+        parts = [
+            f"{STRATEGY_LABELS.get(s, s)} {hr:.0f}%"
+            for s, hr, _ in top3
+        ]
+        lines.append(f"策略表現:{' / '.join(parts)}")
+    return "\n".join(lines)
+
+
 def format_top_picks_message(
     picks: list[dict], date: str, channel: str = "telegram",
     premium_picks: list[dict] | None = None,
@@ -559,11 +682,25 @@ def format_top_picks_message(
         premium_picks or [], channel=channel,
     )
 
+    # 昨日 picks 複盤(U1)— pick_outcomes 表內昨天的實際報酬。空字串 → skip。
+    # 任何例外不擋主推播(2026-05-09 silence root cause:單一 section 解析失敗
+    # 整批 4xx,改 try/except 保證主訊息一定送出)。
+    try:
+        recap_block = format_yesterday_recap(channel=channel)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] format_yesterday_recap 失敗,略過該 section")
+        recap_block = ""
+
     lines = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
         _SEPARATOR,
         "",
     ]
+    if recap_block:
+        lines.append(recap_block)
+        lines.append("")
+        lines.append(_SEPARATOR)
+        lines.append("")
     if not picks:
         lines.append(
             "📭 今日無符合「高信心 + 共識 ≥2」的 picks(過濾條件嚴,留空算正常)"
@@ -1053,6 +1190,7 @@ __all__ = [
     "format_manual_picks",
     "format_premium_picks_block",
     "format_top_picks_message",
+    "format_yesterday_recap",
     "notify_short_picks",
     "notify_multi_strategy",
     "notify_manual_picks",
