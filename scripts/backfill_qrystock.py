@@ -52,9 +52,14 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
-_HTTP_TIMEOUT = 30
+# read timeout 60s:TDCC qryStock 在連續打的時候會偶發 30s+ 慢回應,
+# 給 60s 比一直 timeout 重打省成本(且 retry 也要打)。
+_HTTP_TIMEOUT = (10, 60)  # (connect, read)
 _BIG_HOLDER_LEVEL = 15  # TDCC qryStock 級距 15 = 1,000,001 股以上 = 千張大戶
 _TOTAL_LEVEL = 17       # 最後一列「合計」(本頁是 17,非 opendata 的 99)
+# 連續失敗達此值 → 進入長 cooldown(避免一直撞牆)
+_CONSEC_FAIL_COOLDOWN_THRESHOLD = 5
+_COOLDOWN_SECS = 30
 
 
 # === HTTP helper ===
@@ -106,6 +111,45 @@ def post_query(sess, meta: dict, sca_date: str, stock_no: str) -> str:
         return r.content.decode("big5", errors="replace")
     except Exception:
         return r.text
+
+
+def post_with_retry(
+    sess, meta_ref: dict, sca_date: str, stock_no: str,
+    *, max_attempts: int = 3, sleep_fn=time.sleep,
+) -> dict | None:
+    """打 1 筆,失敗最多 retry max_attempts 次,backoff 5/15s。
+
+    `meta_ref` 是 dict(token, firDate),caller 共享同一 instance;
+    最後一次 attempt 才 refresh token(避免每次 fail 都拉 token 加重 server 負擔)。
+
+    回 parsed dict 或 None(三次都失敗)。
+    """
+    backoffs = [5, 15]  # attempt 1 → backoff[0] → attempt 2 → backoff[1] → attempt 3
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        # 最後一次嘗試前,refresh token(token 過期是冷門但會發生,例如長 cooldown 之後)
+        if attempt == max_attempts:
+            try:
+                new_meta = fetch_form_meta(sess)
+                meta_ref["token"] = new_meta["token"]
+                meta_ref["firDate"] = new_meta["firDate"]
+            except Exception as ex:  # noqa: BLE001
+                last_err = f"meta refresh: {type(ex).__name__}"
+        try:
+            html = post_query(sess, meta_ref, sca_date, stock_no)
+            parsed = parse_qrystock_html(html)
+            if parsed is not None:
+                return parsed
+            last_err = "parse=None"
+        except Exception as ex:  # noqa: BLE001
+            last_err = f"{type(ex).__name__}"
+        if attempt < max_attempts:
+            sleep_fn(backoffs[attempt - 1])
+    logger.warning(
+        "[BACKFILL] sid=%s sca=%s 三次都失敗 (last=%s)",
+        stock_no, sca_date, last_err,
+    )
+    return None
 
 
 # === Parser ===
@@ -269,6 +313,7 @@ def run_backfill(
 
     ok = failed = skipped = 0
     post_idx = 0
+    consec_fail = 0
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     for sca_date, week_end in work:
@@ -295,40 +340,30 @@ def run_backfill(
                 continue
 
             post_idx += 1
-            try:
-                html = post_query(sess, meta, sca_date, sid)
-                parsed = parse_qrystock_html(html)
-            except Exception as ex:  # noqa: BLE001
-                logger.warning(
-                    "[BACKFILL] sid=%s week=%s POST 失敗: %s",
-                    sid, week_end, ex,
-                )
-                parsed = None
-
-            if parsed is None:
-                # 如果 token 過期 → 重抓一次再試 1 次
-                try:
-                    meta = fetch_form_meta(sess)
-                    html = post_query(sess, meta, sca_date, sid)
-                    parsed = parse_qrystock_html(html)
-                except Exception as ex:  # noqa: BLE001
-                    logger.warning(
-                        "[BACKFILL] sid=%s week=%s retry 失敗: %s",
-                        sid, week_end, ex,
-                    )
-                    parsed = None
+            parsed = post_with_retry(sess, meta, sca_date, sid, sleep_fn=sleep_fn)
 
             if parsed is None:
                 failed += 1
+                consec_fail += 1
                 sleep_fn(rate_limit_secs)
                 if post_idx % 50 == 0:
                     print(
                         f"[BACKFILL] sid={sid} week={week_end} FAIL "
-                        f"(total={post_idx} ok={ok} failed={failed} skipped={skipped})",
+                        f"(total={post_idx} ok={ok} failed={failed} "
+                        f"skipped={skipped} consec_fail={consec_fail})",
                         flush=True,
                     )
+                if consec_fail >= _CONSEC_FAIL_COOLDOWN_THRESHOLD:
+                    print(
+                        f"[BACKFILL] {consec_fail} 連續失敗 → cooldown "
+                        f"{_COOLDOWN_SECS}s",
+                        flush=True,
+                    )
+                    sleep_fn(_COOLDOWN_SECS)
+                    consec_fail = 0
                 continue
 
+            consec_fail = 0
             cnt = parsed["holders_1000up_count"]
             total = parsed["total_holders"]
             prev = prev_counts.get(sid)
