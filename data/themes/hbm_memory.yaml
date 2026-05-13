@@ -1,0 +1,25 @@
+# HBM 高頻寬記憶體概念股 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://www.sinotrade.com.tw/richclub/industry/2026-AI-%E8%A8%98%E6%86%B6%E9%AB%94%E6%96%B0%E6%88%B0%E5%B1%80-SRAM-%E7%95%B0%E8%BB%8D%E7%AA%81%E8%B5%B7%E8%88%87-HBM-%E9%9B%99%E9%9B%84%E4%B8%A6%E7%AB%8B-%E5%8F%B0%E5%BB%A0%E4%BE%9B%E6%87%89%E9%8F%88%E8%A7%A3%E6%9E%90-%E7%94%A2%E6%A5%AD%E7%86%B1%E8%A9%B1-6951f732cfa1251682968c6c (元大豐雲 2026 AI 記憶體新戰局)
+#   - https://blog.growin.tv/2026-ram-stock/ (Growin 2026 記憶體概念股)
+#   - https://www.gvm.com.tw/article/127816 (遠見 撼動 HBM 的 HBF 是什麼/記憶體新名單)
+#   - https://www.mitrade.com/zh/insights/shares/us-stock-recommendation/memory-stocks-dram (Mitrade 2026 記憶體 DRAM)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 2026 動能: HBM4 量產年、產能售罄(三大廠 26-27 年訂單滿載)、
+#                HBM 一片產能=DDR5 三片 (產能犧牲比)
+sids:
+  - "2408"  # 南亞科 — DDR5/AI UWIO/HBM 切入
+  - "2344"  # 華邦電 — 利基 DRAM/NOR Flash
+  - "8299"  # 群聯 — NAND 控制 IC/HBF 介面
+  - "4967"  # 十銓 — DRAM 模組
+  - "3260"  # 威剛 — DRAM 模組
+  - "2337"  # 旺宏 — NAND/HBF
+  - "6239"  # 力成 — HBM 後段封測龍頭
+  - "2449"  # 京元電子 — HBM 測試
+  - "3443"  # 創意 — HBM4 IP/ASIC 設計服務
+  - "3661"  # 世芯-KY — ASIC/HBM 整合
+  - "6531"  # 愛普* — 記憶體 IC
+  - "3006"  # 晶豪科 — 記憶體 IC

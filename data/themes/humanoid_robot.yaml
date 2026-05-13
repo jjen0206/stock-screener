@@ -1,0 +1,33 @@
+# 人形機器人概念股 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://www.sinotrade.com.tw/richclub/hotstock/2025%E6%A9%9F%E5%99%A8%E4%BA%BA%E6%A6%82%E5%BF%B5%E8%82%A1%E6%9C%89%E5%93%AA%E4%BA%9B%E8%82%A1%E7%A5%A8-665823eb7621e831ac675759 (元大豐雲 2025 機器人概念股 / 魏哲家)
+#   - https://money.udn.com/money/story/124512/8076729 (經濟日報 整理包 / 多功能機器人未來重點)
+#   - https://www.ctee.com.tw/news/20250726700013-430201 (工商時報 / 人形機器人 6 檔)
+#   - https://money.udn.com/money/story/5607/9018600 (經濟日報 / 機器人熱門股大閱兵)
+#   - https://money.udn.com/money/story/5607/9481335 (經濟日報 / 黃金三角供應鏈 4 家)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 2026 動能: Tesla Optimus V3 / Figure 03 / Boston Dynamics Atlas / Unitree H2
+#                小規模量產年;台廠 H2/2026 開始出貨國際供應鏈
+#   - 涵蓋: 線性傳動/減速器、馬達、感測/視覺、控制系統、組裝/機構件、邊緣 AI
+sids:
+  - "2049"  # 上銀 — 線性傳動/諧波減速機(關節核心)
+  - "1597"  # 直得 — 線性導軌
+  - "2359"  # 所羅門 — 機器視覺(NVIDIA Isaac 夥伴)
+  - "2464"  # 盟立 — 減速機/系統整合
+  - "4585"  # 達明 — AI 協作機器人
+  - "6188"  # 廣明 — 達明母公司
+  - "1536"  # 和大 — 行星減速零組件(特斯拉供應鏈)
+  - "2354"  # 鴻準 — 人形機器人機構量產
+  - "4571"  # 鈞興-KY — 減速器
+  - "5484"  # 慧友 — 邊緣運算
+  - "8234"  # 新漢 — AMR/協作型安全機器人
+  - "6414"  # 樺漢 — 工控/嵌入式
+  - "1590"  # 亞德客-KY — 氣動元件
+  - "6125"  # 廣運 — 物料搬運
+  - "8086"  # 宏捷科 — 3D 視覺鏡頭/化合物半導體
+  - "3227"  # 原相 — 3D 感測/圖像感測器
+  - "4549"  # 桓達 — 感測器/儀控
+  - "2308"  # 台達電 — 馬達驅動/伺服

@@ -1,0 +1,32 @@
+# 低軌衛星 / 太空概念股 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://money.udn.com/money/story/124512/7542077 (經濟日報 整理包 / 國家太空隊低軌衛星)
+#   - https://money.udn.com/money/story/5607/9353481 (經濟日報 / MWC 2026 點火低軌衛星 8檔)
+#   - https://www.pocket.tw/school/report/perspective/7049/ (口袋學堂 / 台股低軌衛星總整理)
+#   - https://www.stockfeel.com.tw/%E4%BD%8E%E8%BB%8C%E8%A1%9B%E6%98%9F-%E4%BD%8E%E8%BB%8C%E8%A1%9B%E6%98%9F%E6%A6%82%E5%BF%B5%E8%82%A1/ (StockFeel 低軌衛星概念股)
+#   - https://www.pocket.tw/school/report/perspective/5371/ (口袋學堂 / 2026 SpaceX 台美概念股)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 2026 動能: 全球發射量 5100+ 顆(2025 約 4235)、SpaceX 訪台、MWC 點火、
+#                昇達科 LEO 營收占比 80%+ / 2026 EPS 估 19.56
+#   - 涵蓋: 衛星本體/系統整合、高頻 RF/天線、PCB、化合物半導體、光通訊、
+#           衛星通訊晶片、地面終端、太陽能(衛星太陽能板)
+sids:
+  - "2313"  # 華通 — 高頻 PCB
+  - "2317"  # 鴻海 — 衛星本體/系統整合
+  - "2367"  # 燿華 — PCB
+  - "2454"  # 聯發科 — 衛星通訊晶片
+  - "2485"  # 兆赫 — 網通/地面終端
+  - "3105"  # 穩懋 — 化合物半導體 RF
+  - "3163"  # 波若威 — 光纖被動元件
+  - "3450"  # 聯鈞 — 雷射封裝
+  - "3481"  # 群創 — 地面終端面板
+  - "3491"  # 昇達科 — 高頻 RF/天線(LEO 占比 80%+)
+  - "4979"  # 華星光 — 光通訊模組
+  - "5222"  # 全訊 — RF 前端
+  - "6285"  # 啟碁 — 網通/天線
+  - "6442"  # 光聖 — 光通訊
+  - "6443"  # 元晶 — 太陽能/衛星電源
+  - "6526"  # 達發 — 衛星通訊晶片

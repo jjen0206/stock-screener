@@ -1,0 +1,29 @@
+# 軍工 / 國防 / 無人機概念股 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://blog.growin.tv/taiwan-defense-stocks/ (Growin 台灣國防軍工 / 2026 無人機標案)
+#   - https://www.esunsec.com.tw/article/post/258 (玉山證券 / 國防支出/航太/軍工產業鏈)
+#   - https://www.sinotrade.com.tw/richclub/hotstock/%E5%9C%8B%E9%98%B2%E9%A0%90%E7%AE%97%E5%8F%B2%E4%B8%8A%E6%9C%80%E5%A4%A7%E6%89%8B%E7%AD%86-6926776b62e42a422b3cd7f3 (元大豐雲 國防預算史上最大手筆)
+#   - https://www.linebank.com.tw/wealth-investment/topics/2708 (LineBank / 1.25兆軍工大餅)
+#   - https://www.stockfeel.com.tw/%E8%BB%8D%E5%B7%A5%E8%82%A1-%E8%BB%8D%E5%B7%A5%E6%A6%82%E5%BF%B5%E8%82%A1-%E8%BB%8D%E5%B7%A5/ (StockFeel 軍工概念股)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 2026 動能: 立院通過「保衛國家安全及強化不對稱戰力計畫採購特別條例」
+#                預算上限 7800 億、無人機 500 億 + 五型 4.875 萬架(26-27)、
+#                美對台 BlueUAS / Replicator 計畫切入
+#   - 涵蓋: 航太(整機/維修/精密件)、無人機/無人船、造船、軍用 RF/雷達、軍工影像
+sids:
+  - "2208"  # 台船 — 造船/海軍艦艇
+  - "2630"  # 亞航 — 航太維修
+  - "2634"  # 漢翔 — 航太/無人機(美亞利桑那設廠)
+  - "2645"  # 長榮航太 — 航太維修/軍用無人機
+  - "4541"  # 晟田 — 航太精密零件
+  - "4572"  # 駐龍 — 航太精密零件
+  - "5222"  # 全訊 — 軍用 RF/雷達
+  - "5371"  # 中光電 — 監偵/微型無人機(連2案)
+  - "6753"  # 龍德造船 — 造船/無人船
+  - "6829"  # 千附精密 — 航太精密
+  - "7402"  # 邑錡 — 軍工影像
+  - "8033"  # 雷虎 — 無人機(Blue UAS 認證/TM-450)
+  - "8222"  # 寶一 — 航太精密

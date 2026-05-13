@@ -1,0 +1,32 @@
+# CoWoS / 先進封裝概念股 (2024-2026 市場共識 union)
+# Last updated: 2026-05-13
+# Sources (cross-validated):
+#   - https://blog.growin.tv/advanced-packaging-stocks/ (Growin 先進封裝 CoWoS 2026 選股攻略)
+#   - https://money.udn.com/money/story/124512/7332224 (經濟日報 CoWoS 整理包)
+#   - https://cmnews.com.tw/article/cmoney-b8cc829e-d1f2-11f0-87da-dbe34fc07450 (CMoney CoWoS 再增產30% 15檔)
+#   - https://news.cnyes.com/news/id/6010890 (鉅亨 CoWoS再上修 / CoPoS蓄勢待發)
+#   - https://www.my-finance.com.tw/tw/News_detail/2243/CoWoS-%E6%A6%82%E5%BF%B5%E8%82%A1%E5%85%A8%E8%A7%A3%E6%9E%90 (MY-Finance CoWoS 全解析)
+# Notes:
+#   - 已驗證每個 sid 存在於 data/cache.db.stocks 表
+#   - 用途: shareholder_concentration backfill universe (theme-based)
+#   - 聚焦封測/先進封裝設備/載板核心受惠;廠務/通用設備已歸 tsmc_supply.yaml
+#   - 2026 主題: TSMC CoWoS 月產能擴至 13 萬片(較 24 年底 4 倍)、CoPoS 蓄勢、HBM4 推升
+sids:
+  - "2330"  # 台積電 — CoWoS 主導/COUPE
+  - "3711"  # 日月光投控 — OSAT 龍頭/CoWoS 轉單
+  - "6239"  # 力成 — HBM/3D 堆疊封測
+  - "2449"  # 京元電子 — AI 晶片測試
+  - "6257"  # 矽格 — CoWoS 轉單測試
+  - "3264"  # 欣銓 — IC 測試
+  - "6147"  # 頎邦 — 封測
+  - "3131"  # 弘塑 — CoWoS 濕製程設備
+  - "6187"  # 萬潤 — CoWoS 檢測設備
+  - "6937"  # 天虹 — CoWoS 薄膜沉積
+  - "8027"  # 鈦昇 — 封測設備
+  - "5443"  # 均豪 — 封測/晶圓設備
+  - "6640"  # 均華 — CoWoS 設備
+  - "8046"  # 南電 — ABF 載板/CoWoS substrate
+  - "3037"  # 欣興 — ABF 載板
+  - "3189"  # 景碩 — ABF/IC 載板
+  - "1717"  # 長興 — 封裝膠/底部填充膠
+  - "3583"  # 辛耘 — 濕製程設備
