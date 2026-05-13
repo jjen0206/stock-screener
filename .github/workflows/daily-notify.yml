@@ -81,6 +81,18 @@ jobs:
           python scripts/fetch_analyst_targets.py --scope=watchlist
           python scripts/fetch_analyst_targets.py --scope=picks
 
+      # === Step 2.6: Backtest 昨日 / 過去 N 天 picks 報酬(M4 + U1)===
+      # 對 daily_picks 內最近 15 個交易日的每筆策略 fire 算 d1/d3/d5/d10 報酬,
+      # 寫進 pick_outcomes 表 + dump CSV。daily_notify 內的「昨日複盤」section
+      # 從這撈最新 outcomes,確保每天 recap 都有新鮮 d1(光靠 weekly cron 不夠 —
+      # 週一的 picks 要等下週六才會被 backtest-weekly 評估)。
+      # continue-on-error:backtest 失敗(daily_picks 空 / preload fail 等)不該擋推播。
+      - name: Backtest pick outcomes (refresh d1 for yesterday's picks)
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/backtest_picks.py --days 15 --dump-csv
+
       # === Step 3: ★★ 推播 ★★(移到前面確保 push 必達)===
       # 2026-05-06 主公拍板:notify step 從尾部移到 daily_market_update 之前。
       # 原因:daily_market_update 跑全市場財報 ~15 min,若撞 120 min timeout

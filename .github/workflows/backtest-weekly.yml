@@ -1,0 +1,68 @@
+name: Weekly Pick Outcomes Backtest
+
+# 每週六凌晨 02:00 TW 跑全量 pick_outcomes evaluate(過去 15 個交易日)。
+# - cron: "0 18 * * 5" → UTC 18:00 週五 = 台灣時間 02:00 週六
+# - 跟 weekly-shareholder-fetch.yml(週日 02:00 TW)錯一天,避免兩個 weekly job
+#   同時段 push main 撞 race condition
+# - daily-notify.yml 內也有 inline backtest step,確保每日 recap 新鮮。本 workflow
+#   是 safety net + 週末單獨快照 (周末容器 git pull 拿到的 CSV 保證是最新)
+on:
+  schedule:
+    - cron: "0 18 * * 5"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "倒推 N 個交易日 evaluate(default 15)"
+        required: false
+        default: "15"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # commit snapshot CSV
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # backtest_picks.py 內部會 preload_snapshots(stocks/daily_prices/daily_picks)
+      # 所以不需要額外 preload step。
+      - name: Evaluate pick outcomes
+        run: |
+          DAYS="${{ inputs.days }}"
+          if [ -z "$DAYS" ]; then DAYS="15"; fi
+          python scripts/backtest_picks.py --days "$DAYS" --dump-csv
+
+      # push race retry:跟其他 workflow 同 pattern,跨 workflow 同時段推 main
+      # 用 rebase + retry 5 次避免 [rejected] (fetch first) 把 CSV 吃掉。
+      - name: Commit pick_outcomes snapshot CSV if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/pick_outcomes.csv || true
+          if git diff --quiet --staged; then
+            echo "No pick_outcomes snapshot changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): weekly pick outcomes backtest [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[BACKTEST-WEEKLY] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::backtest-weekly snapshot push 失敗 5 次"
