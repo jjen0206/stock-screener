@@ -4249,6 +4249,28 @@ def _page_strong_follower() -> None:
 
     db.init_db()  # 雲端容器重啟 / 第一次 boot 時保險(同 _page_big_buyer)
 
+    # 大盤 regime banner — 把 5 種(bull / weak_bull / sideways / bear / unknown)
+    # 收斂成 3 桶顯示,熊市給強烈視覺警示。bear 時把 premium top_n 從 10 降到 5
+    # (主公拍板:逆風期收緊精選張數,避免追高)。
+    from src.market_regime import compute_regime
+    regime_info = compute_regime()
+    sf_regime = regime_info["regime"]
+    if sf_regime == "bull":
+        st.success("🟢 **大盤偏多** — 可較積極配置")
+    elif sf_regime == "bear":
+        st.error(
+            "🔴 **大盤偏空,小心追高** — "
+            "高信心精選自動收緊至 Top 5,建議分批佈局"
+        )
+    elif sf_regime in ("weak_bull", "sideways"):
+        st.warning("🟡 **大盤盤整** — 籌碼共識為主,觀察突破方向")
+    else:
+        # unknown(資料不足 60 天)→ 不顯 banner,避免誤導
+        pass
+
+    # 熊市自動降 top_n:premium tab 的查詢 top_n 由 regime 決定
+    sf_premium_top_n = 5 if sf_regime == "bear" else 10
+
     tab_inst, tab_holders, tab_combined, tab_premium = st.tabs(
         ["🏛️ 法人共識榜", "🐋 千張大戶進場榜", "🎯 綜合排行", "✨ 高信心精選"],
     )
@@ -4497,7 +4519,7 @@ def _page_strong_follower() -> None:
             "推薦理由會省略 ML 段。"
         )
         rows = db.get_strong_follower_premium(
-            min_inst_days=3, min_delta_w=1, top_n=10,
+            min_inst_days=3, min_delta_w=1, top_n=sf_premium_top_n,
         )
         df = _to_df_premium(rows)
         if df.empty:
@@ -4532,7 +4554,8 @@ def _page_strong_follower() -> None:
                 },
                 back_label="← 返回高信心精選",
                 table_caption=(
-                    "✨ 三維交集 Top 10,綜合分數 desc。點任一行 → 展開完整卡片"
+                    f"✨ 三維交集 Top {sf_premium_top_n},綜合分數 desc。"
+                    "點任一行 → 展開完整卡片"
                 ),
                 detail_button_prefix="sf_premium_detail",
             )
