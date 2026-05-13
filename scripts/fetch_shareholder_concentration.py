@@ -46,10 +46,13 @@ from src import database as db  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# TDCC 級距 15-17 = 持股 > 1,000,000 股 = 持股 ≥ 1000 張(嚴格: ≥1001 張,
-# 但「千張大戶」業界口語涵蓋 ≥ 級 15;14 結尾是 1,000,000 股 = 1000 張整)。
+# TDCC 級距:14 結尾 = 1,000,000 股 = 1000 張整;15 起 > 1,000,000 股 = >1000 張。
+# 「千張大戶」業界口語涵蓋 ≥ 級 15(含 16 若該檔有更大級距)。
 _BIG_HOLDER_LEVEL_MIN = 15
-_LEVEL_TOTAL = 99  # TDCC 自帶的「合計」行(部分週才有,fallback 自己 sum)
+# 合計行:TDCC opendata 用「該檔 max(level)」標示合計(實測 2026-05 為 level 17,
+# 過去文件曾提 99,實際 CSV 未出現)。改用 per-sid max(level) 偵測,forward-compatible:
+# TDCC 未來加 level 18,我們也能正確 detect 合計列(就是 max 那行)。
+# 這修法同時相容老 fixture(用 99 當合計):max=99 → 合計=99,千張=15..98。
 
 TDCC_OPENDATA_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
 _HTTP_TIMEOUT = 60  # TDCC CSV 在台灣晨間下載偶有慢峰
@@ -174,20 +177,28 @@ def aggregate_to_rows(
             continue
         week_end = _normalize_date(max(dates))
 
-        # 千張大戶人數 = level >= 15(<99,排合計列)的 count 加總
+        # 合計行 = 該檔 max(level)。實測 TDCC opendata 用最後一個 level number 當合計
+        # (2026-05 為 17)。NaN-safe:Int64.max() 對全 NaN 回 pd.NA → 跳過該檔。
+        max_level_val = sub["level"].max()
+        if pd.isna(max_level_val):
+            continue
+        max_level = int(max_level_val)
+
+        # 千張大戶人數 = level >= 15 但排除合計列的 count 加總
         big = sub[
             (sub["level"].notna())
             & (sub["level"] >= _BIG_HOLDER_LEVEL_MIN)
-            & (sub["level"] < _LEVEL_TOTAL)
+            & (sub["level"] < max_level)
         ]
         holders_1000up = int(big["count"].sum())
 
-        # 總股東人數:優先用 level=99 合計列;沒有 fallback sum level 1-17
-        total_row = sub[sub["level"] == _LEVEL_TOTAL]
+        # 總股東人數 = 合計列(level == max_level)的 count
+        total_row = sub[sub["level"] == max_level]
         if not total_row.empty:
             total_holders = int(total_row["count"].sum())
         else:
-            non_total = sub[(sub["level"].notna()) & (sub["level"] < _LEVEL_TOTAL)]
+            # 不該走到(max_level 來自 sub 本身),fallback 防爆
+            non_total = sub[(sub["level"].notna()) & (sub["level"] < max_level)]
             total_holders = int(non_total["count"].sum())
 
         if total_holders <= 0:
