@@ -495,12 +495,57 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     return "\n".join(lines)
 
 
+def format_premium_picks_block(
+    premium_rows: list[dict], channel: str = "telegram",
+) -> str:
+    """組「✨ 高信心精選」section(法人連買 ≥ 3 + 千張戶進場 + ML 過門檻)。
+
+    輸入 premium_rows 為 db.get_strong_follower_premium(...) 回傳的 list[dict]。
+    empty → 回空 string,caller 看到 falsy 就 graceful skip 不顯該 section。
+
+    格式(Markdown legacy / Discord 共用,bold 自動切換):
+        ✨ *高信心精選(法人連買 ≥ 3 + 千張戶進場 + ML 過門檻)*
+        1. [2330] *台積電* 779.0
+           🏛️ 法人連買 3 天 | 🐋 千張戶 +12 | 🎯 ML 0.71
+    """
+    if not premium_rows:
+        return ""
+    b = _bold
+    title = "高信心精選(法人連買 ≥ 3 + 千張戶進場 + ML 過門檻)"
+    lines = [f"✨ {b(title, channel)}"]
+    for i, r in enumerate(premium_rows, start=1):
+        sid = str(r.get("sid") or "")
+        name = str(r.get("name") or "")
+        close = r.get("close")
+        cd = r.get("consensus_days") or 0
+        dw = r.get("holders_delta_w") or 0
+        ml = r.get("ml_prob")
+        try:
+            close_str = f"{float(close):.2f}" if close is not None else "—"
+        except (TypeError, ValueError):
+            close_str = "—"
+        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        sub_parts = [f"🏛️ 法人連買 {int(cd)} 天", f"🐋 千張戶 +{int(dw)}"]
+        if ml is not None:
+            try:
+                sub_parts.append(f"🎯 ML {float(ml):.2f}")
+            except (TypeError, ValueError):
+                pass
+        lines.append(header)
+        lines.append("   " + " | ".join(sub_parts))
+    return "\n".join(lines)
+
+
 def format_top_picks_message(
     picks: list[dict], date: str, channel: str = "telegram",
+    premium_picks: list[dict] | None = None,
 ) -> str:
-    """組完整訊息:header → picks(各 _SEPARATOR 隔開)→ 統計 + 警語。
+    """組完整訊息:header → picks(各 _SEPARATOR 隔開)→ 高信心精選 → 統計 + 警語。
 
-    picks 空時走 empty fallback 文字(配 _weekend_hint / _empty_pick_suffix)。
+    picks 空時走 empty fallback 文字(配 _weekend_hint / _empty_pick_suffix),
+    但若 premium_picks 有資料仍會夾在中間顯示(三維過濾獨立於短線 ≥2 共識)。
+
+    premium_picks:db.get_strong_follower_premium 結果(empty / None → skip)。
     """
     b = _bold
     try:
@@ -509,6 +554,10 @@ def format_top_picks_message(
         date_label = f"{date}(週{week_zh})"
     except Exception:  # noqa: BLE001
         date_label = date
+
+    premium_block = format_premium_picks_block(
+        premium_picks or [], channel=channel,
+    )
 
     lines = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
@@ -520,12 +569,24 @@ def format_top_picks_message(
             "📭 今日無符合「高信心 + 共識 ≥2」的 picks(過濾條件嚴,留空算正常)"
             f"{_empty_pick_suffix()}"
         )
+        if premium_block:
+            lines.append("")
+            lines.append(_SEPARATOR)
+            lines.append("")
+            lines.append(premium_block)
         lines.append("")
         lines.append("⚠️ 僅供研究,非投資建議。")
         return "\n".join(lines)
 
     for p in picks:
         lines.append(format_pick_block(p, channel=channel))
+        lines.append("")
+        lines.append(_SEPARATOR)
+        lines.append("")
+
+    # 高信心精選 section(三維交集獨立 helper,跟短線 ≥2 共識結果並列)
+    if premium_block:
+        lines.append(premium_block)
         lines.append("")
         lines.append(_SEPARATOR)
         lines.append("")
@@ -568,9 +629,23 @@ def notify_top_picks(
         date, top_n=top_n, confluence_n=confluence_n, params=params,
     )
 
+    # 高信心精選(三維交集:法人連買 ≥3 + 千張戶進場 + ML 過門檻)— 跟 ≥2 共識
+    # 並列獨立 section。helper 自己 graceful 空回 []。任何例外不擋主推播。
+    try:
+        premium_picks = db.get_strong_follower_premium(
+            min_inst_days=3, min_delta_w=1, top_n=5,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] get_strong_follower_premium 失敗,略過該 section")
+        premium_picks = []
+
     results: dict[str, bool] = {}
-    tg_msg = format_top_picks_message(picks, date, channel="telegram")
-    dc_msg = format_top_picks_message(picks, date, channel="discord")
+    tg_msg = format_top_picks_message(
+        picks, date, channel="telegram", premium_picks=premium_picks,
+    )
+    dc_msg = format_top_picks_message(
+        picks, date, channel="discord", premium_picks=premium_picks,
+    )
 
     if dry_run:
         print("\n=== Telegram (Markdown legacy) ===\n", flush=True)
@@ -976,7 +1051,10 @@ __all__ = [
     "format_short_picks",
     "format_multi_strategy_picks",
     "format_manual_picks",
+    "format_premium_picks_block",
+    "format_top_picks_message",
     "notify_short_picks",
     "notify_multi_strategy",
     "notify_manual_picks",
+    "notify_top_picks",
 ]
