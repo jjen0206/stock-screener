@@ -159,6 +159,30 @@ def _bold(text: str, channel: str) -> str:
     return f"*{_md_escape(text, channel)}*"
 
 
+def _compute_pick_score(
+    sid: str,
+    ml_prob: float | None,
+    matched_strategies: list[str] | None,
+    analyst_target_mean: float | None = None,
+) -> tuple[float, float, int, str]:
+    """Pick 排序 key — 共用於 _select_top_picks 與 format_yesterday_recap。
+
+    Tuple 字典序 ascending → 排前面的 picks 數值越小:
+      - analyst_target_mean 有值 → -100(法人共識 picks 整體加分)
+      - ml_prob desc
+      - 命中策略多 desc
+      - sid asc(穩定 tiebreaker)
+
+    讓 recap 算出來的 top picks 順序跟昨天實際推播的順序一致(M4/U1 known issue)。
+    """
+    return (
+        -(100 if analyst_target_mean else 0),
+        -(ml_prob or 0.0),
+        -len(matched_strategies or []),
+        sid,
+    )
+
+
 def _select_top_picks(
     date: str,
     top_n: int = 5,
@@ -365,11 +389,13 @@ def _select_top_picks(
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
     # → ml_prob desc → 命中策略多 desc → sid asc
-    qualified.sort(key=lambda p: (
-        -(100 if p.get("analyst_target_mean") else 0),
-        -(p["ml_prob"] or 0.0),
-        -len(p["matched_strategies"]),
-        p["sid"],
+    # scoring 抽到 _compute_pick_score 共用,讓 format_yesterday_recap 算 top
+    # picks 的順序跟實際推播一致(M4/U1 known issue)。
+    qualified.sort(key=lambda p: _compute_pick_score(
+        sid=p["sid"],
+        ml_prob=p["ml_prob"],
+        matched_strategies=p["matched_strategies"],
+        analyst_target_mean=p.get("analyst_target_mean"),
     ))
     out = qualified[:top_n]
     for i, p in enumerate(out, start=1):
@@ -588,8 +614,24 @@ def format_yesterday_recap(
     if not qualified:
         return ""
 
-    # Sort 跟 _select_top_picks 對齊(略 analyst_target 加分以保持簡潔)
-    qualified.sort(key=lambda x: (-x[1], -len(x[2]), x[0]))
+    # Lookup analyst_target_mean(法人共識)讓 sort 跟 _select_top_picks 一致 —
+    # 避免 recap 反映的順序跟實際推播 picks 順序不同(M4/U1 known issue)。
+    # 表空 / 該批 sids 都沒共識 → analyst_target_mean=None,degenerate 成
+    # 純 ml_prob 排序(graceful fallback)。
+    try:
+        from src.analyst_targets import get_analyst_targets_for_sids
+        analyst_target_map = get_analyst_targets_for_sids(
+            [sid for sid, _, _ in qualified]
+        )
+    except Exception:  # noqa: BLE001
+        analyst_target_map = {}
+
+    qualified.sort(key=lambda x: _compute_pick_score(
+        sid=x[0],
+        ml_prob=x[1],
+        matched_strategies=x[2],
+        analyst_target_mean=(analyst_target_map.get(x[0]) or {}).get("target_mean"),
+    ))
     top_picks = qualified[:top_n]
 
     # Lookup return_d1 from outcomes(同 sid 跨多策略 → r1 一樣,取第一個 non-null)

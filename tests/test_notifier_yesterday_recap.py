@@ -230,3 +230,41 @@ def test_top_picks_message_recap_survives_no_picks(tmp_db):
     )
     assert "昨日 picks 複盤(2026-05-11)" in out
     assert "今日無符合" in out  # empty fallback 也出現
+
+
+# === Shared scoring helper(M4/U1 known issue:recap 排序對齊 _select_top_picks) ===
+
+def test_compute_pick_score_analyst_boost_breaks_ml_prob_tie():
+    """兩 picks 同 ml_prob、同命中策略數 → 有 analyst_target_mean 共識的排前面。"""
+    key_with_analyst = notifier._compute_pick_score(
+        sid="2330", ml_prob=0.70,
+        matched_strategies=["volume_kd", "ma_alignment"],
+        analyst_target_mean=620.0,
+    )
+    key_no_analyst = notifier._compute_pick_score(
+        sid="2454", ml_prob=0.70,
+        matched_strategies=["volume_kd", "ma_alignment"],
+        analyst_target_mean=None,
+    )
+    # tuple ascending → 有 analyst 的 key 較小 → sort 後排前
+    assert key_with_analyst < key_no_analyst
+
+
+def test_compute_pick_score_falls_back_to_ml_prob_when_no_analyst():
+    """都沒 analyst 欄位 → 只看 ml_prob desc(graceful fallback)。"""
+    key_hi = notifier._compute_pick_score(
+        sid="2330", ml_prob=0.80,
+        matched_strategies=["volume_kd"],
+        analyst_target_mean=None,
+    )
+    key_lo = notifier._compute_pick_score(
+        sid="2317", ml_prob=0.55,
+        matched_strategies=["volume_kd"],
+        analyst_target_mean=None,
+    )
+    # ml_prob 較高 → key 較小 → 排前
+    assert key_hi < key_lo
+    # 缺欄位 / ml_prob=None 也不爆
+    assert notifier._compute_pick_score(
+        sid="9999", ml_prob=None, matched_strategies=None,
+    ) == (0, 0.0, 0, "9999")
