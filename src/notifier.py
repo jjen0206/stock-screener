@@ -16,9 +16,12 @@ Telegram Bot 推播模組。
 from __future__ import annotations
 
 import logging
+import math
 import re
+import sqlite3
 import time
 from datetime import date as _date
+from typing import Optional
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -131,6 +134,77 @@ def _empty_pick_suffix() -> str:
     if eligible < 100:
         suffix += "\n⏳ 多數個股歷史累積中(短線策略需 14-60 天),請等待 1-2 週"
     return suffix
+
+
+def compute_entry_range(
+    sid: str,
+    close: float | None,
+    conn: sqlite3.Connection,
+) -> Optional[tuple[float, float]]:
+    """計算建議進場區間(U3 進場價區間建議,Phase 1 簡單版)。
+
+    公式:
+        下緣 = min(close - 0.5 × ATR_14, BB_lower_20)   # ATR-based 防低估
+        上緣 = close                                     # 當前價即進場價
+
+    取兩者較低值作為下緣 → 提供買方較大彈性(BB_lower 在跌勢中更深 / ATR 在
+    盤整時更代表合理波動)。
+
+    參數:
+        sid:股票代號(讀 daily_prices)
+        close:當前收盤價(可由 caller 傳入,容許未來 intraday 用)
+        conn:SQLite 連線(由 caller 控制生命週期,避免反覆開關)
+
+    回傳:
+        (low, high) 兩位小數;資料 < 20 天 / ATR/BB 算不出 / close 無效 → None
+        Caller 看到 None 應 graceful skip 不顯這行。
+    """
+    if close is None:
+        return None
+    try:
+        close_f = float(close)
+    except (TypeError, ValueError):
+        return None
+    if not (close_f > 0) or math.isnan(close_f):
+        return None
+
+    # 撈最近 30 天 OHLC(BB 需要 20、ATR 需要 15,30 留 buffer)
+    rows = conn.execute(
+        "SELECT date, high, low, close FROM daily_prices "
+        "WHERE stock_id = ? ORDER BY date DESC LIMIT 30",
+        (sid,),
+    ).fetchall()
+    if len(rows) < 20:
+        return None
+
+    # 反序成 ascending,indicators 需時序由舊到新
+    df = pd.DataFrame(
+        [
+            {"high": r["high"], "low": r["low"], "close": r["close"]}
+            for r in reversed(rows)
+        ]
+    )
+    if df[["high", "low", "close"]].isna().any().any():
+        return None
+
+    from src.indicators import atr, bollinger
+    try:
+        atr_series = atr(df, period=14)
+        bb_df = bollinger(df, period=20, num_std=2.0)
+    except (KeyError, ValueError):
+        return None
+
+    last_atr = atr_series.iloc[-1]
+    last_bb_lower = bb_df["lower"].iloc[-1]
+    if math.isnan(last_atr) or math.isnan(last_bb_lower):
+        return None
+
+    atr_floor = close_f - 0.5 * float(last_atr)
+    low = min(atr_floor, float(last_bb_lower))
+    high = close_f
+    if low <= 0 or low >= high:
+        return None
+    return (round(low, 2), round(high, 2))
 
 
 _SEPARATOR = "━" * 16
