@@ -1086,6 +1086,244 @@ def get_strong_follower_composite(
     return [dict(r) for r in rows]
 
 
+def get_strong_follower_premium(
+    min_inst_days: int = 3,
+    min_delta_w: int = 1,
+    top_n: int = 10,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """『高信心精選』三維交集:法人連買 ∩ 千張戶週增 ∩ ML 高信心。
+
+    給 _page_strong_follower Tab 4「✨ 高信心精選」用。
+    三維度比 get_strong_follower_composite 嚴一階:
+      1. 法人共識:三大法人(外/投/自)連續 ≥ min_inst_days 日全 net > 0
+      2. 大戶進場:最新一週 holders_delta_w >= min_delta_w
+      3. ML 高信心:daily_picks.ml_prob 過 STRATEGY_ML_THRESHOLDS per-strategy 門檻
+         若 DB 完全沒 ML cache → 自動 fallback 用前 2 維(reason_text 省略 ML)
+
+    composite_score(rank-normalize 後加權):
+      - 3D:法人 net rank * 0.4 + delta_w rank * 0.4 + ml_prob rank * 0.2
+      - 2D fallback:法人 net rank * 0.5 + delta_w rank * 0.5
+
+    回傳每 row 附 reason_text 推薦理由字串(UI st.caption 直接用)。
+
+    Args:
+        min_inst_days: 法人連買最小天數,預設 3(比 composite 嚴一階)
+        min_delta_w: 千張戶週增最小值,預設 1
+        top_n: 回傳上限,預設 10(精選頁設計 = top picks)
+
+    Returns:
+        list[dict] keys:sid / name / close / consensus_days / inst_net_total /
+                        holders_delta_w / holders_1000up_count / ml_prob /
+                        composite_score / last_date / reason_text
+        資料不足 / 表不存在 → []
+    """
+    from src.strategies import STRATEGY_ML_THRESHOLDS  # late import 避循環
+
+    if min_inst_days < 1 or top_n < 1:
+        return _empty_ranking_rows()
+    with get_conn(db_path) as conn:
+        # 1. 偵測 ML cache 是否有資料(table 層級判斷,非 per-sid)
+        try:
+            ml_count_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM daily_picks "
+                "WHERE ml_prob IS NOT NULL"
+            ).fetchone()
+            has_ml_cache = bool(
+                ml_count_row and (ml_count_row["c"] or 0) > 0
+            )
+        except sqlite3.OperationalError:
+            has_ml_cache = False
+
+        # 2. 共用 CTE base(法人共識 + 千張戶最新週)
+        base_cte = """
+            WITH ranked AS (
+                SELECT stock_id AS sid, date,
+                       foreign_buy_sell AS fb,
+                       trust_buy_sell AS tb,
+                       dealer_buy_sell AS dn,
+                       (COALESCE(foreign_buy_sell, 0)
+                        + COALESCE(trust_buy_sell, 0)
+                        + COALESCE(dealer_buy_sell, 0)) AS net_3i,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY stock_id ORDER BY date DESC
+                       ) AS rn
+                FROM institutional
+            ),
+            inst_qualified AS (
+                SELECT sid,
+                       MAX(date) AS last_date,
+                       SUM(net_3i) AS inst_net_total
+                FROM ranked
+                WHERE rn <= ?
+                GROUP BY sid
+                HAVING COUNT(*) = ?
+                   AND MIN(fb) > 0
+                   AND MIN(tb) > 0
+                   AND MIN(dn) > 0
+            ),
+            sh_latest AS (
+                SELECT sid, MAX(week_end) AS mw
+                FROM shareholder_concentration
+                GROUP BY sid
+            )
+        """
+
+        if has_ml_cache and STRATEGY_ML_THRESHOLDS:
+            # 3D 模式:加 ml_eligible CTE,per-strategy threshold filter
+            ml_clauses = " OR ".join(
+                "(strategy = ? AND ml_prob >= ?)"
+                for _ in STRATEGY_ML_THRESHOLDS
+            )
+            ml_params: list = []
+            for s, t in STRATEGY_ML_THRESHOLDS.items():
+                ml_params.extend([s, float(t)])
+
+            sql = f"""
+                {base_cte},
+                ml_eligible AS (
+                    SELECT sid, MAX(ml_prob) AS ml_prob_max
+                    FROM daily_picks
+                    WHERE ml_prob IS NOT NULL
+                      AND ({ml_clauses})
+                    GROUP BY sid
+                ),
+                joined AS (
+                    SELECT iq.sid AS sid,
+                           iq.inst_net_total AS inst_net_total,
+                           iq.last_date AS last_date,
+                           sc.holders_delta_w AS holders_delta_w,
+                           sc.holders_1000up_count AS holders_1000up_count,
+                           me.ml_prob_max AS ml_prob
+                    FROM inst_qualified iq
+                    INNER JOIN sh_latest sl ON sl.sid = iq.sid
+                    INNER JOIN shareholder_concentration sc
+                        ON sc.sid = iq.sid AND sc.week_end = sl.mw
+                    INNER JOIN ml_eligible me ON me.sid = iq.sid
+                    WHERE sc.holders_delta_w IS NOT NULL
+                      AND sc.holders_delta_w >= ?
+                )
+                SELECT j.sid AS sid,
+                       s.name AS name,
+                       (SELECT close FROM daily_prices
+                           WHERE stock_id = j.sid
+                           ORDER BY date DESC LIMIT 1) AS close,
+                       ? AS consensus_days,
+                       j.inst_net_total AS inst_net_total,
+                       j.holders_delta_w AS holders_delta_w,
+                       j.holders_1000up_count AS holders_1000up_count,
+                       j.ml_prob AS ml_prob,
+                       j.last_date AS last_date,
+                       (
+                           0.4 * CAST(
+                             (SELECT COUNT(*) FROM joined j2
+                                 WHERE j2.inst_net_total <= j.inst_net_total)
+                             AS REAL
+                           ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                           + 0.4 * CAST(
+                             (SELECT COUNT(*) FROM joined j3
+                                 WHERE j3.holders_delta_w <= j.holders_delta_w)
+                             AS REAL
+                           ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                           + 0.2 * CAST(
+                             (SELECT COUNT(*) FROM joined j4
+                                 WHERE j4.ml_prob <= j.ml_prob)
+                             AS REAL
+                           ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                       ) AS composite_score
+                FROM joined j
+                LEFT JOIN stocks s ON s.stock_id = j.sid
+                ORDER BY composite_score DESC, j.inst_net_total DESC,
+                         j.sid ASC
+                LIMIT ?
+            """
+            params: tuple = (
+                int(min_inst_days), int(min_inst_days),
+                *ml_params,
+                int(min_delta_w),
+                int(min_inst_days),
+                int(top_n),
+            )
+        else:
+            # 2D fallback:沒 ML cache,前 2 維交集 + 各權重 0.5
+            sql = f"""
+                {base_cte},
+                joined AS (
+                    SELECT iq.sid AS sid,
+                           iq.inst_net_total AS inst_net_total,
+                           iq.last_date AS last_date,
+                           sc.holders_delta_w AS holders_delta_w,
+                           sc.holders_1000up_count AS holders_1000up_count
+                    FROM inst_qualified iq
+                    INNER JOIN sh_latest sl ON sl.sid = iq.sid
+                    INNER JOIN shareholder_concentration sc
+                        ON sc.sid = iq.sid AND sc.week_end = sl.mw
+                    WHERE sc.holders_delta_w IS NOT NULL
+                      AND sc.holders_delta_w >= ?
+                )
+                SELECT j.sid AS sid,
+                       s.name AS name,
+                       (SELECT close FROM daily_prices
+                           WHERE stock_id = j.sid
+                           ORDER BY date DESC LIMIT 1) AS close,
+                       ? AS consensus_days,
+                       j.inst_net_total AS inst_net_total,
+                       j.holders_delta_w AS holders_delta_w,
+                       j.holders_1000up_count AS holders_1000up_count,
+                       NULL AS ml_prob,
+                       j.last_date AS last_date,
+                       (
+                           0.5 * CAST(
+                             (SELECT COUNT(*) FROM joined j2
+                                 WHERE j2.inst_net_total <= j.inst_net_total)
+                             AS REAL
+                           ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                           + 0.5 * CAST(
+                             (SELECT COUNT(*) FROM joined j3
+                                 WHERE j3.holders_delta_w <= j.holders_delta_w)
+                             AS REAL
+                           ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                       ) AS composite_score
+                FROM joined j
+                LEFT JOIN stocks s ON s.stock_id = j.sid
+                ORDER BY composite_score DESC, j.inst_net_total DESC,
+                         j.sid ASC
+                LIMIT ?
+            """
+            params = (
+                int(min_inst_days), int(min_inst_days),
+                int(min_delta_w),
+                int(min_inst_days),
+                int(top_n),
+            )
+
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+
+    # 3. Build reason_text(每 row 推薦理由字串)
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        cd = d.get("consensus_days") or 0
+        dw = d.get("holders_delta_w") or 0
+        ml = d.get("ml_prob")
+        if ml is not None:
+            d["reason_text"] = (
+                f"🏛️ 三大法人連買 {cd} 天 | "
+                f"🐋 千張戶週增 +{dw} | "
+                f"🎯 ML {ml:.2f}"
+            )
+        else:
+            d["reason_text"] = (
+                f"🏛️ 三大法人連買 {cd} 天 | "
+                f"🐋 千張戶週增 +{dw}"
+            )
+        out.append(d)
+    return out
+
+
 def upsert_daily_metrics(
     rows: Iterable[dict],
     db_path: str | Path | None = None,
@@ -2463,6 +2701,7 @@ __all__ = [
     "get_consecutive_shareholder_increases",
     "get_top_inst_consensus",
     "get_strong_follower_composite",
+    "get_strong_follower_premium",
     "dump_shareholder_concentration_csv",
     "add_to_watchlist",
     "bulk_add_to_watchlist",
