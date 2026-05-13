@@ -28,7 +28,7 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 PAGE_KEYS = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "📊 大盤",
+    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "📊 強者跟蹤", "📊 大盤",
     "💼 交易紀錄", "⚙️ 系統", "⚙️ 設定",
 ]
 
