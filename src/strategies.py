@@ -123,10 +123,13 @@ DEFAULT_REV_ACCEL_PARAMS: dict[str, Any] = {
 }
 
 # 策略 17:千張戶進場(big_holder_inflow)
-# Phase 1(目前資料只有 1 週):holders_delta_w > 0 + 落在 P80 以上
-# Phase 2(資料 ≥ 4 週後 TODO,不做):突破 4 週滾動平均 + 1σ
+# Phase 2(滾動 4 週 mean + 1σ 突破):對每檔 sid 撈最近 5 週 holders_delta_w,
+#   取前 4 週算 mean μ + std σ,本週 > μ + 1σ 命中。
+# 歷史不足 fallback(< 4 週前期歷史)→ Phase 1 邏輯(Top 20% absolute P80)。
 DEFAULT_BIG_HOLDER_PARAMS: dict[str, Any] = {
-    "percentile": 0.80,            # P80(本週 holders_delta_w Top 20%)
+    "percentile": 0.80,            # Phase 1 fallback:P80(holders_delta_w Top 20%)
+    "rolling_weeks": 4,            # Phase 2:前 4 週滾動視窗算 mean / std
+    "sigma_threshold": 1.0,        # Phase 2:命中門檻 = mean + sigma_threshold × std
 }
 
 
@@ -1516,22 +1519,34 @@ def screen_big_holder_inflow(
     params: dict | None = None,
     stock_ids: list[str] | None = None,
 ) -> pd.DataFrame:
-    """策略 17:千張戶(持股 ≥ 1000 張)本週人數增加且落在 Top 20%(P80 以上)。
+    """策略 17:千張戶(持股 ≥ 1000 張)本週進場 — Phase 2 滾動 mean+sigma 突破。
 
     意義:大戶進場 — 千張戶人數週增是「籌碼集中往大戶手裡跑」的訊號,
     通常領先股價 1-2 週(TDCC 週五公佈,週六凌晨入庫)。
 
-    Phase 1(目前資料只有 1 週):取最新一週 holders_delta_w > 0 的檔,
-    用 P80 切 Top 20%。
-    TODO Phase 2(資料 ≥ 4 週後升級):用 holders_delta_w 突破歷史 4 週滾動
-    平均 + 1σ 作為更嚴格的進場訊號。
+    Phase 2 邏輯(對每檔 sid):
+      1. 撈最近 rolling_weeks+1 週(預設 5 週)的 holders_delta_w
+      2. 取前 rolling_weeks 週算 mean μ + std σ(sample std,ddof=1)
+      3. 命中:本週 holders_delta_w > μ + sigma_threshold × σ
+        (顯著高於近期常態 → 突破訊號)
+
+    Fallback(歷史前期資料 < rolling_weeks):
+      回 Phase 1 邏輯 — 在這批不足歷史的 sid 內取本週 delta_w > 0,P80(percentile)
+      切 Top 20%。讓資料少的 universe 仍可運作。
 
     NULL / 缺資料處理:
-    - 首週 holders_delta_w 全 NULL → return [](對齊 ML predict graceful skip)
+    - shareholder_concentration 完全沒資料 → return []
+    - 個別 sid 任一前期週 delta_w NULL → 視為歷史不足 → 進 fallback 候選
+    - 個別 sid 本週 delta_w NULL → 不算命中
     - 沒 shareholder 資料的 sid → 不命中(不算空訊號)
 
-    參數 date 在此策略單純是傳給 _enrich_with_targets 的 ATR 計算基準日。
-    資料來源:shareholder_concentration 表最新一週(以 MAX(week_end) 為準)。
+    參數:
+      percentile (float): Phase 1 fallback 用的 quantile,預設 0.80
+      rolling_weeks (int): Phase 2 滾動視窗(前期週數),預設 4
+      sigma_threshold (float): Phase 2 σ 倍數,預設 1.0
+
+    date 在此策略單純是傳給 _enrich_with_targets 的 ATR 計算基準日。
+    資料來源:shareholder_concentration 表最近 N 週(以 week_end DESC 取)。
     """
     p = {**DEFAULT_BIG_HOLDER_PARAMS, **(params or {})}
     sids = stock_ids or [s for s, _ in TW_TOP_50]
@@ -1543,8 +1558,12 @@ def screen_big_holder_inflow(
         return pd.DataFrame(columns=cols)
 
     percentile = float(p["percentile"])
+    rolling_weeks = int(p["rolling_weeks"])
+    sigma_threshold = float(p["sigma_threshold"])
+    needed_weeks = rolling_weeks + 1  # 前期 N 週 + 本週
 
     import sqlite3
+    from collections import defaultdict
 
     with db.get_conn() as conn:
         # name_map
@@ -1561,63 +1580,118 @@ def screen_big_holder_inflow(
             ).fetchall()
         name_map = {r["stock_id"]: r["name"] for r in meta}
 
-        # 撈最新一週 week_end + 該週所有 sid 的 holders_delta_w / holders_pct
+        # 撈最近 needed_weeks 個 distinct week_end(DESC)— 全 universe 的時間軸基準
         try:
-            latest_week_row = conn.execute(
-                "SELECT MAX(week_end) AS w FROM shareholder_concentration"
-            ).fetchone()
+            week_rows = conn.execute(
+                "SELECT DISTINCT week_end FROM shareholder_concentration "
+                "ORDER BY week_end DESC LIMIT ?",
+                (needed_weeks,),
+            ).fetchall()
         except sqlite3.OperationalError:
             return pd.DataFrame(columns=cols)
-        if latest_week_row is None or latest_week_row["w"] is None:
+        if not week_rows:
             return pd.DataFrame(columns=cols)
-        week_end = latest_week_row["w"]
 
+        last_weeks = [r["week_end"] for r in week_rows]  # DESC,index 0 為 latest
+        latest_week = last_weeks[0]
+
+        # 撈這幾週內所有目標 sid 的 delta_w / pct
+        wk_placeholders = ",".join(["?"] * len(last_weeks))
         if len(sids) <= 500:
-            placeholders = ",".join(["?"] * len(sids))
+            sid_placeholders = ",".join(["?"] * len(sids))
             sc_rows = conn.execute(
-                f"SELECT sid, holders_delta_w, holders_pct "
+                f"SELECT sid, week_end, holders_delta_w, holders_pct "
                 f"FROM shareholder_concentration "
-                f"WHERE week_end=? AND sid IN ({placeholders})",
-                (week_end, *sids),
+                f"WHERE week_end IN ({wk_placeholders}) "
+                f"  AND sid IN ({sid_placeholders})",
+                (*last_weeks, *sids),
             ).fetchall()
         else:
             sc_rows = conn.execute(
-                "SELECT sid, holders_delta_w, holders_pct "
-                "FROM shareholder_concentration WHERE week_end=?",
-                (week_end,),
+                f"SELECT sid, week_end, holders_delta_w, holders_pct "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end IN ({wk_placeholders})",
+                tuple(last_weeks),
             ).fetchall()
 
         prices_by_sid = bulk_load_prices(conn, sids, date, 5)
 
-    # 過濾出 delta_w > 0 的 candidates(同時把 None 排掉,首週全 NULL → [])
-    candidates: list[dict] = []
+    # 依 sid 分組 → 依 week_end ASC 排序
+    per_sid: dict[str, list[dict]] = defaultdict(list)
     for r in sc_rows:
-        delta = r["holders_delta_w"]
-        if delta is None or delta <= 0:
-            continue
-        candidates.append({
-            "sid": r["sid"],
-            "delta": int(delta),
-            "pct": float(r["holders_pct"]) if r["holders_pct"] is not None else None,
+        per_sid[r["sid"]].append({
+            "week_end": r["week_end"],
+            "delta": r["holders_delta_w"],
+            "pct": r["holders_pct"],
         })
+    for sid in per_sid:
+        per_sid[sid].sort(key=lambda x: x["week_end"])
 
-    if not candidates:
-        # 首週 delta 全 NULL 或全 ≤ 0 → graceful empty
-        return pd.DataFrame(columns=cols)
+    # 分流:Phase 2 命中 / Phase 1 fallback 候選
+    sids_set = set(sids)
+    phase2_hits: list[dict] = []
+    fallback_candidates: list[dict] = []
 
-    # P80 threshold:取 candidates 的 delta 第 (percentile) 分位數
-    # 用 pandas 的 quantile 為單一真實來源,避免自寫 sort 邊界錯
-    deltas = pd.Series([c["delta"] for c in candidates])
-    threshold = float(deltas.quantile(percentile))
+    for sid in sids_set:
+        rows_for_sid = per_sid.get(sid, [])
+        if not rows_for_sid:
+            continue  # 完全沒資料 → skip
 
-    # 只保留 delta >= threshold 的(Top 20%);threshold 本身也算 hit(>=)
+        latest_row = next(
+            (r for r in rows_for_sid if r["week_end"] == latest_week),
+            None,
+        )
+        if latest_row is None or latest_row["delta"] is None:
+            continue  # 本週 NULL / 無資料 → 不算命中
+        latest_delta = int(latest_row["delta"])
+        latest_pct = (
+            float(latest_row["pct"]) if latest_row["pct"] is not None else None
+        )
+
+        # 取前期(latest 以外)非 NULL 的 delta
+        prior_deltas = [
+            r["delta"] for r in rows_for_sid
+            if r["week_end"] != latest_week and r["delta"] is not None
+        ]
+
+        if len(prior_deltas) >= rolling_weeks:
+            # Phase 2:取最近 rolling_weeks 個(ASC 排序後尾部)算 mean / sigma
+            window = prior_deltas[-rolling_weeks:]
+            s = pd.Series(window, dtype=float)
+            mu = float(s.mean())
+            sigma = float(s.std(ddof=1))
+            if pd.isna(sigma):  # 理論上 n>=4 不會發生,保險
+                sigma = 0.0
+            threshold = mu + sigma_threshold * sigma
+            if latest_delta > threshold:
+                phase2_hits.append({
+                    "sid": sid,
+                    "delta": latest_delta,
+                    "pct": latest_pct,
+                })
+        else:
+            # 歷史不足 → 進 Phase 1 fallback(留正向 delta 即可,P80 之後算)
+            if latest_delta > 0:
+                fallback_candidates.append({
+                    "sid": sid,
+                    "delta": latest_delta,
+                    "pct": latest_pct,
+                })
+
+    # Phase 1 fallback:在 fallback_candidates 內取 P80 切 Top 20%
+    fallback_hits: list[dict] = []
+    if fallback_candidates:
+        deltas_series = pd.Series([c["delta"] for c in fallback_candidates])
+        fb_threshold = float(deltas_series.quantile(percentile))
+        for c in fallback_candidates:
+            if c["delta"] >= fb_threshold:
+                fallback_hits.append(c)
+
+    # 合併命中 → enrich close + targets
     rows: list[dict] = []
-    for c in candidates:
-        if c["delta"] < threshold:
-            continue
-        sid = c["sid"]
-        if sid not in set(sids):
-            # candidates 已經是 IN (sids) 過濾過,但 universe 走 ELSE 分支時保險
+    for hit in (*phase2_hits, *fallback_hits):
+        sid = hit["sid"]
+        if sid not in sids_set:
             continue
         price_df = prices_by_sid.get(sid)
         close = 0.0
@@ -1627,9 +1701,9 @@ def screen_big_holder_inflow(
             "stock_id": sid,
             "name": name_map.get(sid, sid),
             "close": close,
-            "holders_delta_w": c["delta"],
-            "holders_pct": c["pct"],
-            "week_end": week_end,
+            "holders_delta_w": hit["delta"],
+            "holders_pct": hit["pct"],
+            "week_end": latest_week,
             "matched_at": date,
         })
 
