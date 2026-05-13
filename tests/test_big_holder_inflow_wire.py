@@ -142,3 +142,31 @@ def test_app_strategy_category_source_contains_chip_flow_line():
     assert pat.search(block), (
         "app._STRATEGY_CATEGORY block 缺 \"big_holder_inflow\": \"籌碼\""
     )
+
+
+# ============================================================================
+# 6. Phase 2 標記 — 確認 source 已升級(mean / std / sigma 字串 + 無 TODO)
+# ============================================================================
+
+def test_screen_big_holder_inflow_source_contains_phase2_markers():
+    """screen_big_holder_inflow 的 source 必須含 Phase 2 三件套字串:
+    mean、std、sigma — 避免被 monkeypatch / 回退到 Phase 1 而沒人發現。"""
+    src = inspect.getsource(strat.screen_big_holder_inflow)
+    for marker in ("mean", "std", "sigma"):
+        assert marker in src, (
+            f"screen_big_holder_inflow source 缺 Phase 2 marker: {marker!r}"
+        )
+
+
+def test_screen_big_holder_inflow_source_has_no_phase2_todo():
+    """source 內不該再留『Phase 2 TODO』或『不做』這類字樣 — 升級後該清乾淨。"""
+    src = inspect.getsource(strat.screen_big_holder_inflow)
+    forbidden_patterns = [
+        r"TODO\s+Phase\s+2",
+        r"Phase\s+2.*TODO",
+        r"Phase\s+2.*不做",
+    ]
+    for pat in forbidden_patterns:
+        assert not re.search(pat, src, re.IGNORECASE), (
+            f"screen_big_holder_inflow source 仍含 Phase 2 TODO 註解(pattern: {pat})"
+        )
