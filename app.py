@@ -106,7 +106,8 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 大盤",
+    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
+    "📊 大盤",
     "💼 交易紀錄", "🧪 實測追蹤", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -907,6 +908,8 @@ def main() -> None:
         _page_market_heat()
     elif page == "👥 大戶入場":
         _page_big_buyer()
+    elif page == "📊 強者跟蹤":
+        _page_strong_follower()
     elif page == "📊 大盤":
         _page_market_sentiment()
     elif page == "💼 交易紀錄":
@@ -4211,6 +4214,249 @@ def _page_big_buyer() -> None:
                     "🏰 千張戶占比最高 Top 30。點任一行 → 展開完整卡片"
                 ),
                 detail_button_prefix="bb_top_detail",
+            )
+
+
+# === 📊 強者跟蹤頁(報告 docs/dage-feature-scope.md 方案 D)===
+
+def _page_strong_follower() -> None:
+    """強者跟蹤三 tab:🏛️ 法人共識榜 / 🐋 千張大戶進場榜 / 🎯 綜合排行。
+
+    報告 docs/dage-feature-scope.md 方案 D:用既有訊號(三大法人連買 +
+    千張大戶人數變化)組合,**不**抓新資料源 / **不**做分點。
+
+    法律警示(報告第 7.2 節):中性語言 / 不點名分點 / 常駐 disclaimer。
+
+    Mobile-first:純 st.dataframe + _render_table_with_inline_detail 渲染,
+    不用 st.columns 分區塊(同 _page_big_buyer pattern)。
+
+    各 tab 資料源:
+    - 法人共識榜 → db.get_top_inst_consensus(min_days=2)
+    - 千張大戶進場榜 → db.get_top_shareholder_movers(reuse 大戶入場頁)
+    - 綜合排行 → db.get_strong_follower_composite(交集 + rank-normalize)
+    """
+    st.header("📊 強者跟蹤")
+    st.caption(
+        "🔍 籌碼異動綜合視角:三大法人連買 + 千張大戶進場 + 兩者交集。"
+        "資料源 = 既有 institutional / shareholder_concentration,無新爬蟲。"
+    )
+    # 法律 disclaimer(報告 7.2 強烈建議,常駐顯示)
+    st.warning(
+        "⚠️ **資訊僅供個人投資決策參考,非投資建議。**"
+        "本工具不對使用結果負任何責任,投資請自行評估。"
+    )
+
+    db.init_db()  # 雲端容器重啟 / 第一次 boot 時保險(同 _page_big_buyer)
+
+    tab_inst, tab_holders, tab_combined = st.tabs(
+        ["🏛️ 法人共識榜", "🐋 千張大戶進場榜", "🎯 綜合排行"],
+    )
+
+    # 共用 column_config(對齊 _page_big_buyer 的 7 欄但欄位語意調整):
+    #   編號 / 名稱 / 收盤 / 法人 net / 千張週變 / ML 分數 / 漲幅(隱藏)
+    def _to_df_inst(rows: list[dict]) -> "pd.DataFrame":
+        """法人共識榜 rows → UI DataFrame。"""
+        if not rows:
+            return pd.DataFrame(columns=[
+                "編號", "名稱", "目前股價", "法人 net (張)",
+                "共識天數", "ML 分數", "漲幅",
+            ])
+        out: list[dict] = []
+        for r in rows:
+            net = r.get("inst_net_total")
+            cd = r.get("consensus_days")
+            ml = r.get("ml_prob")
+            out.append({
+                "編號": r["sid"],
+                "名稱": r.get("name") or "—",
+                "目前股價": r.get("close"),
+                # institutional 單位 = 張(已是)。報告 / TWSE 慣例:正 = 買超
+                "法人 net (張)": (
+                    f"+{net:,}" if net is not None and net > 0
+                    else (str(net) if net is not None else "—")
+                ),
+                "共識天數": (f"{cd} 日" if cd is not None else "—"),
+                "ML 分數": (
+                    f"{ml:.2f}" if ml is not None else "N/A"
+                ),
+                "漲幅": None,
+            })
+        return pd.DataFrame(out)
+
+    def _to_df_holders(rows: list[dict]) -> "pd.DataFrame":
+        """千張大戶進場榜 rows → UI DataFrame(對齊 _page_big_buyer 的 _to_df)。"""
+        if not rows:
+            return pd.DataFrame(columns=[
+                "編號", "名稱", "目前股價", "千張戶", "週變", "占比",
+                "ML 分數", "漲幅",
+            ])
+        out: list[dict] = []
+        for r in rows:
+            dw = r.get("holders_delta_w")
+            pct = r.get("holders_pct")
+            ml = r.get("ml_prob")
+            out.append({
+                "編號": r["sid"],
+                "名稱": r.get("name") or "—",
+                "目前股價": r.get("close"),
+                "千張戶": (
+                    int(r["holders_1000up_count"])
+                    if r.get("holders_1000up_count") is not None else None
+                ),
+                "週變": (f"{dw:+d}" if dw is not None else "—"),
+                "占比": (f"{pct * 100:.2f}%" if pct is not None else "—"),
+                "ML 分數": (f"{ml:.2f}" if ml is not None else "N/A"),
+                "漲幅": None,
+            })
+        return pd.DataFrame(out)
+
+    def _to_df_combined(rows: list[dict]) -> "pd.DataFrame":
+        """綜合排行 rows → UI DataFrame。"""
+        if not rows:
+            return pd.DataFrame(columns=[
+                "編號", "名稱", "目前股價", "綜合分數", "法人 net (張)",
+                "千張週變", "ML 分數", "漲幅",
+            ])
+        out: list[dict] = []
+        for r in rows:
+            score = r.get("composite_score")
+            net = r.get("inst_net_total")
+            dw = r.get("holders_delta_w")
+            ml = r.get("ml_prob")
+            out.append({
+                "編號": r["sid"],
+                "名稱": r.get("name") or "—",
+                "目前股價": r.get("close"),
+                "綜合分數": (
+                    f"{score:.2f}" if score is not None else "—"
+                ),
+                "法人 net (張)": (
+                    f"+{net:,}" if net is not None and net > 0
+                    else (str(net) if net is not None else "—")
+                ),
+                "千張週變": (f"{dw:+d}" if dw is not None else "—"),
+                "ML 分數": (f"{ml:.2f}" if ml is not None else "N/A"),
+                "漲幅": None,
+            })
+        return pd.DataFrame(out)
+
+    with tab_inst:
+        rows = db.get_top_inst_consensus(min_days=2, limit=30)
+        df = _to_df_inst(rows)
+        if df.empty:
+            st.caption(
+                "📭 暫無「三大法人連 2 日同時買超」個股"
+                "(institutional 資料不足或市場無共識)"
+            )
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="sf_inst",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "收盤", format="%.2f", width="small",
+                    ),
+                    "法人 net (張)": st.column_config.TextColumn(
+                        "法人 net", width="small",
+                    ),
+                    "共識天數": st.column_config.TextColumn(
+                        "連買", width="small",
+                    ),
+                    "ML 分數": st.column_config.TextColumn(
+                        "ML 分數", width="small",
+                    ),
+                    "漲幅": None,
+                },
+                back_label="← 返回法人共識榜",
+                table_caption=(
+                    "🏛️ 三大法人(外資 / 投信 / 自營商)連 2 日同時買超 Top 30,"
+                    "按期間 net 加總 desc。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="sf_inst_detail",
+            )
+
+    with tab_holders:
+        rows = db.get_top_shareholder_movers(limit=30)
+        df = _to_df_holders(rows)
+        if df.empty:
+            st.caption(
+                "📭 暫無千張大戶進場個股"
+                "(shareholder_concentration 資料尚未到位)"
+            )
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="sf_holders",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "收盤", format="%.2f", width="small",
+                    ),
+                    "千張戶": st.column_config.NumberColumn(
+                        "千張戶", format="%d", width="small",
+                    ),
+                    "週變": st.column_config.TextColumn("週變", width="small"),
+                    "占比": st.column_config.TextColumn("占比", width="small"),
+                    "ML 分數": st.column_config.TextColumn(
+                        "ML 分數", width="small",
+                    ),
+                    "漲幅": None,
+                },
+                back_label="← 返回大戶進場榜",
+                table_caption=(
+                    "🐋 本週千張戶人數增加最多 Top 30(本土主力進場跡象)。"
+                    "點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="sf_holders_detail",
+            )
+
+    with tab_combined:
+        st.caption(
+            "🔮 雙重訊號交集:**法人連 2 日共識買超**且**最新一週千張大戶人數增加**。"
+            "綜合分數 = 兩個訊號各自 rank 歸一化後加總,範圍 (0, 2]。"
+        )
+        st.caption(
+            "📌 註:融資融券熱度(per-stock)資料源規劃中,目前綜合僅含法人 + 千張兩條訊號。"
+        )
+        rows = db.get_strong_follower_composite(min_inst_days=2, limit=30)
+        df = _to_df_combined(rows)
+        if df.empty:
+            st.caption(
+                "📭 暫無「法人共識 ∩ 千張大戶進場」交集個股"
+                "(兩個訊號獨立資料中,等下一波籌碼共識)"
+            )
+        else:
+            _render_table_with_inline_detail(
+                df,
+                state_prefix="sf_combined",
+                column_config={
+                    "編號": st.column_config.TextColumn("編號", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "目前股價": st.column_config.NumberColumn(
+                        "收盤", format="%.2f", width="small",
+                    ),
+                    "綜合分數": st.column_config.TextColumn(
+                        "分數", width="small",
+                    ),
+                    "法人 net (張)": st.column_config.TextColumn(
+                        "法人 net", width="small",
+                    ),
+                    "千張週變": st.column_config.TextColumn(
+                        "千張", width="small",
+                    ),
+                    "ML 分數": st.column_config.TextColumn(
+                        "ML 分數", width="small",
+                    ),
+                    "漲幅": None,
+                },
+                back_label="← 返回綜合排行",
+                table_caption=(
+                    "🎯 兩個籌碼訊號交集,綜合分數 desc。點任一行 → 展開完整卡片"
+                ),
+                detail_button_prefix="sf_combined_detail",
             )
 
 
