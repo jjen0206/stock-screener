@@ -346,6 +346,13 @@ def render_pick_card(
             holders_delta_w=row.get("holders_delta_w"),
         )
 
+        # U3 進場區間建議(ATR / BB based)— 只在 caller 注入 entry_low/high 時顯
+        # Mobile-first 單行 st.markdown,無 st.columns
+        _render_entry_range_inline(
+            entry_low=row.get("entry_low"),
+            entry_high=row.get("entry_high"),
+        )
+
         # Row 3:button 列(加入關注 / 展開詳細分析)+ 右側 metadata
         # st.columns 把 row 3 分成 3 區塊:button | button | metadata
         if show_add_button:
@@ -494,6 +501,39 @@ def _render_shareholder_inline(
     st.markdown(
         f"<span style='color:{color};font-size:14px;'>"
         f"👥 <strong>千張戶 {count_int}{delta_str}</strong>"
+        f"</span>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_entry_range_inline(
+    entry_low: float | None,
+    entry_high: float | None,
+) -> None:
+    """U3 進場區間建議(ATR / BB based)— 卡片內顯眼單行,有資料才渲。
+
+    格式(緊湊,主公手機 iPhone 用):
+      💰 進場區間 1232.50 ~ 1245.00
+
+    沒資料(歷史 < 20 天 / ATR/BB 算不出)→ caller 不傳 entry_low/high
+    → 整行不渲(graceful skip)。
+
+    Mobile-first:單行 st.markdown,不用 st.columns / st.metric。
+    """
+    if entry_low is None or entry_high is None:
+        return
+    try:
+        low_f = float(entry_low)
+        high_f = float(entry_high)
+    except (TypeError, ValueError):
+        return
+    if low_f <= 0 or high_f <= 0:
+        return
+
+    import streamlit as st
+    st.markdown(
+        f"<span style='color:#1f77b4;font-size:14px;'>"
+        f"💰 <strong>進場區間 {low_f:.2f} ~ {high_f:.2f}</strong>"
         f"</span>",
         unsafe_allow_html=True,
     )

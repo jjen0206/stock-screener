@@ -2365,6 +2365,45 @@ def test_pick_card_price_uses_tw_color_when_up_or_down(isolated_db):
     )
 
 
+def test_pick_card_renders_entry_range_when_present(isolated_db):
+    """U3:caller 注入 entry_low / entry_high → 卡片顯「💰 進場區間 X ~ Y」。"""
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {
+                "stock_id": "2330", "name": "台積電", "close": 1245.0,
+                "entry_low": 1232.50, "entry_high": 1245.00,
+            },
+            show_add_button=False, button_key_prefix="entry",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "💰" in md_text and "進場區間" in md_text
+    assert "1232.50" in md_text
+    assert "1245.00" in md_text
+
+
+def test_pick_card_skips_entry_range_when_missing(isolated_db):
+    """U3:沒注入 entry_low / entry_high → 整行 graceful skip。"""
+    def _harness():
+        from src.ui_cards import render_pick_card
+        render_pick_card(
+            {"stock_id": "2330", "name": "台積電", "close": 1245.0},
+            show_add_button=False, button_key_prefix="noentry",
+        )
+
+    at = AppTest.from_function(_harness, default_timeout=10)
+    at.run()
+    assert not at.exception, _exc_msgs(at)
+
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "進場區間" not in md_text
+
+
 def test_pick_card_remove_watchlist_button_when_already_added(isolated_db):
     """已關注的個股 → button label 變「移除關注」(toggle 行為)。"""
     from src import database as db

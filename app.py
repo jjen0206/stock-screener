@@ -3753,6 +3753,16 @@ def _render_table_with_inline_detail(
                 "analyst_target_mean": at_row.get("target_mean"),
                 "analyst_num": at_row.get("num_analysts"),
             })
+        # U3 進場區間(ATR/BB based)— 算不出(< 20 天歷史)→ 不注入,卡片 graceful skip
+        if close is not None:
+            try:
+                from src.notifier import compute_entry_range
+                with db.get_conn() as _conn:
+                    rng = compute_entry_range(sid, close, _conn)
+                if rng is not None:
+                    card["entry_low"], card["entry_high"] = rng
+            except Exception:  # noqa: BLE001
+                pass  # 任何錯誤 silent skip,不擋整張卡片
         cards_for_inject = _inject_intraday_quotes([card], [sid])
         # 強制展開 lazy detail section
         flag_key = f"card_exp_{detail_button_prefix}_{sid}"
