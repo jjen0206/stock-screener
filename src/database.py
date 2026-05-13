@@ -882,6 +882,210 @@ def get_consecutive_shareholder_increases(
     return [dict(r) for r in rows]
 
 
+# ====================================================================
+# 「強者跟蹤」綜合頁 helpers — 給 _page_strong_follower 用
+# ====================================================================
+#
+# 兩個 helper 走 institutional + shareholder_concentration 既有資料,組合成
+# 「籌碼共識」訊號。沒新 fetcher,純 SQL 組合。
+#
+# get_top_inst_consensus:三大法人(外/投/自)連續 ≥ N 個交易日同時 net > 0
+# get_strong_follower_composite:同時滿足法人連買 + 千張大戶週增加(交集)
+#
+# 設計考量(同 千張大戶 helpers,schema 對齊以便 UI 共用 _render_table):
+# - JOIN stocks 帶名稱(沒對應 → name=None,UI 顯「—」)
+# - 子查詢拿最新 close / ml_prob(LEFT JOIN 風險:有 sid 沒 close 仍要出列)
+# - 排序 stable:第一鍵指標 desc,第二鍵 sid asc
+# - 沒資料 / 表還沒建 → 回空 list,不 raise
+# ====================================================================
+
+
+def get_top_inst_consensus(
+    min_days: int = 2,
+    limit: int = 30,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """跨 sid 排行:三大法人(外資 / 投信 / 自營商)同時 net > 0 連續 ≥ N 個交易日。
+
+    從 institutional 表撈每 sid 最新 min_days 日,filter 三家 net_buy_sell
+    都 > 0 的天數 == min_days(完全共識)。回 list[dict],schema 對齊
+    _page_strong_follower UI 用:
+      sid / name / close / consensus_days / inst_net_total / last_date / ml_prob
+
+    inst_net_total = 過去 min_days 日三家 net 加總,作為排序鍵(大者優先)。
+
+    Args:
+        min_days: 連續共識天數,預設 2(過嚴會空,過鬆失去訊號意義)
+        limit: 回傳上限
+
+    Returns:
+        list[dict],沒對應資料的欄位 NULL。institutional 表不存在 → []
+    """
+    if min_days < 1:
+        return _empty_ranking_rows()
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT stock_id AS sid, date,
+                           foreign_buy_sell AS fb,
+                           trust_buy_sell AS tb,
+                           dealer_buy_sell AS dn,
+                           (COALESCE(foreign_buy_sell, 0)
+                            + COALESCE(trust_buy_sell, 0)
+                            + COALESCE(dealer_buy_sell, 0)) AS net_3i,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY stock_id ORDER BY date DESC
+                           ) AS rn
+                    FROM institutional
+                ),
+                qualified AS (
+                    SELECT sid,
+                           MAX(date) AS last_date,
+                           SUM(net_3i) AS inst_net_total
+                    FROM ranked
+                    WHERE rn <= ?
+                    GROUP BY sid
+                    HAVING COUNT(*) = ?
+                       AND MIN(fb) > 0
+                       AND MIN(tb) > 0
+                       AND MIN(dn) > 0
+                )
+                SELECT q.sid AS sid,
+                       s.name AS name,
+                       (SELECT close FROM daily_prices
+                           WHERE stock_id = q.sid
+                           ORDER BY date DESC LIMIT 1) AS close,
+                       ? AS consensus_days,
+                       q.inst_net_total AS inst_net_total,
+                       q.last_date AS last_date,
+                       (SELECT MAX(ml_prob) FROM daily_picks
+                           WHERE sid = q.sid AND ml_prob IS NOT NULL) AS ml_prob
+                FROM qualified q
+                LEFT JOIN stocks s ON s.stock_id = q.sid
+                ORDER BY q.inst_net_total DESC, q.sid ASC
+                LIMIT ?
+                """,
+                (int(min_days), int(min_days), int(min_days), int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+    return [dict(r) for r in rows]
+
+
+def get_strong_follower_composite(
+    min_inst_days: int = 2,
+    limit: int = 30,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """『強者跟蹤』綜合排行:同時命中「三大法人連買 ≥ N 日」+「最新一週千張戶增加」。
+
+    交集邏輯:法人共識(get_top_inst_consensus 同條件)的 sid ∩ shareholder_
+    concentration 最新一週 holders_delta_w > 0 的 sid。
+
+    分數(composite_score):為了讓兩個量級不同的訊號可比,各自做 rank
+    normalization 後加總:
+      score = 法人 net_total 在交集內的 rank(0..1) + 千張戶 delta_w 的 rank(0..1)
+    在 SQL 裡用 DENSE_RANK + COUNT() 計算,降低 Python 後處理。
+
+    Args:
+        min_inst_days: 法人共識門檻,預設 2
+        limit: 回傳上限
+
+    Returns:
+        list[dict] keys: sid / name / close / consensus_days / inst_net_total /
+                        holders_delta_w / composite_score / ml_prob
+        資料不足 → []
+    """
+    if min_inst_days < 1:
+        return _empty_ranking_rows()
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT stock_id AS sid, date,
+                           foreign_buy_sell AS fb,
+                           trust_buy_sell AS tb,
+                           dealer_buy_sell AS dn,
+                           (COALESCE(foreign_buy_sell, 0)
+                            + COALESCE(trust_buy_sell, 0)
+                            + COALESCE(dealer_buy_sell, 0)) AS net_3i,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY stock_id ORDER BY date DESC
+                           ) AS rn
+                    FROM institutional
+                ),
+                inst_qualified AS (
+                    SELECT sid,
+                           MAX(date) AS last_date,
+                           SUM(net_3i) AS inst_net_total
+                    FROM ranked
+                    WHERE rn <= ?
+                    GROUP BY sid
+                    HAVING COUNT(*) = ?
+                       AND MIN(fb) > 0
+                       AND MIN(tb) > 0
+                       AND MIN(dn) > 0
+                ),
+                sh_latest AS (
+                    SELECT sid, MAX(week_end) AS mw
+                    FROM shareholder_concentration
+                    GROUP BY sid
+                ),
+                joined AS (
+                    SELECT iq.sid AS sid,
+                           iq.inst_net_total AS inst_net_total,
+                           iq.last_date AS last_date,
+                           sc.holders_delta_w AS holders_delta_w
+                    FROM inst_qualified iq
+                    INNER JOIN sh_latest sl ON sl.sid = iq.sid
+                    INNER JOIN shareholder_concentration sc
+                        ON sc.sid = iq.sid AND sc.week_end = sl.mw
+                    WHERE sc.holders_delta_w IS NOT NULL
+                      AND sc.holders_delta_w > 0
+                )
+                SELECT j.sid AS sid,
+                       s.name AS name,
+                       (SELECT close FROM daily_prices
+                           WHERE stock_id = j.sid
+                           ORDER BY date DESC LIMIT 1) AS close,
+                       ? AS consensus_days,
+                       j.inst_net_total AS inst_net_total,
+                       j.holders_delta_w AS holders_delta_w,
+                       j.last_date AS last_date,
+                       (
+                          CAST(
+                            (SELECT COUNT(*) FROM joined j2
+                                WHERE j2.inst_net_total <= j.inst_net_total)
+                            AS REAL
+                          ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                          +
+                          CAST(
+                            (SELECT COUNT(*) FROM joined j3
+                                WHERE j3.holders_delta_w <= j.holders_delta_w)
+                            AS REAL
+                          ) / NULLIF((SELECT COUNT(*) FROM joined), 0)
+                       ) AS composite_score,
+                       (SELECT MAX(ml_prob) FROM daily_picks
+                           WHERE sid = j.sid AND ml_prob IS NOT NULL) AS ml_prob
+                FROM joined j
+                LEFT JOIN stocks s ON s.stock_id = j.sid
+                ORDER BY composite_score DESC, j.inst_net_total DESC,
+                         j.sid ASC
+                LIMIT ?
+                """,
+                (
+                    int(min_inst_days), int(min_inst_days),
+                    int(min_inst_days), int(limit),
+                ),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _empty_ranking_rows()
+    return [dict(r) for r in rows]
+
+
 def upsert_daily_metrics(
     rows: Iterable[dict],
     db_path: str | Path | None = None,
@@ -2257,6 +2461,8 @@ __all__ = [
     "get_top_shareholder_movers",
     "get_top_shareholder_concentration",
     "get_consecutive_shareholder_increases",
+    "get_top_inst_consensus",
+    "get_strong_follower_composite",
     "dump_shareholder_concentration_csv",
     "add_to_watchlist",
     "bulk_add_to_watchlist",
