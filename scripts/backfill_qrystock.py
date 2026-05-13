@@ -56,7 +56,9 @@ _UA = (
 # 給 60s 比一直 timeout 重打省成本(且 retry 也要打)。
 _HTTP_TIMEOUT = (10, 60)  # (connect, read)
 _BIG_HOLDER_LEVEL = 15  # TDCC qryStock 級距 15 = 1,000,001 股以上 = 千張大戶
-_TOTAL_LEVEL = 17       # 最後一列「合計」(本頁是 17,非 opendata 的 99)
+# 合計列的 level number 因股而異:有「差異數調整」(level 16) 的股 → 合計在 17;
+# 沒有的(冷門股 / 早期週)→ 合計直接在 16。所以 parser 用「level > 15 且為最後
+# 一個有效整數列」當合計,別寫死 level==17。
 # 連續失敗達此值 → 進入長 cooldown(避免一直撞牆)
 _CONSEC_FAIL_COOLDOWN_THRESHOLD = 5
 _COOLDOWN_SECS = 30
@@ -114,35 +116,38 @@ def post_query(sess, meta: dict, sca_date: str, stock_no: str) -> str:
 
 
 def post_with_retry(
-    sess, meta_ref: dict, sca_date: str, stock_no: str,
+    sess, sca_date: str, stock_no: str,
     *, max_attempts: int = 3, sleep_fn=time.sleep,
+    meta_provider=None,
 ) -> dict | None:
     """打 1 筆,失敗最多 retry max_attempts 次,backoff 5/15s。
 
-    `meta_ref` 是 dict(token, firDate),caller 共享同一 instance;
-    最後一次 attempt 才 refresh token(避免每次 fail 都拉 token 加重 server 負擔)。
+    每次 attempt 都先 GET 重抓 SYNCHRONIZER_TOKEN — TDCC 的 token 是
+    **single-use**,同一 token POST 兩次第二次會回空頁(parse=None)。
 
-    回 parsed dict 或 None(三次都失敗)。
+    `meta_provider`:測試用注入(預設用 fetch_form_meta);呼叫每次都回新 meta。
+
+    回 parsed dict 或 None。
     """
-    backoffs = [5, 15]  # attempt 1 → backoff[0] → attempt 2 → backoff[1] → attempt 3
+    backoffs = [5, 15]
     last_err = ""
+    fetch_meta = meta_provider or (lambda: fetch_form_meta(sess))
     for attempt in range(1, max_attempts + 1):
-        # 最後一次嘗試前,refresh token(token 過期是冷門但會發生,例如長 cooldown 之後)
-        if attempt == max_attempts:
-            try:
-                new_meta = fetch_form_meta(sess)
-                meta_ref["token"] = new_meta["token"]
-                meta_ref["firDate"] = new_meta["firDate"]
-            except Exception as ex:  # noqa: BLE001
-                last_err = f"meta refresh: {type(ex).__name__}"
         try:
-            html = post_query(sess, meta_ref, sca_date, stock_no)
+            meta = fetch_meta()
+        except Exception as ex:  # noqa: BLE001
+            last_err = f"GET meta: {type(ex).__name__}"
+            if attempt < max_attempts:
+                sleep_fn(backoffs[attempt - 1])
+            continue
+        try:
+            html = post_query(sess, meta, sca_date, stock_no)
             parsed = parse_qrystock_html(html)
             if parsed is not None:
                 return parsed
             last_err = "parse=None"
         except Exception as ex:  # noqa: BLE001
-            last_err = f"{type(ex).__name__}"
+            last_err = f"POST: {type(ex).__name__}"
         if attempt < max_attempts:
             sleep_fn(backoffs[attempt - 1])
     logger.warning(
@@ -165,23 +170,25 @@ def _strip_tags(s: str) -> str:
 def parse_qrystock_html(html: str) -> dict | None:
     """從 qryStock POST response 抽 (holders_1000up_count, total_holders)。
 
-    結構(已驗證 2026-04-24 / 2330):
+    結構(以 2026-04-24 為例):
       ┌──level──┬──range──┬──count──┬──shares──┬──pct──┐
-      │ 1       │ 1-999   │ ...     │ ...      │ ...   │
-      │ ...     │         │         │          │       │
-      │ 15      │ 1000001以上 │ 1503   │ ...      │ ...  │ ← 千張大戶
-      │ 16      │ 差異數調整 │       │          │       │ ← 跳過
-      │ 17      │ 合計     │ 2464344 │ ...      │ ...   │ ← 總股東
-      └─────────┴─────────┴─────────┴──────────┴───────┘
+      │ 1       │ 1-999       │ ...   │ ...      │ ...   │
+      │ ...     │             │       │          │       │
+      │ 15      │ 1000001以上 │ 1503  │ ...      │ 85.67 │ ← 千張大戶
+      │ [16     │ 差異數調整  │       │          │       │] ← 部分股才有,跳過
+      │ 16/17   │ 合計        │ N     │ ...      │ 100   │ ← 總股東(level 號 varies)
+      └─────────┴─────────────┴───────┴──────────┴───────┘
 
-    解析策略:每一列頭一欄為純整數時當級距列,挑 level==15 / level==17。
+    解析策略:挑 level==15 為千張大戶;合計用「最後一個 level > 15 且 count
+    非空的整數列」(因為有些股無「差異數調整」,合計直接在 level=16)。
     回 None 表示無資料 / 表格抓不到。
     """
     if not html or "<table" not in html:
         return None
 
     holders_1000up: int | None = None
-    total_holders: int | None = None
+    last_count: int | None = None
+    last_level: int | None = None
 
     for tr in _TR_RE.findall(html):
         tds = _TD_RE.findall(tr)
@@ -203,14 +210,20 @@ def parse_qrystock_html(html: str) -> dict | None:
             continue
         if level == _BIG_HOLDER_LEVEL:
             holders_1000up = count
-        elif level == _TOTAL_LEVEL:
-            total_holders = count
+        # 追蹤最後一個有效 (level, count)
+        last_count = count
+        last_level = level
 
-    if holders_1000up is None or total_holders is None or total_holders <= 0:
+    if holders_1000up is None or last_count is None or last_level is None:
+        return None
+    # 合計列必須在千張大戶之後(level > 15);否則代表頁面結構不完整
+    if last_level <= _BIG_HOLDER_LEVEL:
+        return None
+    if last_count <= 0:
         return None
     return {
         "holders_1000up_count": holders_1000up,
-        "total_holders": total_holders,
+        "total_holders": last_count,
     }
 
 
@@ -287,8 +300,10 @@ def run_backfill(
         return {"sids": 0, "weeks": 0, "ok": 0, "failed": 0, "skipped": 0}
 
     sess = (session_factory or _build_session)()
-    meta = fetch_form_meta(sess)
-    sca_list = meta["scaDates"][:weeks]
+    # 初次 GET 只用來抓 scaDate 下拉(列出可 backfill 的週),token 不重用
+    # (TDCC token single-use,每次 POST 都得自己抓新 token)
+    initial_meta = fetch_form_meta(sess)
+    sca_list = initial_meta["scaDates"][:weeks]
     week_ends = [_sca_date_to_week_end(s) for s in sca_list]
     print(
         f"[BACKFILL] sids={len(sids)} weeks_window={weeks} "
@@ -340,7 +355,7 @@ def run_backfill(
                 continue
 
             post_idx += 1
-            parsed = post_with_retry(sess, meta, sca_date, sid, sleep_fn=sleep_fn)
+            parsed = post_with_retry(sess, sca_date, sid, sleep_fn=sleep_fn)
 
             if parsed is None:
                 failed += 1

@@ -124,13 +124,39 @@ def test_parse_qrystock_html_no_table_returns_none():
 
 
 def test_parse_qrystock_html_missing_total_returns_none():
-    # 只有 15 沒 17 → None
+    # 只有 15 沒有更後面的合計列 → None
     html = (
         "<html><table>"
         '<tr><td>15</td><td>1000001以上</td><td>500</td><td>1</td><td>1</td></tr>'
         "</table></html>"
     )
     assert backfill.parse_qrystock_html(html) is None
+
+
+def test_parse_qrystock_html_16_level_structure_no_adjustment_row():
+    """有些股(冷門或早期週)沒有 level=16 的『差異數調整』行,
+    合計直接出現在 level=16。parser 必須處理這種變體。"""
+    rows_html = []
+    rows_html.append(
+        "<tr><td>1</td><td>1-999</td><td>33,986</td>"
+        "<td>8,466,700</td><td>0.47</td></tr>"
+    )
+    rows_html.append(
+        "<tr><td>14</td><td>800001-1000000</td><td>13</td>"
+        "<td>11,488,319</td><td>0.63</td></tr>"
+    )
+    rows_html.append(
+        "<tr><td>15</td><td>1000001以上</td><td>78</td>"
+        "<td>1,129,719,196</td><td>62.90</td></tr>"
+    )
+    # 注意:這裡 level=16 就是合計列,沒有差異數調整行
+    rows_html.append(
+        "<tr><td>16</td><td>合計</td><td>100,940</td>"
+        "<td>1,795,960,668</td><td>100.00</td></tr>"
+    )
+    html = "<html><table>" + "".join(rows_html) + "</table></html>"
+    out = backfill.parse_qrystock_html(html)
+    assert out == {"holders_1000up_count": 78, "total_holders": 100940}
 
 
 # === _sca_date_to_week_end ===
