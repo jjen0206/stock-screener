@@ -422,6 +422,23 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_pick_outcomes_date "
     "ON pick_outcomes(pick_date DESC)",
+    # pick_shap_explanations:SHAP ML 解釋性 cache(2026-05-14 加)。
+    # 每天 daily-notify 推播前對當日 picks 算一次 SHAP 寫表,後續 Telegram / Streamlit
+    # 從表撈 cache 避免重算(shap.TreeExplainer 對 RF 雖然快,N×D 仍可能慢)。
+    # top_features 存 JSON array of {feature, value, contribution, contribution_pct, direction}
+    # 同 (pick_date, sid, strategy) UPSERT(重跑覆蓋)。
+    """
+    CREATE TABLE IF NOT EXISTS pick_shap_explanations (
+        pick_date     TEXT NOT NULL,    -- 推薦日 YYYY-MM-DD
+        sid           TEXT NOT NULL,
+        strategy      TEXT NOT NULL,    -- routing strategy 名(general / per-strategy)
+        top_features  TEXT NOT NULL,    -- JSON: [{feature, value, contribution, contribution_pct, direction}]
+        generated_at  TEXT NOT NULL,
+        PRIMARY KEY (pick_date, sid, strategy)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pick_shap_explanations_date "
+    "ON pick_shap_explanations(pick_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -2653,6 +2670,75 @@ def get_last_evaluated_pick_date(
     return row["d"] if row and row["d"] else None
 
 
+# === pick_shap_explanations:SHAP ML 解釋性 cache ===
+
+def save_shap_explanation(
+    pick_date: str,
+    sid: str,
+    strategy: str,
+    top_features: list[dict],
+    db_path: str | Path | None = None,
+) -> None:
+    """UPSERT 一筆 SHAP 解釋到 pick_shap_explanations。
+
+    top_features: list of dict,每筆含 feature/value/contribution/contribution_pct/direction。
+    JSON-serialize 後存 TEXT 欄。同 (pick_date, sid, strategy) 重跑覆蓋。
+    """
+    import json
+
+    init_db(db_path)
+    payload = json.dumps(top_features, ensure_ascii=False)
+    now = _now_iso()
+    with get_conn(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pick_shap_explanations
+                (pick_date, sid, strategy, top_features, generated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(pick_date, sid, strategy) DO UPDATE SET
+                top_features=excluded.top_features,
+                generated_at=excluded.generated_at
+            """,
+            (pick_date, sid, strategy, payload, now),
+        )
+
+
+def get_shap_explanation(
+    pick_date: str,
+    sid: str,
+    strategy: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict] | None:
+    """撈 (pick_date, sid, strategy) 的 SHAP top features list。
+
+    strategy=None → 撈該 (pick_date, sid) 第一筆(讓 Streamlit 不需知道 routing 就能查)。
+    沒資料 → None。
+    """
+    import json
+
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        if strategy is None:
+            row = conn.execute(
+                "SELECT top_features FROM pick_shap_explanations "
+                "WHERE pick_date=? AND sid=? "
+                "ORDER BY generated_at DESC LIMIT 1",
+                (pick_date, sid),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT top_features FROM pick_shap_explanations "
+                "WHERE pick_date=? AND sid=? AND strategy=?",
+                (pick_date, sid, strategy),
+            ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["top_features"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 # === strategy_backtest:歷史回測勝率(週一 nightly 跑) ===
 
 def dump_strategy_backtest(
@@ -2969,5 +3055,7 @@ __all__ = [
     "dump_strategy_backtest",
     "load_latest_strategy_backtest",
     "load_strategy_backtest_for_period",
+    "save_shap_explanation",
+    "get_shap_explanation",
     "SCHEMA",
 ]
