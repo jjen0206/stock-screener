@@ -273,7 +273,10 @@ def notify_target_changes(
     sent_dc = False
     if config.TELEGRAM_BOT_TOKEN:
         from src.notifier import send_telegram_message
-        sent_tg = bool(send_telegram_message(tg_msg))
+        # 2026-05-15 主公拍板 Step 1 quick fallback:parse_mode="" 純文字,
+        # bypass Markdown entity 解析錯誤(2026-05-14 觸目標推播 byte 2259 全 fail)。
+        # Step 2 會回 HTML / MarkdownV2 + 完整 escape 動態字串(公司名 / 備註)。
+        sent_tg = bool(send_telegram_message(tg_msg, parse_mode=""))
     if config.DISCORD_WEBHOOK_URL:
         from src.discord_notifier import send_discord_message
         sent_dc = bool(send_discord_message(dc_msg))
@@ -485,7 +488,8 @@ def notify_target_hits(
     sent_dc = False
     if config.TELEGRAM_BOT_TOKEN:
         from src.notifier import send_telegram_message
-        sent_tg = bool(send_telegram_message(tg_msg))
+        # 2026-05-15 Step 1 quick fallback,同上(觸目標 hit 路徑)
+        sent_tg = bool(send_telegram_message(tg_msg, parse_mode=""))
     if config.DISCORD_WEBHOOK_URL:
         from src.discord_notifier import send_discord_message
         sent_dc = bool(send_discord_message(dc_msg))
