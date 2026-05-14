@@ -7,7 +7,9 @@ Label 定義:**進場後 5 個交易日內,high 是否 ≥ 進場 close + 1.5 ×
 (觸到目標即算 win,實務貼近 stop-limit 賣單;比純看 5 日後 close 更貼近真實
 短線交易行為)
 
-特徵(11 個):
+特徵(v3 = 16 個):
+
+v2 base(11 個):
 - kd_k / kd_d              KD9 K 值 / D 值
 - macd_dif / macd_osc      MACD 12-26-9 DIF / OSC
 - ma_alignment             MA5/MA20/MA60 排列 score(2=多頭/0=空頭/1=糾結)
@@ -17,7 +19,22 @@ Label 定義:**進場後 5 個交易日內,high 是否 ≥ 進場 close + 1.5 ×
 - atr_normalized           ATR(14) / close × 100(波動率)
 - inst_5d / inst_10d       法人 5/10 日累計(張),沒資料 → 0
 
-任何資料不足(< 60 天歷史)→ extract_features 回 None。
+v3 高階特徵(5 個,2026-05-14 加,缺資料一律 fallback 0.0,不會 drop row):
+- holders_delta_w_zscore   千張戶週變化 z-score(per-sid 滾動 4 週)
+                           對齊 big_holder_inflow Phase 2 邏輯,讓 ML 學「相對突破」
+- inst_5d_zscore           法人 5 日累計 z-score(per-sid 滾動 20 天 5d-sum 分布)
+- regime_dummy             大盤 regime ordinal:bull=2 / weak_bull=1 / sideways=-1
+                           / bear=-2 / unknown=0(RandomForest 不需 one-hot)
+- holders_pct_change_4w    千張戶占比 vs 4 週前的相對變化率
+- is_theme_member          是否在 data/themes/*.yaml union 內(0/1)
+
+新舊模型相容性:**新特徵一律 append 到 FEATURE_NAMES 尾部**,搭配
+`_aligned_feature_names(model)` slicing shim — 舊 v2 模型(n_features_in_=11)
+仍能用前 11 欄推論,新模型用全部 16 欄。Phase 1 commit 後即使 Phase 2 重訓
+失敗 rollback,production 不會壞。
+
+任何資料不足(< 45 天歷史)→ extract_features 回 None。v3 features 任一
+SQL/算術失敗 → 該 feature fallback 0.0(不 drop row)。
 
 訓練 universe:給 build_training_dataset 傳 stock_ids 控制(預設 TW_TOP_50);
 不跑全市場避免訓練時間爆量。
@@ -36,11 +53,188 @@ from src import database as db, indicators as ind
 logger = logging.getLogger(__name__)
 
 
+MODEL_VERSION = "v3"
+
+# v2 base(11) + v3 高階特徵(5,append 在尾部供 backward-compat slicing)
 FEATURE_NAMES = [
+    # === v2 base(舊 model n_features_in_=11 仍能用) ===
     "kd_k", "kd_d", "macd_dif", "macd_osc", "ma_alignment",
     "bb_position", "vol_ratio", "bias_pct", "atr_normalized",
     "inst_5d", "inst_10d",
+    # === v3 新增(每個都有 try/except → 0.0 fallback) ===
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member",
 ]
+
+# regime → ordinal 映射(RandomForest split 對單調 ordinal 友善,不需 one-hot)
+_REGIME_ORDINAL: dict[str, float] = {
+    "bull": 2.0,
+    "weak_bull": 1.0,
+    "sideways": -1.0,
+    "bear": -2.0,
+    "unknown": 0.0,
+}
+
+# 模組內快取(target_date × db_path 一次 query 即可,避免 predict_batch 對
+# 2400 sids 各打一次 TAIEX 60-row SQL)
+_REGIME_CACHE: dict[tuple[str, str], float] = {}
+_THEME_MEMBER_SIDS: frozenset[str] | None = None
+
+
+def _aligned_feature_names(model) -> list[str]:
+    """根據 model.n_features_in_ slice FEATURE_NAMES 前 N 欄 — 讓舊 v2 pkl(11 feat)
+    在新 code(16 feat FEATURE_NAMES)下仍能 predict。
+
+    新特徵一律 append 在尾部,所以 FEATURE_NAMES[:11] 完全等同 v2 model 訓練時的
+    feature 順序,直接打到 model.predict_proba 不會有 column 對不齊問題。
+    """
+    n = getattr(model, "n_features_in_", None)
+    if n is not None and n < len(FEATURE_NAMES):
+        return FEATURE_NAMES[:n]
+    return FEATURE_NAMES
+
+
+def _load_theme_member_sids() -> frozenset[str]:
+    """讀 data/themes/*.yaml union 出來的 sids,first call 後 cache。
+
+    YAML 缺檔 / parse 失敗 → 回空 set(is_theme_member 全部 fallback 0.0)。
+    """
+    global _THEME_MEMBER_SIDS
+    if _THEME_MEMBER_SIDS is not None:
+        return _THEME_MEMBER_SIDS
+    try:
+        import yaml
+        from src import config as _config
+
+        themes_dir = Path(_config.PROJECT_ROOT) / "data" / "themes"
+        sids: set[str] = set()
+        for p in sorted(themes_dir.glob("*.yaml")):
+            with open(p, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            for s in (data.get("sids") or []):
+                s = str(s).strip()
+                if s:
+                    sids.add(s)
+        _THEME_MEMBER_SIDS = frozenset(sids)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ML] _load_theme_member_sids 失敗:%s", e)
+        _THEME_MEMBER_SIDS = frozenset()
+    return _THEME_MEMBER_SIDS
+
+
+def _load_holders_weeks(
+    stock_id: str,
+    target_date: str,
+    weeks: int = 5,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """撈該 sid 在 target_date 之前最近 N 週 shareholder_concentration。
+
+    回 list[dict],asc 排序(index 0 為最舊,-1 為最新)。SQL 失敗或表不存在
+    → 回空 list,caller 各自走 fallback。
+    """
+    import sqlite3
+
+    try:
+        with db.get_conn(db_path) as conn:
+            rows = conn.execute(
+                "SELECT week_end, holders_delta_w, holders_pct "
+                "FROM shareholder_concentration "
+                "WHERE sid=? AND week_end<=? "
+                "ORDER BY week_end DESC LIMIT ?",
+                (stock_id, target_date, weeks),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return list(reversed([dict(r) for r in rows]))
+
+
+def _compute_holders_delta_w_zscore(rows: list[dict]) -> float:
+    """latest holders_delta_w 對前 4 週 distribution 的 z-score(per-sid 滾動)。
+
+    對齊 big_holder_inflow Phase 2:前 rolling_weeks=4 週算 μ + σ(ddof=1),
+    回 (latest - μ) / σ。前期 ≥ 4 非 NULL → 正常算,否則 0.0;σ ≤ 0 → 0.0。
+    """
+    if len(rows) < 5:  # 前 4 + 本週
+        return 0.0
+    latest = rows[-1].get("holders_delta_w")
+    if latest is None:
+        return 0.0
+    prior = [
+        r.get("holders_delta_w") for r in rows[:-1]
+        if r.get("holders_delta_w") is not None
+    ]
+    if len(prior) < 4:
+        return 0.0
+    s = pd.Series(prior, dtype=float)
+    mu = float(s.mean())
+    sigma = float(s.std(ddof=1))
+    if pd.isna(sigma) or sigma <= 0:
+        return 0.0
+    return (float(latest) - mu) / sigma
+
+
+def _compute_holders_pct_change_4w(rows: list[dict]) -> float:
+    """latest holders_pct vs 4 週前的相對變化率((latest - old) / old)。
+
+    需要至少 5 週資料(index 0=4 週前,-1=latest)。任一缺值或 old<=0 → 0.0。
+    """
+    if len(rows) < 5:
+        return 0.0
+    latest = rows[-1].get("holders_pct")
+    old = rows[0].get("holders_pct")
+    if latest is None or old is None or old <= 0:
+        return 0.0
+    return (float(latest) - float(old)) / float(old)
+
+
+def _compute_inst_5d_zscore(inst_total: pd.Series) -> float:
+    """法人 5 日累計 z-score:用最近 20 天的 5-day-rolling-sum 分布算 (latest_5d - μ) / σ。
+
+    inst_total: asc 排序的「每日法人三大買賣超總和(張)」序列。長度 < 20 →
+    rolling 5-sum 樣本太少 → 0.0;σ ≤ 0 → 0.0。
+    """
+    if len(inst_total) < 20:
+        return 0.0
+    rolling5 = inst_total.rolling(5).sum()
+    last20 = rolling5.dropna().tail(20)
+    if len(last20) < 5:
+        return 0.0
+    latest_5d = float(inst_total.tail(5).sum())
+    mu = float(last20.mean())
+    sigma = float(last20.std(ddof=1))
+    if pd.isna(sigma) or sigma <= 0:
+        return 0.0
+    return (latest_5d - mu) / sigma
+
+
+def _compute_regime_dummy(
+    target_date: str,
+    db_path: str | Path | None = None,
+) -> float:
+    """大盤 regime ordinal(bull=2 ... bear=-2,unknown=0)。
+
+    第一次呼叫 cache 結果在 _REGIME_CACHE[(target_date, db_path)],後續同
+    target_date predict_batch 不再打 TAIEX SQL。TAIEX 不足 60 天 → unknown=0。
+    """
+    key = (target_date, str(db_path) if db_path else "")
+    if key in _REGIME_CACHE:
+        return _REGIME_CACHE[key]
+    try:
+        from src.market_regime import compute_regime
+
+        info = compute_regime(target_date, db_path=db_path)
+        v = float(_REGIME_ORDINAL.get(info["regime"], 0.0))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[ML] _compute_regime_dummy %s fallback:%s", target_date, e,
+        )
+        v = 0.0
+    _REGIME_CACHE[key] = v
+    return v
 
 # Label 設定
 LABEL_LOOKAHEAD_DAYS = 5
@@ -190,6 +384,7 @@ def extract_features(
 
     # 法人 5/10 日累計(張)— institutional 沒資料 → 0
     inst_df = _load_inst(stock_id, target_date, days=30, db_path=db_path)
+    inst_total: pd.Series = pd.Series([], dtype=float)
     if not inst_df.empty:
         inst_total = (
             inst_df["foreign_buy_sell"].fillna(0)
@@ -202,6 +397,57 @@ def extract_features(
         inst_5d = 0.0
         inst_10d = 0.0
 
+    # === v3 高階特徵(每個獨立 try/except → 0.0 fallback,不 drop row) ===
+    try:
+        holders_rows = _load_holders_weeks(
+            stock_id, target_date, weeks=5, db_path=db_path,
+        )
+        holders_delta_w_zscore = _compute_holders_delta_w_zscore(holders_rows)
+        holders_pct_change_4w = _compute_holders_pct_change_4w(holders_rows)
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} holders fallback:{e}",
+                flush=True,
+            )
+        holders_delta_w_zscore = 0.0
+        holders_pct_change_4w = 0.0
+
+    try:
+        inst_5d_zscore = (
+            _compute_inst_5d_zscore(inst_total) if not inst_total.empty else 0.0
+        )
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} inst_zscore fallback:"
+                f"{e}",
+                flush=True,
+            )
+        inst_5d_zscore = 0.0
+
+    try:
+        regime_dummy = _compute_regime_dummy(target_date, db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} regime fallback:{e}",
+                flush=True,
+            )
+        regime_dummy = 0.0
+
+    try:
+        is_theme_member = (
+            1.0 if stock_id in _load_theme_member_sids() else 0.0
+        )
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(
+                f"[ML/extract] {stock_id}@{target_date} theme fallback:{e}",
+                flush=True,
+            )
+        is_theme_member = 0.0
+
     feats = {
         "kd_k": kd_k, "kd_d": kd_d,
         "macd_dif": macd_dif, "macd_osc": macd_hist,
@@ -212,8 +458,19 @@ def extract_features(
         "atr_normalized": atr_normalized,
         "inst_5d": inst_5d,
         "inst_10d": inst_10d,
+        # v3
+        "holders_delta_w_zscore": holders_delta_w_zscore,
+        "inst_5d_zscore": inst_5d_zscore,
+        "regime_dummy": regime_dummy,
+        "holders_pct_change_4w": holders_pct_change_4w,
+        "is_theme_member": is_theme_member,
     }
-    bad_keys = [k for k, v in feats.items() if pd.isna(v) or np.isinf(v)]
+    # v2 base 11 個保持嚴格 NaN/Inf check(歷史行為);v3 5 個內部已 fallback 0.0,
+    # 不可能 NaN/Inf,所以只檢 v2 那 11 個
+    v2_keys = FEATURE_NAMES[:11]
+    bad_keys = [
+        k for k in v2_keys if pd.isna(feats[k]) or np.isinf(feats[k])
+    ]
     if bad_keys:
         if verbose:
             print(
@@ -375,7 +632,7 @@ def predict_short_pick_winrate(
     feats = extract_features(stock_id, target_date, db_path=db_path)
     if feats is None:
         return None
-    X = pd.DataFrame([feats])[FEATURE_NAMES]
+    X = pd.DataFrame([feats])[_aligned_feature_names(model)]
     try:
         proba = model.predict_proba(X)[0]
         # class 1 = win 的機率(predict_proba 的 columns 是 model.classes_ 順序)
@@ -431,7 +688,7 @@ def predict_batch(
     if not rows:
         return out
 
-    X = pd.DataFrame(rows)[FEATURE_NAMES]
+    X = pd.DataFrame(rows)[_aligned_feature_names(model)]
     try:
         probas = model.predict_proba(X)
         if 1 in model.classes_:
@@ -475,7 +732,7 @@ def dump_model_meta(
     metrics: dict,
     feature_names: list[str] | None = None,
     model_type: str = "RandomForestClassifier",
-    version: str = "v2",
+    version: str = MODEL_VERSION,
     min_history_days: int = MIN_HISTORY_DAYS,
 ) -> Path:
     """訓練完成後 dump metadata 到 .meta.json sidecar。
@@ -607,6 +864,7 @@ def predict_for_strategy(
 
 __all__ = [
     "FEATURE_NAMES",
+    "MODEL_VERSION",
     "MIN_HISTORY_DAYS",
     "extract_features",
     "compute_label",

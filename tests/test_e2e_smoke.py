@@ -4120,7 +4120,8 @@ def test_load_model_meta_returns_dict_when_exists(tmp_path):
     meta = ml_predictor.load_model_meta(pkl)
     assert meta is not None
     assert meta["samples"] == 750
-    assert meta["features_count"] == 11
+    # v3:11 base + 5 高階(holders/inst zscore + regime + theme)
+    assert meta["features_count"] == len(ml_predictor.FEATURE_NAMES)
     assert abs(meta["metrics"]["accuracy"] - 0.66) < 1e-6
     assert meta["min_history_days"] == ml_predictor.MIN_HISTORY_DAYS
     assert meta["model_type"] == "RandomForestClassifier"
