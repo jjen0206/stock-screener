@@ -700,6 +700,114 @@ def test_format_top_picks_message_weak_tier_shows_fallback_caption():
     assert "高信心 + ≥2 策略:" not in msg
 
 
+def test_format_top_picks_message_has_4_independent_sections(monkeypatch):
+    """主公 2026-05-15:訊息含 4 個獨立 section header(昨日/短線/高信心/大戶)。"""
+    picks = [_make_top_pick(rank=1, sid="2330")]
+    premium = [{
+        "sid": "2454", "name": "聯發科", "close": 1100.0,
+        "consensus_days": 3, "holders_delta_w": 5, "ml_prob": 0.72,
+    }]
+    movers = [{
+        "sid": "3711", "name": "日月光", "close": 175.5,
+        "holders_delta_w": 25, "holders_pct": 0.18, "ml_prob": 0.61,
+    }]
+    # mock recap → 給「📈 昨日複盤」section
+    monkeypatch.setattr(
+        notifier, "format_yesterday_recap",
+        lambda channel="telegram": (
+            "📈 *昨日 picks 複盤(2026-05-14)*\n✅ 3/5 上漲"
+        ),
+    )
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-15", channel="telegram",
+        premium_picks=premium, big_holder_movers=movers,
+    )
+    # 4 個 section header(各 emoji 標識)+ message header
+    assert "🎯 *短線精選 · 2026-05-15" in msg  # message header
+    assert "📈" in msg and "昨日" in msg          # recap section
+    assert "🎯 *短線精選(Top 1)*" in msg          # short picks section title
+    assert "✨" in msg and "高信心精選" in msg     # premium section
+    assert "👥" in msg and "大戶進場 Top 1" in msg  # big-holder section
+    # 至少 4 個 section separators(每 section 後一條)
+    assert msg.count("━" * 16) >= 4
+
+
+def test_format_top_picks_message_empty_sections_skip_gracefully():
+    """premium / movers 都空 → 整個 section 不顯,訊息仍合法。"""
+    picks = [_make_top_pick(rank=1, sid="2330")]
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-15", channel="telegram",
+        premium_picks=[], big_holder_movers=[],
+    )
+    assert "高信心精選" not in msg  # 空 premium 不顯
+    assert "大戶進場" not in msg      # 空 movers 不顯
+    assert "短線精選(Top 1)" in msg  # 短線 section 仍在
+
+
+def test_format_big_holder_movers_block_contains_expected_fields():
+    """大戶進場 block 含人數變化、占比、ML 三欄。"""
+    rows = [
+        {"sid": "2330", "name": "台積電", "close": 779.0,
+         "holders_delta_w": 42, "holders_pct": 0.253, "ml_prob": 0.81},
+        {"sid": "2317", "name": "鴻海", "close": 120.0,
+         "holders_delta_w": 10, "holders_pct": None, "ml_prob": None},
+    ]
+    block = notifier.format_big_holder_movers_block(rows, channel="telegram")
+    assert "👥" in block
+    assert "大戶進場 Top 2" in block
+    assert "[2330]" in block
+    assert "千張戶 +42" in block
+    assert "占比 25.3%" in block
+    assert "🎯 ML 0.81" in block
+    assert "[2317]" in block
+    assert "千張戶 +10" in block
+
+
+def test_format_big_holder_movers_block_empty_returns_empty_string():
+    """空 list → 回空 string(caller 看 falsy 就 skip)。"""
+    assert notifier.format_big_holder_movers_block([]) == ""
+
+
+def test_format_top_picks_message_auto_fetches_movers_when_none(monkeypatch):
+    """caller 不傳 big_holder_movers → 自動呼叫 db.get_top_shareholder_movers。"""
+    from src import database as db
+    called: list[int] = []
+    def fake_movers(limit=5):
+        called.append(limit)
+        return [{
+            "sid": "2330", "name": "台積電", "close": 779.0,
+            "holders_delta_w": 30, "holders_pct": 0.20, "ml_prob": 0.70,
+        }]
+    monkeypatch.setattr(db, "get_top_shareholder_movers", fake_movers)
+    monkeypatch.setattr(
+        notifier, "format_yesterday_recap", lambda channel="telegram": "",
+    )
+    picks = [_make_top_pick(rank=1, sid="2454")]
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-15", channel="telegram",
+    )
+    assert called == [5]  # 預設 limit=5 自動撈
+    assert "大戶進場 Top 1" in msg
+
+
+def test_format_top_picks_message_swallows_movers_db_failure(monkeypatch):
+    """db.get_top_shareholder_movers 拋例外 → graceful skip 不擋主訊息。"""
+    from src import database as db
+    def boom(limit=5):
+        raise RuntimeError("DB exploded")
+    monkeypatch.setattr(db, "get_top_shareholder_movers", boom)
+    monkeypatch.setattr(
+        notifier, "format_yesterday_recap", lambda channel="telegram": "",
+    )
+    picks = [_make_top_pick(rank=1, sid="2330")]
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-15", channel="telegram",
+    )
+    # 主訊息仍有短線 section,只是大戶 section 空 skip
+    assert "短線精選(Top 1)" in msg
+    assert "大戶進場" not in msg
+
+
 def test_format_top_picks_message_high_tier_keeps_legacy_label():
     """全 high picks(預設)→ 走 legacy label,無 fallback caption。"""
     picks = [

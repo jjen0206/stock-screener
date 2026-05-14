@@ -765,6 +765,60 @@ def format_premium_picks_block(
     return "\n".join(lines)
 
 
+def format_big_holder_movers_block(
+    movers_rows: list[dict], channel: str = "telegram",
+) -> str:
+    """組「👥 大戶進場 Top N」section(holders_delta_w > 0 排行)。
+
+    主公 2026-05-15 拍板:把大戶進場列獨立 section,跟「短線精選」/「高信心精選」
+    並列呈現,而不是只 inline 在 per-pick block 內。
+
+    輸入 movers_rows 為 db.get_top_shareholder_movers(...) 回傳的 list[dict]。
+    empty → 回空 string,caller 看到 falsy 就 graceful skip 不顯該 section。
+
+    格式(Markdown legacy / Discord 共用):
+        👥 *大戶進場 Top N(本週千張戶人數增加排行)*
+        1. [2330] *台積電* 779.0
+           🐋 千張戶 +12 (占比 25.3%) | 🎯 ML 0.71
+    """
+    if not movers_rows:
+        return ""
+    b = _bold
+    n = len(movers_rows)
+    title = f"大戶進場 Top {n}(本週千張戶人數增加排行)"
+    lines = [f"👥 {b(title, channel)}"]
+    for i, r in enumerate(movers_rows, start=1):
+        sid = str(r.get("sid") or "")
+        name = str(r.get("name") or "")
+        close = r.get("close")
+        dw = r.get("holders_delta_w") or 0
+        pct = r.get("holders_pct")
+        ml = r.get("ml_prob")
+        try:
+            close_str = f"{float(close):.2f}" if close is not None else "—"
+        except (TypeError, ValueError):
+            close_str = "—"
+        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        try:
+            dw_int = int(dw)
+        except (TypeError, ValueError):
+            dw_int = 0
+        sub_parts = [f"🐋 千張戶 +{dw_int}"]
+        if pct is not None:
+            try:
+                sub_parts.append(f"占比 {float(pct):.1%}")
+            except (TypeError, ValueError):
+                pass
+        if ml is not None:
+            try:
+                sub_parts.append(f"🎯 ML {float(ml):.2f}")
+            except (TypeError, ValueError):
+                pass
+        lines.append(header)
+        lines.append("   " + " | ".join(sub_parts))
+    return "\n".join(lines)
+
+
 def format_yesterday_recap(
     channel: str = "telegram",
     top_n: int = 5,
@@ -919,13 +973,29 @@ def format_yesterday_recap(
 def format_top_picks_message(
     picks: list[dict], date: str, channel: str = "telegram",
     premium_picks: list[dict] | None = None,
+    big_holder_movers: list[dict] | None = None,
 ) -> str:
-    """組完整訊息:header → picks(各 _SEPARATOR 隔開)→ 高信心精選 → 統計 + 警語。
+    """組完整訊息 — 4 個獨立 section + footer。
 
-    picks 空時走 empty fallback 文字(配 _weekend_hint / _empty_pick_suffix),
-    但若 premium_picks 有資料仍會夾在中間顯示(三維過濾獨立於短線 ≥2 共識)。
+    Section 結構(主公 2026-05-15 拍板還原獨立 section header):
+        🎯 短線精選 · DATE(message header)
+        ━━━━
+        📈 昨日複盤(section,可空)
+        ━━━━
+        🎯 短線精選(Top N)(section,可空)
+        ━━━━
+        ✨ 高信心精選(三維交集 Top N)(section,可空)
+        ━━━━
+        👥 大戶進場 Top N(section,可空)
+        ━━━━
+        📊 統計 + 警語(footer)
 
-    premium_picks:db.get_strong_follower_premium 結果(empty / None → skip)。
+    空 section graceful skip 不顯。picks 全 weak(_select_top_picks fallback path)
+    時短線精選 section 加 caption 警語。
+
+    premium_picks:db.get_strong_follower_premium 結果。
+    big_holder_movers:db.get_top_shareholder_movers 結果。caller 沒給 → 自動撈,
+        例外或表不存在 → 空 list(整 section graceful skip)。
     """
     b = _bold
     try:
@@ -935,77 +1005,101 @@ def format_top_picks_message(
     except Exception:  # noqa: BLE001
         date_label = date
 
-    premium_block = format_premium_picks_block(
-        premium_picks or [], channel=channel,
-    )
-
-    # 昨日 picks 複盤(U1)— pick_outcomes 表內昨天的實際報酬。空字串 → skip。
-    # 任何例外不擋主推播(2026-05-09 silence root cause:單一 section 解析失敗
-    # 整批 4xx,改 try/except 保證主訊息一定送出)。
+    # === Section blocks(各自 graceful 空回 ""/[])===
+    # 1. 昨日複盤(U1)— pick_outcomes 表內昨天的實際報酬
     try:
         recap_block = format_yesterday_recap(channel=channel)
     except Exception:  # noqa: BLE001
         logger.exception("[NOTIFIER] format_yesterday_recap 失敗,略過該 section")
         recap_block = ""
 
-    # Fallback caption(主公 2026-05-15 拍板):picks 全為 weak tier(_select_top_picks
-    # fallback path)時加警語,讓主公一眼分辨「高信心 picks」vs「降級顯示 Top 3」。
+    # 2. 短線精選 picks block(含 fallback caption)
     is_fallback = bool(picks) and all(
         p.get("confidence_tier") == "weak" for p in picks
     )
-    lines = [
+    short_picks_block = _format_short_picks_section(
+        picks, channel=channel, is_fallback=is_fallback,
+    )
+
+    # 3. 高信心精選(三維交集)
+    premium_block = format_premium_picks_block(
+        premium_picks or [], channel=channel,
+    )
+
+    # 4. 大戶進場 Top N(本週千張戶人數增加排行)— caller 沒給 → 自動撈
+    if big_holder_movers is None:
+        try:
+            big_holder_movers = db.get_top_shareholder_movers(limit=5)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[NOTIFIER] get_top_shareholder_movers 失敗,略過該 section"
+            )
+            big_holder_movers = []
+    movers_block = format_big_holder_movers_block(
+        big_holder_movers or [], channel=channel,
+    )
+
+    # === 組訊息:header + 各 section(空 skip)+ footer ===
+    parts: list[str] = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
-        _SEPARATOR,
-        "",
     ]
-    if recap_block:
-        lines.append(recap_block)
-        lines.append("")
-        lines.append(_SEPARATOR)
-        lines.append("")
+    for block in (recap_block, short_picks_block, premium_block, movers_block):
+        if block:
+            parts.append(block)
+
+    # Footer(picks 空時走 empty fallback / 有 picks 走統計)
+    parts.append(_format_footer_block(picks, is_fallback=is_fallback, channel=channel))
+
+    # Section 間 ━━━━ 分隔(各塊間 1 個 separator,前後空行給呼吸)
+    return f"\n\n{_SEPARATOR}\n\n".join(parts)
+
+
+def _format_short_picks_section(
+    picks: list[dict], channel: str, is_fallback: bool,
+) -> str:
+    """組「🎯 短線精選(Top N)」section — 標題 + fallback caption + per-pick blocks。
+
+    picks 空 → 回 empty fallback 文字(讓 caller 仍把這 section 串進訊息,
+    主公看到「📭 無 picks」也算 section 顯示)。
+    """
+    b = _bold
     if not picks:
-        lines.append(
+        return (
+            f"🎯 {b('短線精選', channel)}\n"
             "📭 今日無符合「高信心 + 共識 ≥2」的 picks(過濾條件嚴,留空算正常)"
             f"{_empty_pick_suffix()}"
         )
-        if premium_block:
-            lines.append("")
-            lines.append(_SEPARATOR)
-            lines.append("")
-            lines.append(premium_block)
-        lines.append("")
-        lines.append("⚠️ 僅供研究,非投資建議。")
-        return "\n".join(lines)
-
+    n = len(picks)
+    title = (
+        f"短線精選(降級弱訊號 Top {n})" if is_fallback
+        else f"短線精選(Top {n})"
+    )
+    section_lines: list[str] = [f"🎯 {b(title, channel)}"]
     if is_fallback:
-        lines.append(
+        section_lines.append(
             "⚠️ 今日無高信心 picks,降級顯示弱訊號 Top 3"
             "(僅過 ≥1 策略命中,未過 ML threshold)"
         )
-        lines.append("")
-        lines.append(_SEPARATOR)
-        lines.append("")
+    # per-pick blocks,中間用 mini separator(短 dash)避免跟 section ━━━━ 混淆
+    pick_blocks = [format_pick_block(p, channel=channel) for p in picks]
+    section_lines.append("")
+    section_lines.append(("\n" + ("─" * 8) + "\n").join(pick_blocks))
+    return "\n".join(section_lines)
 
-    for p in picks:
-        lines.append(format_pick_block(p, channel=channel))
-        lines.append("")
-        lines.append(_SEPARATOR)
-        lines.append("")
 
-    # 高信心精選 section(三維交集獨立 helper,跟短線 ≥2 共識結果並列)
-    if premium_block:
-        lines.append(premium_block)
-        lines.append("")
-        lines.append(_SEPARATOR)
-        lines.append("")
-
-    # Footer 統計
+def _format_footer_block(
+    picks: list[dict], is_fallback: bool, channel: str,
+) -> str:
+    """組 footer 統計 + 警語。picks 空 → 只顯警語。"""
+    b = _bold
+    if not picks:
+        return "⚠️ 僅供研究,非投資建議。"
     n = len(picks)
     probs = [p["ml_prob"] for p in picks if p.get("ml_prob") is not None]
     evs = [p["ev"] for p in picks if p.get("ev") is not None]
     avg_ml = (sum(probs) / len(probs)) if probs else 0.0
     avg_ev = (sum(evs) / len(evs)) if evs else 0.0
-    lines.append(f"📊 {b('今日 picks 統計', channel)}")
+    lines = [f"📊 {b('今日 picks 統計', channel)}"]
     if is_fallback:
         lines.append(f"   弱訊號(降級顯示):{n} 張")
     else:
