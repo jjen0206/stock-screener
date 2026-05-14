@@ -92,6 +92,8 @@ from src.strategies import (
     DEFAULT_GAP_UP_PARAMS,
     DEFAULT_INST_CONSENSUS_PARAMS,
     DEFAULT_INST_SILENT_PARAMS,
+    DEFAULT_MA_PARAMS,
+    DEFAULT_MACD_PARAMS,
     DEFAULT_RSI_RECOVERY_PARAMS,
     DEFAULT_SQUEEZE_PARAMS,
     DEFAULT_VOL_BREAKOUT_PARAMS,
@@ -5779,13 +5781,45 @@ def _page_strategy_history() -> None:
         _render_vbt_grid_tab()
 
 
+# 各策略 production default params(給「軍師判讀」比對 grid winner 用)
+# 只列目前 grid 範圍內有對接的策略;未在此 dict 內 → 不下判讀
+_STRATEGY_DEFAULT_PARAMS: dict[str, dict] = {
+    "volume_breakout": DEFAULT_VOL_BREAKOUT_PARAMS,
+    "bias_convergence": DEFAULT_BIAS_PARAMS,
+    "macd_golden": DEFAULT_MACD_PARAMS,
+    "ma_alignment": DEFAULT_MA_PARAMS,
+}
+
+
+def _vbt_default_strategy(grid_df: pd.DataFrame, strategies: list[str]) -> str:
+    """挑「樣本最多 + sharpe 最高」的策略當 selectbox 預設值。
+
+    對每策略找該策略內 sharpe 最高 row,排序鍵 (n_trades DESC, sharpe DESC),
+    取頭一個。樣本越多代表 grid 收得越扎實。
+    """
+    best_by_strat: list[tuple[str, int, float]] = []
+    for s in strategies:
+        sub = grid_df[grid_df["strategy"] == s]
+        if sub.empty:
+            continue
+        top = sub.loc[sub["sharpe"].idxmax()]
+        best_by_strat.append((s, int(top["n_trades"]), float(top["sharpe"])))
+    if not best_by_strat:
+        return strategies[0]
+    best_by_strat.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return best_by_strat[0][0]
+
+
 def _render_vbt_grid_tab() -> None:
     """🎲 參數最佳化 — 顯示 vbt_grid_results 表內各策略 grid search 結果。
 
     資料來源:`vbt_grid_results`(scripts/vbt_grid_search.py 跑出)。
-    每策略一段,按 sharpe DESC 排,最佳組合卡片提示「建議用此參數替換 default」
-    (**不自動推進為 production**,只是建議讓主公手動採用)。
+    多策略支援:用 selectbox 切策略,預設「樣本最多 + sharpe 最高」的策略。
+    每策略下方加軍師判讀(比較 production default 與 grid winner)。
+    結果**不自動覆蓋既有 production default**,僅供主公手動採用參考。
     """
+    import json as _json
+
     grid_df = db.load_vbt_grid_results()
     if grid_df is None or grid_df.empty:
         st.info(
@@ -5800,44 +5834,89 @@ def _render_vbt_grid_tab() -> None:
     )
 
     strategies = sorted(grid_df["strategy"].unique())
-    for strat in strategies:
-        sub = grid_df[grid_df["strategy"] == strat].sort_values(
-            "sharpe", ascending=False
-        ).reset_index(drop=True)
-        if sub.empty:
-            continue
-        label = STRATEGY_LABELS.get(strat, strat)
-        period_start = sub.iloc[0].get("period_start", "")
-        period_end = sub.iloc[0].get("period_end", "")
-        st.subheader(f"{label}（`{strat}`）")
-        st.caption(
-            f"區間:{period_start} ~ {period_end}　共 {len(sub)} 組合"
-        )
+    if not strategies:
+        st.info("📭 grid 表內沒有任何策略 row")
+        return
 
-        best = sub.iloc[0]
-        st.success(
-            f"💡 **最佳組合**:`{best['params_json']}`　"
-            f"Sharpe **{float(best['sharpe']):.2f}**　"
-            f"報酬 **{float(best['total_return']):+.2f}%**　"
-            f"勝率 **{float(best['win_rate']):.1f}%**　"
-            f"({int(best['n_trades'])} trades)　"
-            "→ 建議用此參數替換 default（主公手動採用）"
-        )
+    default_strat = _vbt_default_strategy(grid_df, strategies)
+    option_labels = [f"{STRATEGY_LABELS.get(s, s)}（{s}）" for s in strategies]
+    default_idx = strategies.index(default_strat)
+    chosen_label = st.selectbox(
+        "選策略", option_labels, index=default_idx,
+        key="vbt_grid_strategy_selector",
+        help="預設為樣本最多 + Sharpe 最高的策略",
+    )
+    strat = strategies[option_labels.index(chosen_label)]
+    sub = grid_df[grid_df["strategy"] == strat].sort_values(
+        "sharpe", ascending=False
+    ).reset_index(drop=True)
+    if sub.empty:
+        st.info("此策略無 grid 結果")
+        return
 
-        rows_view = []
-        for _, r in sub.iterrows():
-            rows_view.append({
-                "參數": r["params_json"],
-                "Sharpe": f"{float(r['sharpe']):.3f}",
-                "報酬 %": f"{float(r['total_return']):+.2f}",
-                "MaxDD %": f"{float(r['max_drawdown']):.2f}",
-                "勝率 %": f"{float(r['win_rate']):.1f}",
-                "Trades": int(r["n_trades"]),
-            })
-        st.dataframe(
-            pd.DataFrame(rows_view),
-            use_container_width=True, hide_index=True,
-        )
+    label = STRATEGY_LABELS.get(strat, strat)
+    period_start = sub.iloc[0].get("period_start", "")
+    period_end = sub.iloc[0].get("period_end", "")
+    st.subheader(f"{label}（`{strat}`）")
+    st.caption(
+        f"區間:{period_start} ~ {period_end}　共 {len(sub)} 組合"
+    )
+
+    best = sub.iloc[0]
+    st.success(
+        f"💡 **最佳組合**:`{best['params_json']}`　"
+        f"Sharpe **{float(best['sharpe']):.2f}**　"
+        f"報酬 **{float(best['total_return']):+.2f}%**　"
+        f"勝率 **{float(best['win_rate']):.1f}%**　"
+        f"({int(best['n_trades'])} trades)　"
+        "→ 建議用此參數替換 default（主公手動採用）"
+    )
+
+    # 軍師判讀:比對 production default 與 grid winner
+    default_params = _STRATEGY_DEFAULT_PARAMS.get(strat)
+    if default_params:
+        default_json = _json.dumps(default_params, sort_keys=True, default=str)
+        default_match = sub[sub["params_json"] == default_json]
+        if not default_match.empty:
+            dr = default_match.iloc[0]
+            if dr["params_hash"] == best["params_hash"]:
+                st.info(
+                    f"🎖️ 軍師判讀:現有 default 已是 grid 最佳組合,維持即可 "
+                    f"(sharpe {float(best['sharpe']):.2f}, "
+                    f"{int(best['n_trades'])} trades)"
+                )
+            else:
+                best_params = _json.loads(best["params_json"])
+                diffs = []
+                for k, v in best_params.items():
+                    if k in default_params and default_params[k] != v:
+                        diffs.append(f"`{k}` {default_params[k]} → {v}")
+                diff_str = "、".join(diffs) if diffs else "(整組參數不同)"
+                st.info(
+                    f"🎖️ 軍師判讀:建議 {diff_str}　"
+                    f"(n_trades {int(dr['n_trades'])} → {int(best['n_trades'])}, "
+                    f"sharpe {float(dr['sharpe']):.2f} → {float(best['sharpe']):.2f})"
+                )
+        else:
+            st.info(
+                "🎖️ 軍師判讀:既有 default 不在本次 grid 範圍內,"
+                "無法直接 A/B 比較;若要採用 winner 請主公手動評估。"
+            )
+
+    rows_view = []
+    for _, r in sub.iterrows():
+        rows_view.append({
+            "參數": r["params_json"],
+            "Sharpe": f"{float(r['sharpe']):.3f}",
+            "報酬 %": f"{float(r['total_return']):+.2f}",
+            "MaxDD %": f"{float(r['max_drawdown']):.2f}",
+            "勝率 %": f"{float(r['win_rate']):.1f}",
+            "Trades": int(r["n_trades"]),
+        })
+    st.dataframe(
+        pd.DataFrame(rows_view),
+        use_container_width=True, hide_index=True,
+    )
 
 
 def _page_system_brief() -> None:
