@@ -1251,7 +1251,12 @@ def notify_top_picks(
         return {"telegram": True, "discord": True}
 
     if send_telegram and config.TELEGRAM_BOT_TOKEN:
-        results["telegram"] = send_telegram_message(tg_msg)
+        # 2026-05-15 主公拍板:Telegram 暫關 parse_mode → 純文字 fallback。
+        # 昨晚 daily-notify run 25871610347 主訊息 16/16 fail(can't parse
+        # entities byte 2259),escape fix(7a3ae7a)後仍要先確保訊息送出再
+        # 回頭重打底。純文字會失去粗體/連結但能 deliver — Step 2 再回 HTML
+        # / MarkdownV2 + 完整 escape 動態字串(SHAP feature 名 / 公司名 etc)。
+        results["telegram"] = send_telegram_message(tg_msg, parse_mode="")
     if send_discord and config.DISCORD_WEBHOOK_URL:
         from src.discord_notifier import send_discord_message
         results["discord"] = send_discord_message(dc_msg)
