@@ -684,6 +684,179 @@ def test_format_top_picks_message_empty_shows_friendly_msg():
     assert "高信心 + ≥2 策略:" not in msg
 
 
+def test_format_top_picks_message_weak_tier_shows_fallback_caption():
+    """全 weak picks → 加 fallback caption,statistics 改顯弱訊號 label。"""
+    picks = [
+        _make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)
+    ]
+    for p in picks:
+        p["confidence_tier"] = "weak"
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-05", channel="telegram",
+    )
+    assert "降級顯示弱訊號 Top 3" in msg
+    assert "弱訊號(降級顯示):3 張" in msg
+    # 既有「高信心 + ≥2 策略」label 不該出現(weak picks 不算高信心)
+    assert "高信心 + ≥2 策略:" not in msg
+
+
+def test_format_top_picks_message_high_tier_keeps_legacy_label():
+    """全 high picks(預設)→ 走 legacy label,無 fallback caption。"""
+    picks = [
+        _make_top_pick(rank=i, sid=f"233{i}") for i in range(1, 4)
+    ]
+    for p in picks:
+        p["confidence_tier"] = "high"
+    msg = notifier.format_top_picks_message(
+        picks, "2026-05-05", channel="telegram",
+    )
+    assert "降級顯示弱訊號" not in msg
+    assert "高信心 + ≥2 策略:  3 張" in msg
+
+
+def test_select_top_picks_fallback_when_no_high_confidence(monkeypatch, tmp_path):
+    """所有 picks 都過不了 ML threshold 但有 confluence ≥ 1 → fallback Top 3 weak。
+
+    主公 2026-05-15 拍板:0 過 threshold 不該回空,降級 Top 3 by ml_prob 弱訊號。
+    """
+    from src import config, database as db, notifier
+    # Isolated tmp DB(避開生產 cache.db 內 daily_prices / institutional 干擾)
+    db_file = tmp_path / "fallback.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    db.init_db()
+    # seed 個股 + 90 天 daily_prices(satisfy pure_stock_universe min_history)
+    from datetime import date, timedelta
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "2317", "name": "鴻海", "market": "TW"},
+        {"stock_id": "2454", "name": "聯發科", "market": "TW"},
+    ])
+    today = date(2026, 5, 15)
+    rows = []
+    for sid in ["2330", "2317", "2454"]:
+        for i in range(90):
+            d = (today - timedelta(days=i)).isoformat()
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": 100, "high": 105, "low": 95, "close": 100 + i % 5,
+                "volume": 1000, "trading_money": None,
+                "trading_turnover": None, "spread": 0.0,
+            })
+    db.upsert_daily_prices(rows)
+
+    # Mock run_all_strategies: 3 檔都命中 volume_breakout(threshold 0.65)
+    fake_agg = {
+        "2330": {
+            "name": "台積電",
+            "details": {
+                "volume_breakout": {
+                    "close": 779.0, "target_low": 800, "target_high": 850,
+                    "stop_loss": 750, "risk_reward": 2.0,
+                },
+            },
+        },
+        "2317": {
+            "name": "鴻海",
+            "details": {
+                "volume_breakout": {
+                    "close": 120.0, "target_low": 125, "target_high": 135,
+                    "stop_loss": 115, "risk_reward": 1.8,
+                },
+            },
+        },
+        "2454": {
+            "name": "聯發科",
+            "details": {
+                "volume_breakout": {
+                    "close": 1100.0, "target_low": 1150, "target_high": 1200,
+                    "stop_loss": 1050, "risk_reward": 1.5,
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "src.strategies.run_all_strategies",
+        lambda d, params=None, stock_ids=None: fake_agg,
+    )
+    # ML probs 全部 < threshold 0.65(過不了)
+    fake_probs = {"2330": 0.40, "2317": 0.45, "2454": 0.30}
+    monkeypatch.setattr(
+        "src.ml_predictor.predict_for_strategy",
+        lambda strategy_name, stock_ids, target_date,
+               fallback_model, strategy_model: fake_probs,
+    )
+    # Confluence=2 → 全部過不了(只命中 1 策略)+ ML 也過不了 → 應 fallback
+
+    picks = notifier._select_top_picks(
+        date="2026-05-15", top_n=5, confluence_n=2,
+        universe=["2330", "2317", "2454"],
+    )
+    # Fallback path:回 Top 3 弱訊號
+    assert len(picks) == 3, f"fallback 應回 Top 3,實際 {len(picks)}"
+    for p in picks:
+        assert p["confidence_tier"] == "weak", (
+            f"fallback picks 該標 weak,實際 {p['confidence_tier']}"
+        )
+    # 按 ml_prob desc:2317(0.45) > 2330(0.40) > 2454(0.30)
+    assert picks[0]["sid"] == "2317"
+    assert picks[1]["sid"] == "2330"
+    assert picks[2]["sid"] == "2454"
+
+
+def test_select_top_picks_high_confidence_skips_fallback(monkeypatch, tmp_path):
+    """有 high-confidence picks → 走正常 path 不觸發 fallback(tier='high')。"""
+    from src import config, database as db, notifier
+    db_file = tmp_path / "high.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    db.init_db()
+    from datetime import date, timedelta
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+    ])
+    today = date(2026, 5, 15)
+    rows = []
+    for i in range(90):
+        d = (today - timedelta(days=i)).isoformat()
+        rows.append({
+            "stock_id": "2330", "date": d,
+            "open": 100, "high": 105, "low": 95, "close": 100,
+            "volume": 1000, "trading_money": None,
+            "trading_turnover": None, "spread": 0.0,
+        })
+    db.upsert_daily_prices(rows)
+    fake_agg = {
+        "2330": {
+            "name": "台積電",
+            "details": {
+                "volume_breakout": {
+                    "close": 779.0, "target_low": 800, "target_high": 850,
+                    "stop_loss": 750, "risk_reward": 2.0,
+                },
+                "macd_golden": {
+                    "close": 779.0, "target_low": 800, "target_high": 850,
+                    "stop_loss": 750, "risk_reward": 2.0,
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "src.strategies.run_all_strategies",
+        lambda d, params=None, stock_ids=None: fake_agg,
+    )
+    # ML prob 高過 threshold 0.65
+    monkeypatch.setattr(
+        "src.ml_predictor.predict_for_strategy",
+        lambda strategy_name, stock_ids, target_date,
+               fallback_model, strategy_model: {"2330": 0.80},
+    )
+    picks = notifier._select_top_picks(
+        date="2026-05-15", top_n=5, confluence_n=2,
+        universe=["2330"],
+    )
+    assert len(picks) == 1
+    assert picks[0]["confidence_tier"] == "high"
+
+
 def test_notify_top_picks_dry_run_prints_to_stdout(monkeypatch, capsys):
     """dry_run=True 不打 channel API,只 print 兩 channel 訊息。"""
     monkeypatch.setattr(

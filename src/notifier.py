@@ -431,16 +431,37 @@ def _select_top_picks(
     # enrich 後 holders_1000up_count 為 None → format_pick_block graceful skip
     sc_map = db.get_shareholder_concentration_for_sids(qualified_sids)
 
-    qualified: list[dict] = []
-    for sid, info in agg.items():
-        matched = list((info.get("details") or {}).keys())
-        if len(matched) < confluence_n:
-            continue  # confluence
-        thr = _strict_thr(matched)
-        prob = ml_probs.get(sid)
-        if thr is not None and (prob is None or prob < thr):
-            continue  # confidence
+    def _build_candidate(
+        sid: str,
+        info: dict,
+        min_confluence: int,
+        apply_ml_thr: bool,
+        confidence_tier: str,
+    ) -> dict | None:
+        """組單張 candidate(過 confluence + 可選 ML threshold)。回 None = 不過濾。
 
+        confidence_tier: 'high'(高信心,經 ML threshold)/ 'weak'(弱訊號,
+        fallback 模式關 threshold)— 寫進 pick dict 給 format_pick_block /
+        format_top_picks_message 顯示 caption。
+        """
+        matched_local = list((info.get("details") or {}).keys())
+        if len(matched_local) < min_confluence:
+            return None
+        thr_local = _strict_thr(matched_local)
+        prob_local = ml_probs.get(sid)
+        if apply_ml_thr and thr_local is not None and (
+            prob_local is None or prob_local < thr_local
+        ):
+            return None
+        return _enrich_pick(
+            sid=sid, info=info, matched=matched_local, prob=prob_local,
+            confidence_tier=confidence_tier,
+        )
+
+    def _enrich_pick(
+        sid: str, info: dict, matched: list[str], prob: float | None,
+        confidence_tier: str,
+    ) -> dict | None:
         details = info.get("details") or {}
         close = target_low = target_high = stop = rr = None
         for d in details.values():
@@ -454,7 +475,7 @@ def _select_top_picks(
                 stop = float(d.get("stop_loss")) if d.get("stop_loss") else None
                 rr = d.get("risk_reward")
         if close is None:
-            continue
+            return None
         prev_close = prev_close_map.get(sid)
         pct_change = (
             (close - prev_close) / prev_close * 100
@@ -481,7 +502,7 @@ def _select_top_picks(
         holders_1000up_count = sc_row.get("holders_1000up_count")
         holders_delta_w = sc_row.get("holders_delta_w")
         holders_pct = sc_row.get("holders_pct")
-        qualified.append({
+        return {
             "rank": 0,  # caller fills
             "sid": sid,
             "name": info.get("name", ""),
@@ -507,7 +528,35 @@ def _select_top_picks(
             "holders_1000up_count": holders_1000up_count,
             "holders_delta_w": holders_delta_w,
             "holders_pct": holders_pct,
-        })
+            "confidence_tier": confidence_tier,
+        }
+
+    qualified: list[dict] = []
+    for sid, info in agg.items():
+        cand = _build_candidate(
+            sid=sid, info=info, min_confluence=confluence_n,
+            apply_ml_thr=True, confidence_tier="high",
+        )
+        if cand is not None:
+            qualified.append(cand)
+
+    # Fallback(主公 2026-05-15 拍板):若 confluence + threshold 過濾後 = 0
+    # 但 daily_picks 仍有命中 → 降級回 Top 3 弱訊號(只看 confluence ≥ 1,
+    # 不過 ML threshold)。讓「全市場 0 高信心」的死寂日子至少有 Top 3 給主公看,
+    # confidence_tier='weak' 標記讓 format_top_picks_message 加 caption 警語。
+    fallback_used = False
+    if not qualified and agg:
+        fallback_top_n = min(top_n, 3)
+        fallback_min_confluence = 1
+        for sid, info in agg.items():
+            cand = _build_candidate(
+                sid=sid, info=info, min_confluence=fallback_min_confluence,
+                apply_ml_thr=False, confidence_tier="weak",
+            )
+            if cand is not None:
+                qualified.append(cand)
+        fallback_used = True
+        top_n = fallback_top_n  # downgrade output 上限到 3
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
     # → ml_prob desc → 命中策略多 desc → sid asc
@@ -523,6 +572,12 @@ def _select_top_picks(
     out = qualified[:top_n]
     for i, p in enumerate(out, start=1):
         p["rank"] = i
+    if fallback_used:
+        # 標 module 級 flag 給 format_top_picks_message 讀(避免 picks 為空時
+        # caller 無法分辨「真的空」vs「fallback 也空」)。實際上 caller 只看
+        # picks[0].get('confidence_tier') == 'weak' 也能判斷,所以 flag 為輔助。
+        for p in out:
+            p["confidence_tier"] = "weak"
 
     # U3 進場區間建議:對 top N picks 算 (entry_low, entry_high)
     # 只算 out 內的 picks(top N,通常 ≤ 10),省 DB query。
@@ -893,6 +948,11 @@ def format_top_picks_message(
         logger.exception("[NOTIFIER] format_yesterday_recap 失敗,略過該 section")
         recap_block = ""
 
+    # Fallback caption(主公 2026-05-15 拍板):picks 全為 weak tier(_select_top_picks
+    # fallback path)時加警語,讓主公一眼分辨「高信心 picks」vs「降級顯示 Top 3」。
+    is_fallback = bool(picks) and all(
+        p.get("confidence_tier") == "weak" for p in picks
+    )
     lines = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
         _SEPARATOR,
@@ -917,6 +977,15 @@ def format_top_picks_message(
         lines.append("⚠️ 僅供研究,非投資建議。")
         return "\n".join(lines)
 
+    if is_fallback:
+        lines.append(
+            "⚠️ 今日無高信心 picks,降級顯示弱訊號 Top 3"
+            "(僅過 ≥1 策略命中,未過 ML threshold)"
+        )
+        lines.append("")
+        lines.append(_SEPARATOR)
+        lines.append("")
+
     for p in picks:
         lines.append(format_pick_block(p, channel=channel))
         lines.append("")
@@ -937,7 +1006,10 @@ def format_top_picks_message(
     avg_ml = (sum(probs) / len(probs)) if probs else 0.0
     avg_ev = (sum(evs) / len(evs)) if evs else 0.0
     lines.append(f"📊 {b('今日 picks 統計', channel)}")
-    lines.append(f"   高信心 + ≥2 策略:  {n} 張")
+    if is_fallback:
+        lines.append(f"   弱訊號(降級顯示):{n} 張")
+    else:
+        lines.append(f"   高信心 + ≥2 策略:  {n} 張")
     if probs:
         lines.append(f"   平均 ML 機率:    {avg_ml * 100:.0f}%")
     if evs:
