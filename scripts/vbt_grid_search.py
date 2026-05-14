@@ -39,17 +39,20 @@ from src.vbt_backtest import (  # noqa: E402
 # === per-strategy grid 定義 ===
 
 # volume_breakout 兩 params:vbo_vol_ratio_min × highest_lookback
-# 2026-05-14 加寬:7 × 6 = 42 組合(原 4 × 4 = 16 太稀疏)
+# 2026-05-14 第二次縮:3 × 3 = 9 組合(原 7 × 6 = 42 在全市場 vbt 上跑不完;
+# NaN drop fix 後 close matrix 變大,vbt allocation 在 27+ 組合會 slow-down 到 hang)
 VOLUME_BREAKOUT_GRID: dict[str, list] = {
-    "vbo_vol_ratio_min": [1.0, 1.3, 1.6, 1.8, 2.0, 2.3, 2.5],
-    "highest_lookback": [3, 5, 7, 10, 15, 20],
+    "vbo_vol_ratio_min": [1.0, 1.5, 2.0],
+    "highest_lookback": [3, 5, 10],
 }
 
-# bias_convergence:3 × 3 × 3 = 27 組合,涵蓋 default {-5.0, 1.0, 1.2}
+# bias_convergence:3 × 3 × 1 = 9 組合,vol_ratio_min 固定在 default 1.2
+# (NaN fix 後 27 組合 × 全市場跑不完,先縮成 2D sweep 在 default vol_ratio 上;
+#  若需 vol_ratio 維度可下次再單獨跑)
 BIAS_CONVERGENCE_GRID: dict[str, list] = {
     "bias_low": [-8.0, -5.0, -3.0],
     "bias_high": [0.0, 1.0, 2.5],
-    "vol_ratio_min": [1.0, 1.2, 1.5],
+    "vol_ratio_min": [1.2],
 }
 
 # macd_golden:單 param,跨 6 個 level,涵蓋 default 1.0
