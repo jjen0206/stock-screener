@@ -705,3 +705,97 @@ def test_preload_pick_outcomes_csv(tmp_db, tmp_path):
     assert counts.get("pick_outcomes") == 2
     loaded = db.get_pick_outcomes_for_date("2026-05-08")
     assert len(loaded) == 2
+
+
+# === Strategy history aggregation helpers(📊 策略歷史頁面)===
+
+def test_get_strategy_history_stats_aggregates_by_strategy(tmp_db):
+    """3 筆混合策略 → 按 strategy group,N / avg_d5 / hit_rate / stop_rate 對齊。"""
+    db.dump_pick_outcomes([
+        _fake_outcome_row(sid="2330", strategy="volume_kd",
+                          return_d5=0.04, hit_target=1.0, stopped_out=0.0),
+        _fake_outcome_row(sid="2317", strategy="volume_kd",
+                          return_d5=-0.02, hit_target=0.0, stopped_out=1.0),
+        _fake_outcome_row(sid="2330", strategy="ma_alignment",
+                          return_d5=0.06, hit_target=1.0, stopped_out=0.0),
+    ])
+    stats = db.get_strategy_history_stats()
+    by_name = {s["strategy"]: s for s in stats}
+    assert by_name["volume_kd"]["n"] == 2
+    assert by_name["volume_kd"]["avg_d5"] == pytest.approx(0.01)
+    assert by_name["volume_kd"]["hit_rate"] == pytest.approx(0.5)
+    assert by_name["volume_kd"]["stop_rate"] == pytest.approx(0.5)
+    assert by_name["ma_alignment"]["n"] == 1
+    assert by_name["ma_alignment"]["avg_d5"] == pytest.approx(0.06)
+    # avg_d5 desc → ma_alignment 排在 volume_kd 前面
+    assert [s["strategy"] for s in stats] == ["ma_alignment", "volume_kd"]
+
+
+def test_get_strategy_history_stats_filters_by_since(tmp_db):
+    """since='2026-05-09' → 只算 2026-05-09 之後的 rows。"""
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-05", return_d5=0.02),
+        _fake_outcome_row(pick_date="2026-05-10", return_d5=0.06),
+    ])
+    stats_all = db.get_strategy_history_stats()
+    assert stats_all[0]["n"] == 2
+
+    stats_since = db.get_strategy_history_stats(since="2026-05-09")
+    assert stats_since[0]["n"] == 1
+    assert stats_since[0]["avg_d5"] == pytest.approx(0.06)
+
+
+def test_get_pick_outcomes_by_date_groups_per_day(tmp_db):
+    """3 個 pick_date → group by day,N 跟 avg 對。"""
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-08", sid="2330",
+                          return_d1=0.02, return_d5=0.04),
+        _fake_outcome_row(pick_date="2026-05-08", sid="2317",
+                          return_d1=-0.01, return_d5=0.02),
+        _fake_outcome_row(pick_date="2026-05-09", sid="2330",
+                          return_d1=0.03, return_d5=0.05),
+    ])
+    by_date = db.get_pick_outcomes_by_date(days=10)
+    # pick_date desc
+    assert [r["pick_date"] for r in by_date] == ["2026-05-09", "2026-05-08"]
+    d_08 = next(r for r in by_date if r["pick_date"] == "2026-05-08")
+    assert d_08["n"] == 2
+    assert d_08["avg_d1"] == pytest.approx(0.005)
+    assert d_08["avg_d5"] == pytest.approx(0.03)
+
+
+def test_get_pick_outcomes_by_date_respects_limit(tmp_db):
+    """days=2 → 只回 2 個最近的 pick_date。"""
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-05"),
+        _fake_outcome_row(pick_date="2026-05-06"),
+        _fake_outcome_row(pick_date="2026-05-07"),
+    ])
+    by_date = db.get_pick_outcomes_by_date(days=2)
+    assert len(by_date) == 2
+    assert [r["pick_date"] for r in by_date] == ["2026-05-07", "2026-05-06"]
+
+
+def test_get_pick_outcomes_raw_filters(tmp_db):
+    """strategy + since filter 連用,只回符合的 rows。"""
+    db.dump_pick_outcomes([
+        _fake_outcome_row(pick_date="2026-05-05", sid="2330",
+                          strategy="volume_kd"),
+        _fake_outcome_row(pick_date="2026-05-10", sid="2317",
+                          strategy="volume_kd"),
+        _fake_outcome_row(pick_date="2026-05-10", sid="2330",
+                          strategy="ma_alignment"),
+    ])
+    raw = db.get_pick_outcomes_raw(
+        since="2026-05-08", strategy="volume_kd",
+    )
+    assert len(raw) == 1
+    assert raw[0]["sid"] == "2317"
+    assert raw[0]["pick_date"] == "2026-05-10"
+
+
+def test_get_strategy_history_stats_empty(tmp_db):
+    """空表 → 空 list,不炸。"""
+    assert db.get_strategy_history_stats() == []
+    assert db.get_pick_outcomes_by_date() == []
+    assert db.get_pick_outcomes_raw() == []

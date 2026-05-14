@@ -2539,6 +2539,104 @@ def get_pick_outcomes_for_date(
     return [dict(r) for r in rows]
 
 
+def get_strategy_history_stats(
+    db_path: str | Path | None = None,
+    since: str | None = None,
+) -> list[dict]:
+    """聚合 pick_outcomes by strategy:N, D1/D3/D5/D10 平均報酬,命中率,停損率。
+
+    給 app.py 「📊 策略歷史」頁面 by-strategy tab 用。each row =
+    {strategy, n, avg_d1, avg_d3, avg_d5, avg_d10, hit_rate, stop_rate}
+    依 avg_d5 desc 排序(讓主公一眼看最賺的策略)。
+
+    since='YYYY-MM-DD' → 只算 pick_date >= since 的。AVG / SUM 用 SQL 一次算
+    避免 Python loop 處理大量 rows。空表 → 空 list。
+    """
+    init_db(db_path)
+    sql = """
+        SELECT strategy,
+               COUNT(*) AS n,
+               AVG(return_d1)  AS avg_d1,
+               AVG(return_d3)  AS avg_d3,
+               AVG(return_d5)  AS avg_d5,
+               AVG(return_d10) AS avg_d10,
+               AVG(hit_target)  AS hit_rate,
+               AVG(stopped_out) AS stop_rate
+        FROM pick_outcomes
+        WHERE return_d1 IS NOT NULL
+    """
+    args: list = []
+    if since:
+        sql += " AND pick_date >= ?"
+        args.append(since)
+    sql += " GROUP BY strategy ORDER BY avg_d5 DESC, n DESC"
+    with get_conn(db_path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_pick_outcomes_by_date(
+    db_path: str | Path | None = None,
+    days: int = 30,
+) -> list[dict]:
+    """每個 pick_date 的整體 outcome 摘要(跨策略一日合併)。
+
+    給 app.py 「📊 策略歷史」by-date tab 用。each row =
+    {pick_date, n, avg_d1, avg_d5, hit_rate, stop_rate}。
+    最多回 `days` 天(by pick_date desc),空表 → []。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT pick_date,
+                   COUNT(*) AS n,
+                   AVG(return_d1) AS avg_d1,
+                   AVG(return_d5) AS avg_d5,
+                   AVG(hit_target)  AS hit_rate,
+                   AVG(stopped_out) AS stop_rate
+            FROM pick_outcomes
+            WHERE return_d1 IS NOT NULL
+            GROUP BY pick_date
+            ORDER BY pick_date DESC
+            LIMIT ?
+            """,
+            (days,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_pick_outcomes_raw(
+    db_path: str | Path | None = None,
+    since: str | None = None,
+    strategy: str | None = None,
+    limit: int = 5000,
+) -> list[dict]:
+    """撈 pick_outcomes 原始 rows(已 evaluate 的),給「明細」tab 顯示。
+
+    pick_date desc, sid, strategy 排序。limit 守住手機渲染上限。
+    """
+    init_db(db_path)
+    sql = (
+        "SELECT pick_date, sid, strategy, entry_close, "
+        "return_d1, return_d3, return_d5, return_d10, "
+        "hit_target, stopped_out, evaluated_at "
+        "FROM pick_outcomes WHERE return_d1 IS NOT NULL "
+    )
+    args: list = []
+    if since:
+        sql += "AND pick_date >= ? "
+        args.append(since)
+    if strategy:
+        sql += "AND strategy = ? "
+        args.append(strategy)
+    sql += "ORDER BY pick_date DESC, sid ASC, strategy ASC LIMIT ?"
+    args.append(limit)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_last_evaluated_pick_date(
     db_path: str | Path | None = None,
 ) -> str | None:

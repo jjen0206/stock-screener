@@ -108,7 +108,7 @@ PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
     "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
-    "💼 交易紀錄", "🧪 實測追蹤", "⚙️ 系統", "⚙️ 設定",
+    "💼 交易紀錄", "🧪 實測追蹤", "📊 策略歷史", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -916,6 +916,8 @@ def main() -> None:
         _page_trades()
     elif page == "🧪 實測追蹤":
         _page_paper_tracking()
+    elif page == "📊 策略歷史":
+        _page_strategy_history()
     elif page == "⚙️ 系統":
         _page_system()
     elif page == "⚙️ 設定":
@@ -5635,6 +5637,136 @@ def _page_paper_tracking() -> None:
         st.info(
             "📭 還沒任何結算紀錄。等 ① 加入 picks 後過 5 個交易日,系統自動結算。"
         )
+
+
+def _page_strategy_history() -> None:
+    """📊 策略歷史命中 — 把 M4 weekly backtest 落在 pick_outcomes 的後向資料 UI 化。
+
+    跟「🧪 實測追蹤」(前向 paper-trade,當下 picks 進場後 hold N 天結算)是
+    兩條獨立 pipeline,但放隔壁讓主公一眼能對比:
+      - 🧪 實測追蹤:今天 picks 進場 → 5 天後算戰績(主動進場驗證)
+      - 📊 策略歷史:過去所有 daily_picks 跑後向 D1/D3/D5/D10 報酬(回溯期勝率)
+
+    3 個 sub-tab:
+      📈 by-strategy:各策略累積 N、平均報酬、命中率、停損率
+      📅 by-date:近 30 天每日推播當天的整體 D1/D5 表現
+      📦 明細:全部 pick_outcomes raw rows(可篩 strategy / 日期下限)
+    """
+    st.header("📊 策略歷史命中")
+    st.caption(
+        "**後向 backtest** — 過去所有 daily_picks 命中後實際 1/3/5/10 日報酬。"
+        "資料來源:`pick_outcomes`(weekly backtest_picks.py 跑出)。"
+    )
+    db.init_db()
+
+    last_eval = db.get_last_evaluated_pick_date()
+    if not last_eval:
+        st.info(
+            "📭 還沒有任何 pick_outcomes 資料。等 weekly backtest_picks "
+            "workflow 跑過後再來看。"
+        )
+        return
+    st.caption(f"📅 最新 evaluate 日:**{last_eval}**")
+
+    tab_strat, tab_date, tab_raw = st.tabs([
+        "📈 by-strategy", "📅 by-date", "📦 全部結算明細",
+    ])
+
+    # === Tab 1: by-strategy ===
+    with tab_strat:
+        stats = db.get_strategy_history_stats()
+        if not stats:
+            st.info("📭 尚無聚合資料")
+        else:
+            rows_view = []
+            for s in stats:
+                key = s["strategy"]
+                rows_view.append({
+                    "策略": STRATEGY_LABELS.get(key, key),
+                    "命中數 N": int(s["n"] or 0),
+                    "D1 平均": f"{(s['avg_d1'] or 0) * 100:+.2f}%",
+                    "D3 平均": f"{(s['avg_d3'] or 0) * 100:+.2f}%",
+                    "D5 平均": f"{(s['avg_d5'] or 0) * 100:+.2f}%",
+                    "D10 平均": f"{(s['avg_d10'] or 0) * 100:+.2f}%",
+                    "命中率(+3%)": f"{(s['hit_rate'] or 0) * 100:.1f}%",
+                    "停損率(-3%)": f"{(s['stop_rate'] or 0) * 100:.1f}%",
+                })
+            st.dataframe(
+                pd.DataFrame(rows_view),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "↑ 依 D5 平均報酬由高到低排序。命中率 / 停損率為 D1~D10 內"
+                "high 達 +3% / low 觸 -3% 的比例(可雙重 1)。"
+            )
+
+    # === Tab 2: by-date ===
+    with tab_date:
+        by_date = db.get_pick_outcomes_by_date(days=30)
+        if not by_date:
+            st.info("📭 近 30 日尚無資料")
+        else:
+            rows_view = []
+            for r in by_date:
+                rows_view.append({
+                    "推播日": r["pick_date"],
+                    "命中數 N": int(r["n"] or 0),
+                    "D1 平均": f"{(r['avg_d1'] or 0) * 100:+.2f}%",
+                    "D5 平均": f"{(r['avg_d5'] or 0) * 100:+.2f}%",
+                    "命中率": f"{(r['hit_rate'] or 0) * 100:.1f}%",
+                    "停損率": f"{(r['stop_rate'] or 0) * 100:.1f}%",
+                })
+            st.dataframe(
+                pd.DataFrame(rows_view),
+                use_container_width=True, hide_index=True,
+            )
+
+    # === Tab 3: 明細 ===
+    with tab_raw:
+        strat_options = ["(全部)"] + [
+            STRATEGY_LABELS.get(s["strategy"], s["strategy"])
+            for s in db.get_strategy_history_stats()
+        ]
+        label_to_key = {
+            STRATEGY_LABELS.get(s["strategy"], s["strategy"]): s["strategy"]
+            for s in db.get_strategy_history_stats()
+        }
+        chosen_label = st.selectbox(
+            "篩選策略", strat_options, index=0,
+            key="strategy_history_filter",
+        )
+        chosen_strategy = (
+            label_to_key.get(chosen_label) if chosen_label != "(全部)" else None
+        )
+        since = st.text_input(
+            "起始日(YYYY-MM-DD,留空 = 全部)", value="",
+            key="strategy_history_since",
+        ).strip() or None
+        raw = db.get_pick_outcomes_raw(
+            since=since, strategy=chosen_strategy, limit=2000,
+        )
+        if not raw:
+            st.info("📭 沒有符合條件的資料")
+        else:
+            rows_view = []
+            for r in raw:
+                key = r["strategy"]
+                rows_view.append({
+                    "推播日": r["pick_date"],
+                    "股號": r["sid"],
+                    "策略": STRATEGY_LABELS.get(key, key),
+                    "進場價": f"{(r['entry_close'] or 0):.2f}",
+                    "D1": f"{(r['return_d1'] or 0) * 100:+.2f}%",
+                    "D5": f"{(r['return_d5'] or 0) * 100:+.2f}%",
+                    "D10": f"{(r['return_d10'] or 0) * 100:+.2f}%",
+                    "達標": "✅" if (r["hit_target"] or 0) >= 1 else "—",
+                    "停損": "🛑" if (r["stopped_out"] or 0) >= 1 else "—",
+                })
+            st.caption(f"共 {len(rows_view)} 筆")
+            st.dataframe(
+                pd.DataFrame(rows_view),
+                use_container_width=True, hide_index=True,
+            )
 
 
 def _page_system() -> None:
