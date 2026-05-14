@@ -31,7 +31,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
-from src.notifier import notify_top_picks  # noqa: E402
+from src import paper_trading as pt  # noqa: E402
+from src.notifier import compute_top_picks, notify_top_picks  # noqa: E402
 
 
 def main() -> int:
@@ -118,6 +119,36 @@ def main() -> int:
         if ch in results:
             parts.append(f"{ch.title()}: {'✅' if results[ch] else '❌'}")
     print(f"推播結果 — {' | '.join(parts)}")
+
+    # === Auto-seed paper_trades ===
+    # 推播完同步把今日 picks 寫進 paper_trades,主公不用再到 Streamlit 頁手點
+    # 「一鍵加入」。reuse paper_trading.bulk_add_paper_trades(也是 page 5343
+    # 「一鍵加入」用的同一隻 helper)經 (sid, entry_date) UNIQUE 約束去重。
+    # dry-run 不寫(避免本機測試污染 paper_trades);任一例外都不擋整支腳本 —
+    # exit code 仍以推播結果為準。
+    if args.dry_run:
+        print("[NOTIFY] dry-run: 跳過 paper_trades auto-seed", flush=True)
+    else:
+        try:
+            today_picks = compute_top_picks(
+                date=target_date,
+                top_n=args.top_n,
+                confluence_n=args.confluence_n,
+                params=params,
+            )
+            seed = pt.auto_seed_from_picks(today_picks, entry_date=target_date)
+            print(
+                f"[NOTIFY] paper_trades auto-seed: "
+                f"added={seed['added']} skipped={seed['skipped']} "
+                f"errors={seed['errors']} (entry_date={target_date})",
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[NOTIFY] auto-seed failed (non-blocking): "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
 
     # 任一個成功就視為整體 OK(GitHub Actions 不要因為某個通道掛掉就紅)
     return 0 if any(results.values()) else 1

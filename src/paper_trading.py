@@ -198,6 +198,50 @@ def bulk_add_paper_trades(
     return {"added": n_added, "skipped": n_skipped, "errors": n_errors}
 
 
+def auto_seed_from_picks(
+    picks: Iterable[dict] | None,
+    entry_date: str,
+    target_pct: float = 0.05,
+    stop_pct: float = 0.03,
+    hold_days: int = 5,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """從 notifier 產出的 picks list 自動 seed paper_trades(daily_notify 推播後呼叫)。
+
+    notifier._select_top_picks 產出的 dict 用 `sid` / `close` 鍵,但
+    bulk_add_paper_trades 期望 `stock_id` / `close`(對齊 app.py 「一鍵加入」
+    callback 餵的 row 結構)。本 helper 幫忙做欄位轉換 + 委派,避免每個呼叫端
+    各自寫 mapping 跑掉。
+
+    去重:倚賴 paper_trades 表 (sid, entry_date) UNIQUE 約束 →
+    bulk_add_paper_trades 內回 skipped 不額外處理。
+
+    picks 為 None / 空 list → 回 {"added":0,"skipped":0,"errors":0}(graceful)。
+    """
+    rows: list[dict] = []
+    for p in picks or []:
+        sid = str(p.get("sid", "") or "").strip()
+        if not sid:
+            continue
+        rows.append({
+            "stock_id": sid,
+            "name": p.get("name", ""),
+            "close": p.get("close"),
+            "matched_strategies": p.get("matched_strategies") or [],
+            "ml_prob": p.get("ml_prob"),
+        })
+    if not rows:
+        return {"added": 0, "skipped": 0, "errors": 0}
+    return bulk_add_paper_trades(
+        rows,
+        entry_date=entry_date,
+        target_pct=target_pct,
+        stop_pct=stop_pct,
+        hold_days=hold_days,
+        db_path=db_path,
+    )
+
+
 def already_tracked(
     sid: str, entry_date: str, db_path: str | Path | None = None,
 ) -> bool:
@@ -510,6 +554,7 @@ def compute_stats(settled_df: pd.DataFrame) -> dict:
 __all__ = [
     "add_paper_trade",
     "bulk_add_paper_trades",
+    "auto_seed_from_picks",
     "already_tracked",
     "evaluate_active_trades",
     "list_active_trades",

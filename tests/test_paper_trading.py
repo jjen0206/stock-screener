@@ -501,3 +501,53 @@ def test_trailing_uses_current_stop_for_exit(tmp_db):
     )
     assert row["trailing_level"] == 2
     assert row["current_stop"] == pytest.approx(102.0)
+
+
+# === auto_seed_from_picks(daily_notify forward-tracking 自動化)===
+
+def test_auto_seed_from_picks_adds_all_new(tmp_db):
+    """notifier 產的 picks 結構(sid / close / matched_strategies / ml_prob)
+    全部沒追蹤過 → bulk_add 全寫入,added=N。
+    """
+    picks = [
+        {"sid": "2330", "name": "台積電", "close": 600.0,
+         "matched_strategies": ["ma_alignment"], "ml_prob": 0.72},
+        {"sid": "2317", "name": "鴻海", "close": 200.0,
+         "matched_strategies": ["macd_golden", "rsi_break"], "ml_prob": 0.65},
+    ]
+    result = pt.auto_seed_from_picks(picks, entry_date="2026-05-04")
+    assert result == {"added": 2, "skipped": 0, "errors": 0}
+    with db.get_conn() as conn:
+        sids = {
+            r["sid"] for r in conn.execute(
+                "SELECT sid FROM paper_trades WHERE entry_date='2026-05-04'"
+            ).fetchall()
+        }
+    assert sids == {"2330", "2317"}
+
+
+def test_auto_seed_from_picks_skips_already_active(tmp_db):
+    """同 sid 同日已 active → UNIQUE 衝突算 skipped,其他新的照常 added。
+    daily-notify 二次 run / cron retry 不會重複 seed。
+    """
+    pt.add_paper_trade("2330", "台積電", "2026-05-04", 600.0)
+    picks = [
+        {"sid": "2330", "name": "台積電", "close": 605.0,
+         "matched_strategies": ["ma_alignment"], "ml_prob": 0.7},
+        {"sid": "2317", "name": "鴻海", "close": 200.0,
+         "matched_strategies": [], "ml_prob": 0.6},
+    ]
+    result = pt.auto_seed_from_picks(picks, entry_date="2026-05-04")
+    assert result["added"] == 1
+    assert result["skipped"] == 1
+    assert result["errors"] == 0
+
+
+def test_auto_seed_from_picks_empty_graceful(tmp_db):
+    """空 picks / None → 直接回 zeros,不爆。"""
+    assert pt.auto_seed_from_picks([], entry_date="2026-05-04") == {
+        "added": 0, "skipped": 0, "errors": 0,
+    }
+    assert pt.auto_seed_from_picks(None, entry_date="2026-05-04") == {
+        "added": 0, "skipped": 0, "errors": 0,
+    }

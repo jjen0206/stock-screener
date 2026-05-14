@@ -257,6 +257,24 @@ def _compute_pick_score(
     )
 
 
+def compute_top_picks(
+    date: str,
+    top_n: int = 5,
+    confluence_n: int = 2,
+    params: dict | None = None,
+    universe: list[str] | None = None,
+) -> list[dict]:
+    """公開 wrapper:給排程腳本(daily_notify)在推播後抓同樣 picks 餵 auto_seed。
+
+    內部委派 `_select_top_picks`(notify_top_picks 用的同一隻);保留底線 helper
+    當 module-internal 實作細節,公開介面從這裡走。
+    """
+    return _select_top_picks(
+        date, top_n=top_n, confluence_n=confluence_n,
+        params=params, universe=universe,
+    )
+
+
 def _select_top_picks(
     date: str,
     top_n: int = 5,
