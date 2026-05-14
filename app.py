@@ -108,7 +108,8 @@ PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
     "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
-    "💼 交易紀錄", "🧪 實測追蹤", "📊 策略歷史", "⚙️ 系統", "⚙️ 設定",
+    "💼 交易紀錄", "🧪 實測追蹤", "📊 策略歷史",
+    "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -918,6 +919,8 @@ def main() -> None:
         _page_paper_tracking()
     elif page == "📊 策略歷史":
         _page_strategy_history()
+    elif page == "📋 系統結論":
+        _page_system_brief()
     elif page == "⚙️ 系統":
         _page_system()
     elif page == "⚙️ 設定":
@@ -5770,6 +5773,167 @@ def _page_strategy_history() -> None:
                 pd.DataFrame(rows_view),
                 use_container_width=True, hide_index=True,
             )
+
+
+def _page_system_brief() -> None:
+    """📋 系統結論頁 — 軍師主觀統整 DB + 策略表現 + 市場狀態 + 建議。
+
+    呼叫 src.system_brief.build_system_brief(conn) 拿 dict,分 6 個 section render:
+      1. 系統健康(metric 大數字 + warnings)
+      2. 策略表現(dataframe 排序)
+      3. ML 表現(meta + 校準)
+      4. 市場狀態(regime / 法人共識 / 千張戶)
+      5. 觀察清單 Top 5(三維交集 / 千張突破)
+      6. 軍師建議(顏色標 severity)
+
+    Mobile-first:metric 用 st.columns(3) 並排（主公手機 + 桌面都看），其餘無多欄。
+    """
+    from src.system_brief import build_system_brief
+
+    st.header("📋 系統結論")
+    st.caption(
+        "軍師統整 DB + 策略歷史 + ML 校準 + 市場狀態,基於規則主動下結論。"
+        "**不會 fetch 任何 API**,純讀 SQLite。"
+    )
+
+    db.init_db()
+    with db.get_conn() as conn:
+        brief = build_system_brief(conn)
+
+    # === 軍師建議（最重要,放最前）===
+    st.markdown("### 🎖️ 軍師建議")
+    recs = brief.get("recommendations") or []
+    if not recs:
+        st.info("尚無足夠資料下結論。")
+    else:
+        for r in recs:
+            if r.startswith("🚨"):
+                st.error(r)
+            elif r.startswith(("🔴", "🥶", "📉")):
+                st.warning(r)
+            elif r.startswith(("🔥", "💰", "📈")):
+                st.success(r)
+            else:
+                st.info(r)
+
+    # === 系統健康 ===
+    st.markdown("### 🏥 系統健康")
+    health = brief["health"]
+    cols = st.columns(3)
+    cols[0].metric(
+        "整體狀態",
+        "🟢 健康" if health.get("is_healthy") else "🔴 異常",
+    )
+    cols[1].metric(
+        "daily_prices 落後",
+        (
+            f"{health.get('daily_prices_stale_days')} 天"
+            if health.get("daily_prices_stale_days") is not None else "—"
+        ),
+        help=f"最新日 {health.get('daily_prices_max_date') or '—'}",
+    )
+    cols[2].metric(
+        "institutional 落後",
+        (
+            f"{health.get('institutional_stale_days')} 天"
+            if health.get("institutional_stale_days") is not None else "—"
+        ),
+        help=f"最新日 {health.get('institutional_max_date') or '—'}",
+    )
+    warns = health.get("warnings") or []
+    if warns:
+        st.warning("⚠️ " + " / ".join(warns))
+
+    # === 市場狀態 ===
+    st.markdown("### 🌡️ 市場狀態")
+    ms = brief["market_state"]
+    cols = st.columns(3)
+    cols[0].metric(
+        "大盤 regime",
+        f"{ms.get('regime_emoji', '❔')} {ms.get('regime_label', '未知')}",
+    )
+    cols[1].metric(
+        "法人共識(今日)",
+        f"{ms.get('inst_consensus_count_today', 0)} 檔",
+        help=(
+            f"7 天前 {ms.get('inst_consensus_count_7d_ago', 0)} 檔 · "
+            f"趨勢：{ms.get('inst_consensus_trend_7d', '持平')}"
+        ),
+    )
+    cols[2].metric(
+        "千張戶進場",
+        f"{ms.get('shareholder_movers_count', 0)} 檔",
+    )
+    pp = ms.get("premium_picks_count", 0)
+    if pp > 0:
+        st.success(f"✨ 三維精選 {pp} 檔（法人連買 ∩ 千張戶 ∩ ML 高信心）")
+
+    # === 策略表現 ===
+    st.markdown("### 📊 策略表現(過去 30 天)")
+    perf = brief.get("strategy_performance") or []
+    if not perf:
+        st.info("尚無策略樣本(pick_outcomes 還沒結算)")
+    else:
+        df_perf = pd.DataFrame([
+            {
+                "策略": s["name"],
+                "樣本數": s["n"],
+                "命中率": (
+                    f"{s['wr'] * 100:.1f}%" if s["wr"] is not None else "—"
+                ),
+                "平均 D5 報酬": (
+                    f"{s['avg_d5']:+.2f}%" if s["avg_d5"] is not None else "—"
+                ),
+                "軍師判定": s["verdict"],
+            }
+            for s in perf
+        ])
+        st.dataframe(df_perf, use_container_width=True, hide_index=True)
+        st.caption(
+            "🔥 發燙 = WR ≥ 60% 且 N ≥ 30  · 🥶 該休息 = WR ≤ 40% 且 N ≥ 30  · "
+            "🌱 觀察中 = N < 30(樣本太小不下結論)"
+        )
+
+    # === ML 表現 ===
+    st.markdown("### 🤖 ML 模型表現")
+    ml = brief.get("ml_performance") or {}
+    cols = st.columns(3)
+    auc = ml.get("short_pick_roc_auc")
+    cols[0].metric(
+        "Short pick 準確率",
+        f"{auc:.3f}" if auc is not None else "—",
+        help="meta.json metrics.accuracy(roc_auc 還沒落地時 fallback)",
+    )
+    cal = ml.get("calibration_7d")
+    n_cal = ml.get("calibration_sample_n", 0)
+    cols[1].metric(
+        "近 7 天高信心命中率",
+        f"{cal * 100:.1f}%" if cal is not None else "—",
+        help=f"ml_prob > 0.6 的 picks 實際命中率(N={n_cal})",
+    )
+    trained_at = ml.get("model_trained_at") or "—"
+    cols[2].metric("模型訓練時間", trained_at[:10] if trained_at != "—" else "—")
+    feats = ml.get("top_features") or []
+    if feats:
+        st.caption("**Top 5 features**: " + " · ".join(feats))
+
+    # === 觀察清單 ===
+    st.markdown("### 🎯 今日觀察清單")
+    wl = brief.get("watchlist_today") or []
+    if not wl:
+        st.info("今日無符合條件的觀察標的")
+    else:
+        df_wl = pd.DataFrame([
+            {
+                "代號": item["sid"],
+                "名稱": item.get("name", "—"),
+                "推薦理由": item.get("reason", ""),
+            }
+            for item in wl
+        ])
+        st.dataframe(df_wl, use_container_width=True, hide_index=True)
+
+    st.caption(f"產生時間：{brief.get('generated_at', '—')}")
 
 
 def _page_system() -> None:
