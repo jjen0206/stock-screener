@@ -1,0 +1,46 @@
+name: Weekly Telegram Brief
+
+# 週日台灣時間 10:00 = UTC 02:00 跑
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只印不送(true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  weekly-brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # send_weekly_brief.py 自己會 init_db + preload_snapshots from
+      # data/twse_snapshot/*.csv(daily-notify workflow 提交的)
+      - name: Send weekly brief
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/send_weekly_brief.py --dry-run
+          else
+            python scripts/send_weekly_brief.py
+          fi
