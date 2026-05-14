@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-05-14 — vectorbt 回測引擎升級
+
+### Added
+
+**vectorbt 策略級 grid search**
+- `requirements.txt` 新增 `vectorbt>=1.0.0`（`chore(deps): add vectorbt for grid-search backtesting`）
+- 新 module `src/vbt_backtest.py`：`backtest_strategy_with_params(strategy, params_grid, start, end, universe)` → DataFrame[strategy, params_hash, total_return, sharpe, max_drawdown, win_rate, n_trades]，按 sharpe DESC 排（`feat(vbt): add vectorbt wrapper for grid-search on existing strategies`）
+- DB schema `vbt_grid_results`（strategy + params_hash 雙 PK，UPSERT 允許重跑覆蓋）
+- 新 CLI `scripts/vbt_grid_search.py`：baseline 對 `volume_breakout` 跑 4×4 = 16 組合 × 全 universe × 6 個月（`feat(vbt): run first grid search on volume_breakout strategy`）
+- Streamlit「📊 策略歷史」頁加第 4 個 sub-tab「🎲 參數最佳化」顯示 grid 結果 + 最佳組合建議卡（**不自動覆蓋既有 production default**，主公手動採用）（`feat(streamlit): show vectorbt grid-search results in strategy-history page`）
+
+### Tests
+- `tests/test_vbt_backtest.py` 13 cases：params hash 穩定 / grid 展開 / exits clamp / portfolio_stats fixture / 完整 backtest / persist UPSERT / load top_n
+- `tests/test_vbt_grid_wire.py` 7 cases：tab 4 個標籤、`_render_vbt_grid_tab` 對接 DB helper、schema 必要欄位、安全聲明守住
+
+### Notes
+- 既有 `src/backtest.py`（逐 pick simulate_outcome）不取代 — vectorbt 是「策略級多參數最佳化」工具，跟「pick 級停利停損模擬」是兩個維度
+- volume_breakout 6 個月 baseline：最佳組合 `vbo_vol_ratio_min=1.5 / highest_lookback=3` Sharpe 1.77 / WR 100%（但僅 3 trades，樣本仍小，需後續其他 16 策略補進 grid 才有比較基準）
+- pandas 從 3.0.2 自動 downgrade 到 2.3.3（vectorbt 1.0 兼容性），仍符合 `pandas>=2.2.0`
+
+---
+
 ## 2026-05-13 — May 2026 feature wave
 
 ### Added

@@ -139,6 +139,22 @@ TDCC 集保提供兩條資料路徑，本系統兩條都用：
 
 DB schema 寫進 `shareholder_concentration` 表，欄位含 sid / week_end / total_holders / top1000_ratio / delta_w（與上週 diff）。長線卡片、`👥 大戶入場` page、`big_holder_inflow` strategy 都吃這份資料。
 
+## vectorbt 策略 grid search（2026-05 新增）
+
+對既有 17 個短線策略做**策略級多參數最佳化**，補位原本「逐 pick 撈 D1/D5/D10 報酬」(`backtest_picks.py`) 看不到的「哪組參數最佳」這個維度。
+
+```bash
+# 對 volume_breakout 跑 16 組合 (4×4) × 全 universe × 過去 6 個月
+python scripts/vbt_grid_search.py --strategy volume_breakout --months 6
+```
+
+結果寫進 `vbt_grid_results` 表（同 `(strategy, params_hash)` UPSERT），Streamlit「📊 策略歷史」頁第 4 個 sub-tab「🎲 參數最佳化」顯示 Top 1 卡 + 完整 dataframe。**不自動覆蓋既有 production default**，主公手動採用。
+
+技術細節：
+- 走 `src/vbt_backtest.py` wrapper：對每組 params 跑既有 `screen_*` 拿 picks → 組 vbt entries 矩陣 → 固定 5 日 hold → `vbt.Portfolio.from_signals` 算指標
+- Sharpe / total_return / max_drawdown / win_rate 用 trade-level returns 算（per-column 對稀疏命中策略會稀釋成 0）
+- 滑點 0.1% + 手續費 0.1425%（單邊）
+
 ## 概念股 YAML universe
 
 `data/themes/` 9 主題 YAML mapping：
