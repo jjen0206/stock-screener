@@ -5671,8 +5671,8 @@ def _page_strategy_history() -> None:
         return
     st.caption(f"📅 最新 evaluate 日:**{last_eval}**")
 
-    tab_strat, tab_date, tab_raw = st.tabs([
-        "📈 by-strategy", "📅 by-date", "📦 全部結算明細",
+    tab_strat, tab_date, tab_raw, tab_vbt = st.tabs([
+        "📈 by-strategy", "📅 by-date", "📦 全部結算明細", "🎲 參數最佳化",
     ])
 
     # === Tab 1: by-strategy ===
@@ -5773,6 +5773,71 @@ def _page_strategy_history() -> None:
                 pd.DataFrame(rows_view),
                 use_container_width=True, hide_index=True,
             )
+
+    # === Tab 4: vectorbt grid search 結果 ===
+    with tab_vbt:
+        _render_vbt_grid_tab()
+
+
+def _render_vbt_grid_tab() -> None:
+    """🎲 參數最佳化 — 顯示 vbt_grid_results 表內各策略 grid search 結果。
+
+    資料來源:`vbt_grid_results`(scripts/vbt_grid_search.py 跑出)。
+    每策略一段,按 sharpe DESC 排,最佳組合卡片提示「建議用此參數替換 default」
+    (**不自動推進為 production**,只是建議讓主公手動採用)。
+    """
+    grid_df = db.load_vbt_grid_results()
+    if grid_df is None or grid_df.empty:
+        st.info(
+            "📭 還沒有 vectorbt grid search 結果。\n\n"
+            "跑指令:`python scripts/vbt_grid_search.py --strategy volume_breakout --months 6`"
+        )
+        return
+
+    st.caption(
+        "**vectorbt 策略級 grid search** — 對每策略多組參數一次掃,找 Sharpe / 報酬最佳組合。"
+        "結果**不自動覆蓋既有 production default**,僅供主公手動採用參考。"
+    )
+
+    strategies = sorted(grid_df["strategy"].unique())
+    for strat in strategies:
+        sub = grid_df[grid_df["strategy"] == strat].sort_values(
+            "sharpe", ascending=False
+        ).reset_index(drop=True)
+        if sub.empty:
+            continue
+        label = STRATEGY_LABELS.get(strat, strat)
+        period_start = sub.iloc[0].get("period_start", "")
+        period_end = sub.iloc[0].get("period_end", "")
+        st.subheader(f"{label}（`{strat}`）")
+        st.caption(
+            f"區間:{period_start} ~ {period_end}　共 {len(sub)} 組合"
+        )
+
+        best = sub.iloc[0]
+        st.success(
+            f"💡 **最佳組合**:`{best['params_json']}`　"
+            f"Sharpe **{float(best['sharpe']):.2f}**　"
+            f"報酬 **{float(best['total_return']):+.2f}%**　"
+            f"勝率 **{float(best['win_rate']):.1f}%**　"
+            f"({int(best['n_trades'])} trades)　"
+            "→ 建議用此參數替換 default（主公手動採用）"
+        )
+
+        rows_view = []
+        for _, r in sub.iterrows():
+            rows_view.append({
+                "參數": r["params_json"],
+                "Sharpe": f"{float(r['sharpe']):.3f}",
+                "報酬 %": f"{float(r['total_return']):+.2f}",
+                "MaxDD %": f"{float(r['max_drawdown']):.2f}",
+                "勝率 %": f"{float(r['win_rate']):.1f}",
+                "Trades": int(r["n_trades"]),
+            })
+        st.dataframe(
+            pd.DataFrame(rows_view),
+            use_container_width=True, hide_index=True,
+        )
 
 
 def _page_system_brief() -> None:
