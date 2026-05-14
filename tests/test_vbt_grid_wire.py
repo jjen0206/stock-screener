@@ -12,11 +12,22 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import re
+from pathlib import Path
 
 import app
 from src import database as db
+
+
+def _load_grid_search_module():
+    """動態載入 scripts/vbt_grid_search.py(scripts 不是 package)。"""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "vbt_grid_search.py"
+    spec = importlib.util.spec_from_file_location("vbt_grid_search", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ============================================================================
@@ -204,3 +215,38 @@ def test_vbt_grid_loads_multi_strategy_rows(tmp_path, monkeypatch):
         assert len(bc) == 2, f"bias_convergence 該 2 row, 拿到 {len(bc)}"
     finally:
         db._reset_path_cache()
+
+
+# ============================================================================
+# STRATEGY_GRIDS 結構守住(2026-05-14 NaN fix re-run 後加)
+# ============================================================================
+
+def test_vbt_grid_sizes_within_safe_limit():
+    """每策略 grid combos 數 ≤ 12,避免 vbt allocation 在全市場 6mo 上 hang。
+
+    回憶 2026-05-14:NaN drop fix(commit 4898f37)後 close matrix 不再
+    被 leading-NaN 丟欄,變大。原 volume_breakout 7×6=42 / bias_convergence
+    3×3×3=27 組合 × 2060 universe × 120 交易日 在 vbt.Portfolio.from_signals
+    階段會 slow-down 到事實 hang(kill 在 ~21 min CPU 停止累積)。此 guard
+    防之後又無腦把 grid 加寬。
+    """
+    mod = _load_grid_search_module()
+    for strat, grid in mod.STRATEGY_GRIDS.items():
+        n = mod._grid_size(grid)
+        assert n <= 12, (
+            f"{strat} grid 有 {n} 組合,超過 vbt 全市場 6mo 安全上限(12);"
+            "加寬前請先在小 universe / 短 lookback 驗 vbt 不 hang"
+        )
+
+
+def test_vbt_grid_covers_three_target_strategies():
+    """3 個 NaN-fix-driven 樣本驗證策略必須在 STRATEGY_GRIDS。
+
+    volume_breakout / bias_convergence / ma_alignment 是 5/14 跑 PRE vs POST
+    對比的策略,STRATEGY_GRIDS 移除任一個會讓未來 re-run 漏掉。
+    """
+    mod = _load_grid_search_module()
+    for strat in ("volume_breakout", "bias_convergence", "ma_alignment"):
+        assert strat in mod.STRATEGY_GRIDS, (
+            f"{strat} 不在 STRATEGY_GRIDS — 5/14 NaN fix re-run 驗過的策略不能漏"
+        )
