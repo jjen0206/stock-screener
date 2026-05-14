@@ -353,6 +353,16 @@ def render_pick_card(
             entry_high=row.get("entry_high"),
         )
 
+        # SHAP 解釋性 expander(2026-05-14 加)— 從 pick_shap_explanations cache
+        # 撈 Top 3 features,告訴主公「為什麼這檔 ML 分數高」。
+        # Mobile-first:expander 預設 collapse,展開後純文字 + 小 bar chart。
+        _render_shap_explanation_expander(
+            sid=sid,
+            pick_date=row.get("pick_date"),
+            explanations=row.get("shap_explanations"),
+            button_key_prefix=button_key_prefix,
+        )
+
         # Row 3:button 列(加入關注 / 展開詳細分析)+ 右側 metadata
         # st.columns 把 row 3 分成 3 區塊:button | button | metadata
         if show_add_button:
@@ -537,6 +547,80 @@ def _render_entry_range_inline(
         f"</span>",
         unsafe_allow_html=True,
     )
+
+
+def _render_shap_explanation_expander(
+    sid: str,
+    pick_date: str | None = None,
+    explanations: list[dict] | None = None,
+    button_key_prefix: str = "card",
+) -> None:
+    """🧠 ML 信心拆解 expander — Top 3 SHAP feature 貢獻。
+
+    優先用 caller 傳的 explanations(pre-injected);否則從 pick_shap_explanations
+    cache 撈 (pick_date, sid)。pick_date=None → 用最近交易日 fallback。
+
+    Mobile-first:
+    - expander 預設 collapse(主公手機 viewport 窄)
+    - 展開後:每個 feature 一行,純文字 + 小 bar chart(unicode block)
+    - 不用 st.columns(手機 collapse)
+
+    任何例外 / 無資料 → silent skip 不渲(避免影響其他卡片元素)。
+    """
+    try:
+        # 1. 先用 caller 傳的(daily-notify 寫表 + Streamlit 同進程時注入)
+        # 2. 再從 cache 撈(雲端典型路徑:daily-notify 寫表 → Streamlit reload 讀)
+        if not explanations:
+            from src import database as _db
+
+            target_date = pick_date
+            if not target_date:
+                try:
+                    target_date = _db.get_latest_trading_date()
+                except Exception:  # noqa: BLE001
+                    target_date = None
+            if target_date:
+                explanations = _db.get_shap_explanation(target_date, sid)
+
+        if not explanations:
+            return
+
+        with st.expander("🧠 ML 信心拆解(Top 3 SHAP features)", expanded=False):
+            for e in explanations[:3]:
+                feat = str(e.get("feature", "?"))
+                pct_raw = e.get("contribution_pct", 0.0)
+                try:
+                    pct = float(pct_raw)
+                except (TypeError, ValueError):
+                    pct = 0.0
+                direction = e.get("direction", "+")
+                value = e.get("value")
+                # bar:每 10% 一個 block,最多 10 個(0-100%)
+                n_blocks = max(0, min(10, int(round(pct / 10.0))))
+                bar = "█" * n_blocks + "░" * (10 - n_blocks)
+                sign = "+" if direction == "+" else "-"
+                color = "#d62728" if direction == "+" else "#2ca02c"
+                val_str = ""
+                try:
+                    if value is not None:
+                        val_str = f" (值 {float(value):.2f})"
+                except (TypeError, ValueError):
+                    pass
+                st.markdown(
+                    f"<div style='font-family:monospace;font-size:13px;'>"
+                    f"<span style='color:{color}'>{sign}</span> "
+                    f"<strong>{feat}</strong>{val_str}<br/>"
+                    f"<span style='color:{color}'>{bar}</span> "
+                    f"{sign}{int(round(pct))}%"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.caption(
+                "說明:正貢獻 (+) 推高 ML 分數,負貢獻 (-) 拉低。"
+                "百分比 = |該 feature SHAP| / sum(|所有 features SHAP|)"
+            )
+    except Exception:  # noqa: BLE001
+        return  # silent — 不擋整張卡片
 
 
 def _render_watchlist_toggle_button(sid: str, button_key_prefix: str) -> None:
