@@ -218,15 +218,24 @@ _SEPARATOR = "━" * 16
 # [ (link 開頭) / ` (inline code)。TWSE 公司名常帶 *(如「國巨*」庫藏股標記),
 # 主旨內也常含 ()[] 等字元 — 不 escape 直接送 Telegram 會回 400「can't parse
 # entities」整批訊息死光(2026-05-09 主公手機 24 小時 silence root cause)。
+#
+# 2026-05-15 補:SHAP 行 feature 名(`atr_normalized` / `macd_dif` 等)含 _,
+# 不 escape 會被當斜體 marker 配對失敗 → 同樣 400「can't parse entities」。
+# 任何嵌入訊息的「動態字串」(股票名 / 備註 / 公司名 / SHAP feature / 策略
+# label / industry)都必須過 _md_escape — 純靜態 emoji + 中文 label 才能 raw。
 _TG_MD_ESCAPE_RE = re.compile(r"([\*_\[`])")
 
 
 def _md_escape(text: str, channel: str) -> str:
-    """Escape Telegram legacy Markdown 特殊字元。Discord 走 ** 雙星標記不受影響,
-    no-op 直接回原字串。"""
+    """Escape Telegram legacy Markdown 特殊字元 (* _ [ `)。Discord 走 ** 雙星
+    標記對裸的 * _ [ ` 不敏感,no-op 直接回原字串。
+
+    給 format_pick_block / format_*_block 等動態字串(SHAP feature 名 / 公司
+    名 / industry / label)用,避免 Telegram API 回 400「can't parse entities」。
+    """
     if channel != "telegram":
         return text
-    return _TG_MD_ESCAPE_RE.sub(r"\\\1", text)
+    return _TG_MD_ESCAPE_RE.sub(r"\\\1", str(text))
 
 
 def _bold(text: str, channel: str) -> str:
@@ -630,21 +639,23 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
                     f"   🔥 {b(ind_str, channel)} (今日 {industry_heat} 檔同類)"
                 )
             else:
-                lines.append(f"   🏭 {ind_str}")
+                lines.append(f"   🏭 {_md_escape(ind_str, channel)}")
     # 命中策略
     n = len(matched_labels)
     if n > 0:
         lines.append(f"   📊 命中 {n} 策略")
         for label in matched_labels:
-            lines.append(f"       · {label}")
+            lines.append(f"       · {_md_escape(str(label), channel)}")
     # ML 機率
     if ml_prob is not None:
         lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
     # SHAP Top 3 feature 解釋(2026-05-14 加)— caller(notify_top_picks)從 cache
     # 撈 / 算後注入 pick["shap_reason"]。沒有 / 失敗 → 整行 graceful skip。
+    # _md_escape 必須套(SHAP feature 名 atr_normalized / macd_dif 含 _,
+    # 不 escape 會被 Telegram 當斜體 marker → 400「can't parse entities」)。
     shap_reason = pick.get("shap_reason")
     if shap_reason:
-        lines.append(f"   {shap_reason}")
+        lines.append(f"   {_md_escape(shap_reason, channel)}")
     # 法人共識目標價(yfinance / Gemini news)— 在勝率之前
     # 加 Δ 標示(主公 2026-05-08 拍板):跟 previous_target_mean 比 |Δ| ≥ 1%
     # 才顯示「(↑ +5.1%)」/「(↓ -3.2%)」,小變動省略避免雜訊。

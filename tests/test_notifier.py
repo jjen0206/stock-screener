@@ -985,3 +985,102 @@ def test_notify_top_picks_dry_run_prints_to_stdout(monkeypatch, capsys):
     assert "Telegram" in captured.out
     assert "Discord" in captured.out
     assert "2330 台積電" in captured.out
+
+
+# === Telegram Markdown escape regression (2026-05-15 daily-notify 16/16 fail) ===
+# Root cause:2026-05-14 SHAP 行 feature 名 `atr_normalized` / `macd_dif` 含 _,
+# 直接塞訊息會被 Telegram legacy Markdown 當斜體 marker → 400「can't parse
+# entities」整批 fail。下面 tests 守住「任何 _ * [ ` 出現在動態字串都被 escape」。
+
+def _count_unescaped(text: str, char: str) -> int:
+    """數有幾個未被 \\ escape 的 char 字面值出現在 text 內。"""
+    count = 0
+    i = 0
+    while i < len(text):
+        if text[i] == char and (i == 0 or text[i - 1] != "\\"):
+            count += 1
+        i += 1
+    return count
+
+
+def test_format_pick_block_escapes_shap_underscores_for_telegram():
+    """SHAP feature 名(atr_normalized / macd_dif)在 Telegram 必須 escape _,
+    否則 Telegram API 回 400 can't parse entities(2026-05-14 production bug)。"""
+    pick = _make_top_pick()
+    pick["shap_reason"] = "🧠 SHAP: atr_normalized -37% / macd_dif -13% / macd_osc +12%"
+    block = notifier.format_pick_block(pick, channel="telegram")
+    # 整段必須 0 個裸 _(其他欄位也不該有 _)
+    assert _count_unescaped(block, "_") == 0, (
+        f"Telegram block 仍有未 escape 的 _ : {block!r}"
+    )
+    # escape 後的形式必須存在(\_)
+    assert r"atr\_normalized" in block
+    assert r"macd\_dif" in block
+    assert r"macd\_osc" in block
+
+
+def test_format_pick_block_does_not_escape_underscores_for_discord():
+    """Discord 走 ** 雙星 bold,裸 _ 不會被當斜體;_md_escape 對 discord no-op。"""
+    pick = _make_top_pick()
+    pick["shap_reason"] = "🧠 SHAP: atr_normalized -37%"
+    block = notifier.format_pick_block(pick, channel="discord")
+    # Discord 保留原 underscore(no escape)
+    assert "atr_normalized" in block
+    assert r"\_" not in block
+
+
+def test_format_pick_block_escapes_strategy_label_specials():
+    """matched_labels 若含 _ * 等(自訂策略 / 未來新增 label)也要被 escape。
+    現行 STRATEGY_LABELS 都是中文沒特殊字元,但守住向前防禦。"""
+    pick = _make_top_pick(matched=[])
+    pick["matched_labels"] = ["test_label_a", "abc*def"]
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert _count_unescaped(block, "_") == 0
+    # name 那行的 *bold* 不算「裸 *」(它是合法的 bold 配對)— 只看 label 段
+    assert r"test\_label\_a" in block
+    assert r"abc\*def" in block
+
+
+def test_format_pick_block_escapes_industry_cold_case():
+    """industry_heat < 3 走「🏭 {industry}」沒 bold 包,industry 也要 escape。"""
+    pick = _make_top_pick()
+    pick["industry"] = "weird_industry"  # 假想含 _ 的類別名
+    pick["industry_heat"] = 1
+    block = notifier.format_pick_block(pick, channel="telegram")
+    assert _count_unescaped(block, "_") == 0
+    assert r"weird\_industry" in block
+
+
+def test_format_pick_block_escapes_stock_name_with_asterisk():
+    """TWSE 公司名常帶 *(如「國巨*」庫藏股標記),必須 escape。
+    name 在 _bold() 內,_bold() 應呼叫 _md_escape — 守住該行為。"""
+    pick = _make_top_pick(name="國巨*")
+    block = notifier.format_pick_block(pick, channel="telegram")
+    # *國巨\** : *bold* 配對的兩個 * + 中間 escape 的 \*
+    # → 確認名稱裡的 * 被 escape
+    assert r"國巨\*" in block
+
+
+def test_format_top_picks_message_no_unbalanced_markdown_for_telegram():
+    """整封 Telegram 訊息送 send_telegram_message 前,裸 * 必須成對(bold 配對)
+    且裸 _ 必須是 0(沒 italic 用例),否則 Telegram parse entity 會炸。
+
+    這是 production 16/16 fail 的 sanity test:組完訊息後字串平衡。"""
+    pick = _make_top_pick()
+    pick["shap_reason"] = "🧠 SHAP: kd_d +26% / vol_ratio +24% / macd_dif +19%"
+    pick["industry"] = "半導體業"
+    pick["industry_heat"] = 5
+    pick["matched_labels"] = ["MACD 黃金交叉", "量爆突破", "test_pattern"]
+
+    msg = notifier.format_top_picks_message(
+        [pick], "2026-05-14", channel="telegram",
+    )
+    # 0 個裸 _(所有 _ 都被 escape 成 \_)
+    assert _count_unescaped(msg, "_") == 0, (
+        f"Telegram msg 有未 escape 的 _ , 會觸發 400 can't parse entities:\n{msg}"
+    )
+    # 裸 *(bold 開閉)成對 → 偶數
+    n_star = _count_unescaped(msg, "*")
+    assert n_star % 2 == 0, (
+        f"Telegram msg 的裸 * 不成對(個數 {n_star}),bold 會解析失敗:\n{msg}"
+    )
