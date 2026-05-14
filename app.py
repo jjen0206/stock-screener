@@ -5894,6 +5894,33 @@ def _page_system_brief() -> None:
             "🌱 觀察中 = N < 30(樣本太小不下結論)"
         )
 
+    # === 動態權重明細(daily-notify 推播排序加權生效中) ===
+    with st.expander("⚖️ 動態權重明細", expanded=False):
+        from src.strategy_weighting import get_strategy_weight_details
+        with db.get_conn() as conn:
+            weight_rows = get_strategy_weight_details(conn)
+        if not weight_rows:
+            st.info("尚無策略樣本(pick_outcomes 還沒結算)")
+        else:
+            df_w = pd.DataFrame([
+                {
+                    "策略": r["strategy"],
+                    "樣本數 (N)": r["n"],
+                    "命中率 (WR)": (
+                        f"{r['wr'] * 100:.1f}%"
+                        if r["wr"] is not None else "—"
+                    ),
+                    "權重": f"{r['weight']:.2f}",
+                    "判定": r["verdict"],
+                }
+                for r in weight_rows
+            ])
+            st.dataframe(df_w, use_container_width=True, hide_index=True)
+        st.caption(
+            "權重 = clip(WR / 0.5, 0.5, 1.5),套到 daily-notify 推播排序的 ml_prob 上。"
+            "當前生效中,可在 `src/notifier.py` 改 `STRATEGY_DYNAMIC_WEIGHT_ENABLED = False` 關掉。"
+        )
+
     # === ML 表現 ===
     st.markdown("### 🤖 ML 模型表現")
     ml = brief.get("ml_performance") or {}
