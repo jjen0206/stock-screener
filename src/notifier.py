@@ -36,6 +36,10 @@ from src.universe import TW_TOP_50
 _MAX_ATTEMPTS = 3
 _RETRY_DELAY_SECS = 1.0
 
+# 動態策略權重 — 開 True 讓 _compute_pick_score 套 30d hit rate weight,
+# 改 False 退回 phase 1 純 ml_prob 排序(出事時 kill-switch)。
+STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
+
 
 logger = logging.getLogger(__name__)
 
@@ -238,21 +242,35 @@ def _compute_pick_score(
     ml_prob: float | None,
     matched_strategies: list[str] | None,
     analyst_target_mean: float | None = None,
+    strategy_weights: dict[str, float] | None = None,
 ) -> tuple[float, float, int, str]:
     """Pick 排序 key — 共用於 _select_top_picks 與 format_yesterday_recap。
 
     Tuple 字典序 ascending → 排前面的 picks 數值越小:
       - analyst_target_mean 有值 → -100(法人共識 picks 整體加分)
-      - ml_prob desc
+      - ml_prob × avg(strategy_weights) desc(命中率高的策略上排)
       - 命中策略多 desc
       - sid asc(穩定 tiebreaker)
 
+    strategy_weights: dict[strategy_key, weight] — 由
+    src.strategy_weighting.get_strategy_weights_30d 產;missing key 預設 1.0。
+    None 或空 dict → 退回 phase 1 純 ml_prob 排序(legacy 行為)。
+
     讓 recap 算出來的 top picks 順序跟昨天實際推播的順序一致(M4/U1 known issue)。
     """
+    matched = matched_strategies or []
+    if strategy_weights and matched:
+        avg_w = (
+            sum(strategy_weights.get(s, 1.0) for s in matched)
+            / len(matched)
+        )
+    else:
+        avg_w = 1.0
+    weighted_ml = (ml_prob or 0.0) * avg_w
     return (
         -(100 if analyst_target_mean else 0),
-        -(ml_prob or 0.0),
-        -len(matched_strategies or []),
+        -weighted_ml,
+        -len(matched),
         sid,
     )
 
@@ -391,6 +409,18 @@ def _select_top_picks(
     # 算「命中策略平均勝率」加進推播。低樣本(<10 fires)由 load 函式過濾。
     strategy_wr_map = db.load_latest_strategy_backtest()
 
+    # 動態策略權重 — 從 pick_outcomes 近 30 天算 hit rate,套到 _compute_pick_score
+    # 的 ml_prob 排序。STRATEGY_DYNAMIC_WEIGHT_ENABLED=False 時退回純 ml_prob 排序。
+    strategy_weights: dict[str, float] = {}
+    if STRATEGY_DYNAMIC_WEIGHT_ENABLED:
+        try:
+            from src.strategy_weighting import get_strategy_weights_30d
+            with db.get_conn() as conn:
+                strategy_weights = get_strategy_weights_30d(conn)
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("[NOTIFIER] 撈動態策略權重失敗,退回純 ml_prob: %s", ex)
+            strategy_weights = {}
+
     # 撈 analyst_targets(法人目標價共識)— 平日 watchlist+picks / 週日全市場
     # fetch 進 SQLite。bulk lookup 一次,enrich 進 pick dict 後排序加分。
     from src.analyst_targets import get_analyst_targets_for_sids
@@ -488,6 +518,7 @@ def _select_top_picks(
         ml_prob=p["ml_prob"],
         matched_strategies=p["matched_strategies"],
         analyst_target_mean=p.get("analyst_target_mean"),
+        strategy_weights=strategy_weights,
     ))
     out = qualified[:top_n]
     for i, p in enumerate(out, start=1):
@@ -738,11 +769,23 @@ def format_yesterday_recap(
     except Exception:  # noqa: BLE001
         analyst_target_map = {}
 
+    # 跟 _select_top_picks 一致:讀同一份 30d weights 才能保 recap 順序與
+    # 實際推播一致(M4/U1 known issue)。flag off → 用空 dict 退回 legacy。
+    recap_weights: dict[str, float] = {}
+    if STRATEGY_DYNAMIC_WEIGHT_ENABLED:
+        try:
+            from src.strategy_weighting import get_strategy_weights_30d
+            with db.get_conn() as conn:
+                recap_weights = get_strategy_weights_30d(conn)
+        except Exception:  # noqa: BLE001
+            recap_weights = {}
+
     qualified.sort(key=lambda x: _compute_pick_score(
         sid=x[0],
         ml_prob=x[1],
         matched_strategies=x[2],
         analyst_target_mean=(analyst_target_map.get(x[0]) or {}).get("target_mean"),
+        strategy_weights=recap_weights,
     ))
     top_picks = qualified[:top_n]
 
