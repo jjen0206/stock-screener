@@ -110,22 +110,25 @@ def main() -> int:
     if not results:
         print(
             "兩個通道都跳過(沒設 secrets 或 --no-* 旗標關閉) — "
-            "exit 0,什麼都沒推。"
+            "推播略過,但仍會執行 paper_trades auto-seed。"
         )
-        return 0
-
-    parts = []
-    for ch in ("telegram", "discord"):
-        if ch in results:
-            parts.append(f"{ch.title()}: {'✅' if results[ch] else '❌'}")
-    print(f"推播結果 — {' | '.join(parts)}")
+    else:
+        parts = []
+        for ch in ("telegram", "discord"):
+            if ch in results:
+                parts.append(f"{ch.title()}: {'✅' if results[ch] else '❌'}")
+        print(f"推播結果 — {' | '.join(parts)}")
 
     # === Auto-seed paper_trades ===
-    # 推播完同步把今日 picks 寫進 paper_trades,主公不用再到 Streamlit 頁手點
-    # 「一鍵加入」。reuse paper_trading.bulk_add_paper_trades(也是 page 5343
-    # 「一鍵加入」用的同一隻 helper)經 (sid, entry_date) UNIQUE 約束去重。
+    # 推播完(或推播被關掉)都要同步把今日 picks 寫進 paper_trades,主公不用再
+    # 到 Streamlit 頁手點「一鍵加入」。reuse paper_trading.bulk_add_paper_trades
+    # (也是 page 5343 「一鍵加入」用的同一隻 helper)經 (sid, entry_date) UNIQUE
+    # 約束去重。
     # dry-run 不寫(避免本機測試污染 paper_trades);任一例外都不擋整支腳本 —
     # exit code 仍以推播結果為準。
+    # 關鍵不變量:--no-telegram --no-discord 時 results={} 也必須跑 auto-seed,
+    # 不能因為「沒任何通道推」就 early return 跳過(GH Actions inline backtest
+    # step 倚賴 paper_trades 有今日 row 才有東西可算)。
     if args.dry_run:
         print("[NOTIFY] dry-run: 跳過 paper_trades auto-seed", flush=True)
     else:
@@ -150,6 +153,9 @@ def main() -> int:
                 flush=True,
             )
 
+    # 沒推任何通道 → exit 0(被使用者明確關掉,不是失敗)
+    if not results:
+        return 0
     # 任一個成功就視為整體 OK(GitHub Actions 不要因為某個通道掛掉就紅)
     return 0 if any(results.values()) else 1
 
