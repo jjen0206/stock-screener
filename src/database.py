@@ -439,6 +439,29 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_pick_shap_explanations_date "
     "ON pick_shap_explanations(pick_date DESC)",
+    # vbt_grid_results:vectorbt 策略 grid search 結果(2026-05-14 加)。
+    # 每組 (strategy, params_hash) 唯一,UPSERT 允許重跑覆蓋。params_json 存原始
+    # 參數 dict(讓 UI 顯示「最佳組合」),metrics 來自 vbt.Portfolio.stats():
+    # total_return / sharpe / max_drawdown / win_rate。n_trades 給樣本量參考。
+    # 不自動推進為 production default — 只是「建議」讓主公手動採用。
+    """
+    CREATE TABLE IF NOT EXISTS vbt_grid_results (
+        strategy       TEXT NOT NULL,
+        params_hash    TEXT NOT NULL,    -- sha1(json.dumps(params, sort_keys=True))[:12]
+        params_json    TEXT NOT NULL,    -- JSON dict 原始參數
+        period_start   TEXT NOT NULL,    -- 'YYYY-MM-DD'
+        period_end     TEXT NOT NULL,
+        n_trades       INTEGER NOT NULL,
+        total_return   REAL,             -- 百分比 e.g. 12.34 = 12.34%
+        sharpe         REAL,
+        max_drawdown   REAL,             -- 百分比(正值 e.g. 8.12 = 8.12%)
+        win_rate       REAL,             -- 百分比
+        generated_at   TEXT NOT NULL,
+        PRIMARY KEY (strategy, params_hash)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_vbt_grid_strategy "
+    "ON vbt_grid_results(strategy, sharpe DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -2823,6 +2846,79 @@ def load_strategy_backtest_for_period(
             "ORDER BY win_rate DESC",
             (period_end,),
         ).fetchall()
+    if not rows:
+        return _pd.DataFrame()
+    return _pd.DataFrame([dict(r) for r in rows])
+
+
+# === vbt_grid_results:vectorbt grid search 結果(2026-05-14 加) ===
+
+def upsert_vbt_grid_results(
+    rows: list[dict],
+    db_path: str | Path | None = None,
+) -> int:
+    """bulk UPSERT vbt_grid_results。
+
+    rows 每筆需含:strategy, params_hash, params_json, period_start, period_end,
+    n_trades, total_return, sharpe, max_drawdown, win_rate, generated_at。
+    回 row count。
+    """
+    if not rows:
+        return 0
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO vbt_grid_results (
+                strategy, params_hash, params_json, period_start, period_end,
+                n_trades, total_return, sharpe, max_drawdown, win_rate, generated_at
+            ) VALUES (
+                :strategy, :params_hash, :params_json, :period_start, :period_end,
+                :n_trades, :total_return, :sharpe, :max_drawdown, :win_rate, :generated_at
+            )
+            ON CONFLICT(strategy, params_hash) DO UPDATE SET
+                params_json=excluded.params_json,
+                period_start=excluded.period_start,
+                period_end=excluded.period_end,
+                n_trades=excluded.n_trades,
+                total_return=excluded.total_return,
+                sharpe=excluded.sharpe,
+                max_drawdown=excluded.max_drawdown,
+                win_rate=excluded.win_rate,
+                generated_at=excluded.generated_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def load_vbt_grid_results(
+    strategy: str | None = None,
+    top_n: int | None = None,
+    db_path: str | Path | None = None,
+):
+    """撈 vbt_grid_results,按 sharpe DESC 排。
+
+    Args:
+        strategy: None = 全策略;否則只撈該 strategy
+        top_n: None = 全部;否則只回前 N
+
+    回 pd.DataFrame(空 → 空 DataFrame)。
+    """
+    import pandas as _pd
+
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        sql = "SELECT * FROM vbt_grid_results"
+        args: list = []
+        if strategy:
+            sql += " WHERE strategy=?"
+            args.append(strategy)
+        sql += " ORDER BY sharpe DESC"
+        if top_n is not None and top_n > 0:
+            sql += " LIMIT ?"
+            args.append(int(top_n))
+        rows = conn.execute(sql, tuple(args)).fetchall()
     if not rows:
         return _pd.DataFrame()
     return _pd.DataFrame([dict(r) for r in rows])
