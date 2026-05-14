@@ -45,9 +45,30 @@ VOLUME_BREAKOUT_GRID: dict[str, list] = {
     "highest_lookback": [3, 5, 7, 10, 15, 20],
 }
 
+# bias_convergence:3 × 3 × 3 = 27 組合,涵蓋 default {-5.0, 1.0, 1.2}
+BIAS_CONVERGENCE_GRID: dict[str, list] = {
+    "bias_low": [-8.0, -5.0, -3.0],
+    "bias_high": [0.0, 1.0, 2.5],
+    "vol_ratio_min": [1.0, 1.2, 1.5],
+}
+
+# macd_golden:單 param,跨 6 個 level,涵蓋 default 1.0
+MACD_GOLDEN_GRID: dict[str, list] = {
+    "vol_ratio_min": [0.8, 1.0, 1.2, 1.5, 1.8, 2.0],
+}
+
+# ma_alignment:策略本身只吃 lookback_days(資料窗,非門檻);沒真正可 tune
+# 的閾值。仍跑 1 組 default 當 baseline,讓 UI 看到該策略也有 grid 條目。
+MA_ALIGNMENT_GRID: dict[str, list] = {
+    "lookback_days": [80],
+}
+
 # 未來其他策略 grid 補進這 dict;CLI --strategy 才能用
 STRATEGY_GRIDS: dict[str, dict[str, list]] = {
     "volume_breakout": VOLUME_BREAKOUT_GRID,
+    "bias_convergence": BIAS_CONVERGENCE_GRID,
+    "macd_golden": MACD_GOLDEN_GRID,
+    "ma_alignment": MA_ALIGNMENT_GRID,
 }
 
 
