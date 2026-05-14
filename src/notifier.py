@@ -585,6 +585,11 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     # ML 機率
     if ml_prob is not None:
         lines.append(f"   🤖 ML 機率 {ml_prob * 100:.0f}%")
+    # SHAP Top 3 feature 解釋(2026-05-14 加)— caller(notify_top_picks)從 cache
+    # 撈 / 算後注入 pick["shap_reason"]。沒有 / 失敗 → 整行 graceful skip。
+    shap_reason = pick.get("shap_reason")
+    if shap_reason:
+        lines.append(f"   {shap_reason}")
     # 法人共識目標價(yfinance / Gemini news)— 在勝率之前
     # 加 Δ 標示(主公 2026-05-08 拍板):跟 previous_target_mean 比 |Δ| ≥ 1%
     # 才顯示「(↑ +5.1%)」/「(↓ -3.2%)」,小變動省略避免雜訊。
@@ -943,6 +948,77 @@ def format_top_picks_message(
     return "\n".join(lines)
 
 
+def _enrich_picks_with_shap(picks: list[dict], target_date: str) -> None:
+    """對每張 pick 算 SHAP top-3 features → cache 進 pick_shap_explanations + 注入
+    pick["shap_reason"] 給 format_pick_block 顯示。
+
+    in-place 修改 picks(每筆加 "shap_reason" key,失敗時為空字串)。
+
+    Routing 邏輯跟 _select_top_picks 一致:取 matched_strategies 內最嚴格 ML
+    threshold 對應的 per-strategy model;沒命中 per-strategy 設定 → 用 general
+    short_pick.pkl。任何例外(shap 未裝 / model 缺 / extract_features 失敗)
+    silent skip 該檔(其他檔仍照常)。
+
+    Caller(notify_top_picks)在 format_top_picks_message 之前呼叫;Telegram
+    pick block 看到 pick["shap_reason"] 非空就加「🧠 SHAP: ...」一行。
+    """
+    if not picks:
+        return
+    try:
+        from src import config
+        from src.ml_predictor import (
+            extract_features, load_model, load_strategy_model,
+        )
+        from src.strategies import STRATEGY_ML_THRESHOLDS
+        from src.ml_shap import compute_pick_shap, format_shap_reason
+    except ImportError as e:
+        logger.warning("[NOTIFIER] SHAP enrich import 失敗,跳過:%s", e)
+        for p in picks:
+            p["shap_reason"] = ""
+        return
+
+    general_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
+    general_model = load_model(general_path) if general_path.exists() else None
+    strategy_models: dict[str, object] = {}
+
+    for p in picks:
+        sid = p.get("sid")
+        if not sid:
+            p["shap_reason"] = ""
+            continue
+        matched = p.get("matched_strategies") or []
+        cands = [
+            (s, STRATEGY_ML_THRESHOLDS[s]) for s in matched
+            if STRATEGY_ML_THRESHOLDS.get(s) is not None
+        ]
+        chosen = max(cands, key=lambda kv: kv[1])[0] if cands else None
+        if chosen and chosen not in strategy_models:
+            strategy_models[chosen] = load_strategy_model(chosen)
+        sm = strategy_models.get(chosen) if chosen else None
+        model = sm if sm is not None else general_model
+        strategy_key = chosen or "general"
+
+        if model is None:
+            p["shap_reason"] = ""
+            continue
+        try:
+            feats = extract_features(sid, target_date)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[NOTIFIER] extract_features %s failed: %s", sid, e)
+            feats = None
+        explanations = compute_pick_shap(sid, model, feats, top_k=3)
+        if explanations:
+            try:
+                db.save_shap_explanation(
+                    target_date, sid, strategy_key, explanations,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[NOTIFIER] save_shap_explanation %s failed: %s", sid, e,
+                )
+        p["shap_reason"] = format_shap_reason(explanations)
+
+
 def notify_top_picks(
     date: str | None = None,
     params: dict | None = None,
@@ -962,6 +1038,15 @@ def notify_top_picks(
     picks = _select_top_picks(
         date, top_n=top_n, confluence_n=confluence_n, params=params,
     )
+
+    # SHAP 解釋性 enrich + cache(2026-05-14 加)— picks list in-place 加
+    # "shap_reason" 給 format_pick_block 顯示。失敗不擋主推播(每筆 graceful skip)。
+    try:
+        _enrich_picks_with_shap(picks, date)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] SHAP enrich 整體失敗,picks 不帶 SHAP 行")
+        for p in picks:
+            p.setdefault("shap_reason", "")
 
     # 高信心精選(三維交集:法人連買 ≥3 + 千張戶進場 + ML 過門檻)— 跟 ≥2 共識
     # 並列獨立 section。helper 自己 graceful 空回 []。任何例外不擋主推播。
