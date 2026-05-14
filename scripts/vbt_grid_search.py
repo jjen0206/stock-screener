@@ -38,16 +38,25 @@ from src.vbt_backtest import (  # noqa: E402
 
 # === per-strategy grid 定義 ===
 
-# volume_breakout 兩 params:vbo_vol_ratio_min × highest_lookback = 4 × 4 = 16
+# volume_breakout 兩 params:vbo_vol_ratio_min × highest_lookback
+# 2026-05-14 加寬:7 × 6 = 42 組合(原 4 × 4 = 16 太稀疏)
 VOLUME_BREAKOUT_GRID: dict[str, list] = {
-    "vbo_vol_ratio_min": [1.5, 2.0, 2.5, 3.0],
-    "highest_lookback": [3, 5, 7, 10],
+    "vbo_vol_ratio_min": [1.0, 1.3, 1.6, 1.8, 2.0, 2.3, 2.5],
+    "highest_lookback": [3, 5, 7, 10, 15, 20],
 }
 
 # 未來其他策略 grid 補進這 dict;CLI --strategy 才能用
 STRATEGY_GRIDS: dict[str, dict[str, list]] = {
     "volume_breakout": VOLUME_BREAKOUT_GRID,
 }
+
+
+def _grid_size(grid: dict[str, list]) -> int:
+    """cartesian product 組合數。"""
+    n = 1
+    for v in grid.values():
+        n *= len(v)
+    return n
 
 
 def _latest_trading_date() -> str:
@@ -121,7 +130,7 @@ def main() -> int:
         universe = universe[: args.universe_size]
     print(f"[VBT] strategy={args.strategy}  universe={len(universe)}  "
           f"range=[{start_date}, {end_date}]")
-    print(f"[VBT] grid: {grid} → {len(grid['vbo_vol_ratio_min']) * len(grid['highest_lookback'])} 組合")
+    print(f"[VBT] grid: {grid} → {_grid_size(grid)} 組合")
 
     df = backtest_strategy_with_params(
         args.strategy,
