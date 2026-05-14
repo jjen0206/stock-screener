@@ -1,0 +1,46 @@
+name: Daily Notify Only (Fast Path)
+
+# Fast-path:只跑 notify,跳過 fetch / precompute / market_update。
+# Reuse 既有 daily_picks / pick_outcomes 資料(由 daily-notify.yml 平常產出)。
+# 用途:正規 daily-notify.yml 卡住 / 超時 / cancel 後,主公要立刻補推播時手動 trigger。
+# 預估 5-10 分鐘(只 install deps + 跑 daily_notify.py)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Target date (YYYY-MM-DD), 留空跑當日"
+        required: false
+        default: ""
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 只跑推播 — reuse 既有 SQLite / CSV 資料,不重抓 / 不重算策略。
+      - name: Run daily notify
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            python scripts/daily_notify.py --date "${{ inputs.date }}"
+          else
+            python scripts/daily_notify.py
+          fi
