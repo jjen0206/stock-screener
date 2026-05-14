@@ -189,3 +189,127 @@ def test_pure_stock_universe_empty_when_no_history(tmp_db):
     """完全沒歷史 → 回空 list,不爆。"""
     db.upsert_stocks([{"stock_id": "2330", "name": "台積電", "market": "TW"}])
     assert universe.pure_stock_universe(min_history=20) == []
+
+
+# === load_theme_universe(讀 data/themes/*.yaml union)===
+
+def test_load_theme_universe_reads_yaml_union(tmp_path):
+    """讀目錄內 *.yaml 的 sids: 清單 union 成 sorted list。"""
+    (tmp_path / "a.yaml").write_text(
+        'sids:\n  - "2330"\n  - "2454"\n', encoding="utf-8",
+    )
+    (tmp_path / "b.yaml").write_text(
+        'sids:\n  - "2330"\n  - "3680"\n', encoding="utf-8",
+    )
+    sids = universe.load_theme_universe(themes_dir=tmp_path)
+    assert sids == ["2330", "2454", "3680"]
+
+
+def test_load_theme_universe_missing_dir_returns_empty(tmp_path):
+    """目錄不存在 → 回空 list。"""
+    assert universe.load_theme_universe(themes_dir=tmp_path / "nope") == []
+
+
+def test_load_theme_universe_handles_malformed_yaml(tmp_path):
+    """單檔 yaml 解析失敗 → 跳過該檔,其他繼續算。"""
+    (tmp_path / "good.yaml").write_text(
+        'sids:\n  - "2330"\n', encoding="utf-8",
+    )
+    (tmp_path / "bad.yaml").write_text(
+        ":::not valid yaml: [\n", encoding="utf-8",
+    )
+    sids = universe.load_theme_universe(themes_dir=tmp_path)
+    assert sids == ["2330"]
+
+
+def test_load_theme_universe_real_themes_dir():
+    """跑生產 data/themes 目錄 — 該回 ≥ 100 檔(9 個 yaml, ~144 union)。"""
+    sids = universe.load_theme_universe()
+    assert len(sids) >= 100, f"主題 union 應 ≥ 100,實際 {len(sids)}"
+    assert "2330" in sids
+    assert "2317" in sids  # AI 主題核心
+
+
+# === get_volume_top_n(撈最近 N 天平均量 Top M)===
+
+def _seed_daily_prices_for_volume(today_iso="2026-04-28", days=5):
+    """seed 不同量級的個股,給 get_volume_top_n 測試用。"""
+    from datetime import date, timedelta
+    db.upsert_stocks([
+        {"stock_id": "2330", "name": "台積電", "market": "TW"},
+        {"stock_id": "2317", "name": "鴻海", "market": "TW"},
+        {"stock_id": "0050", "name": "元大台灣50", "market": "TW"},  # ETF
+        {"stock_id": "8888", "name": "small", "market": "TW"},
+    ])
+    today = date.fromisoformat(today_iso)
+    rows = []
+    # 量級:2330 > 2317 > 0050 > 8888,但 0050 ETF 該被過濾
+    volumes = {"2330": 50_000_000, "2317": 30_000_000,
+               "0050": 100_000_000, "8888": 1_000}
+    for sid, vol in volumes.items():
+        for i in range(days):
+            d = (today - timedelta(days=i)).isoformat()
+            rows.append({
+                "stock_id": sid, "date": d,
+                "open": 100, "high": 105, "low": 95, "close": 100,
+                "volume": vol, "trading_money": None,
+                "trading_turnover": None, "spread": 0.0,
+            })
+    db.upsert_daily_prices(rows)
+
+
+def test_get_volume_top_n_orders_by_avg_volume(tmp_db):
+    """量大的排前,ETF 被過濾。"""
+    _seed_daily_prices_for_volume()
+    sids = universe.get_volume_top_n(top_n=10, lookback_days=5)
+    # 2330 > 2317 > 8888;0050 ETF 過濾
+    assert sids == ["2330", "2317", "8888"]
+
+
+def test_get_volume_top_n_limits_to_top_n(tmp_db):
+    """top_n=1 只回最大量那檔。"""
+    _seed_daily_prices_for_volume()
+    sids = universe.get_volume_top_n(top_n=1, lookback_days=5)
+    assert sids == ["2330"]
+
+
+def test_get_volume_top_n_empty_db_returns_empty(tmp_db):
+    """daily_prices 空 → 回 []。"""
+    assert universe.get_volume_top_n(top_n=10) == []
+
+
+# === build_institutional_universe(整合多源 union)===
+
+def test_build_institutional_universe_unions_sources(tmp_db, tmp_path, monkeypatch):
+    """Top-volume + theme + watchlist + TOP_50 union 成 sorted unique list。"""
+    _seed_daily_prices_for_volume()
+    # mock theme
+    monkeypatch.setattr(
+        universe, "load_theme_universe", lambda: ["2454", "3680"],
+    )
+    # mock watchlist
+    monkeypatch.setattr(
+        universe, "load_watchlist", lambda: [("8069", "元太")],
+    )
+    sids = universe.build_institutional_universe(
+        top_volume_n=2, include_top50=True,
+    )
+    # Top_50 含 2330/2454 等;Top-volume = 2330/2317;
+    # theme = 2454/3680;watchlist = 8069
+    assert "2330" in sids
+    assert "2317" in sids  # volume Top
+    assert "2454" in sids  # theme + TOP_50
+    assert "3680" in sids  # theme
+    assert "8069" in sids  # watchlist
+    # sorted
+    assert sids == sorted(sids)
+
+
+def test_build_institutional_universe_excludes_top50_flag(tmp_db, monkeypatch):
+    """include_top50=False → TOP_50 不納入。"""
+    monkeypatch.setattr(universe, "load_theme_universe", lambda: [])
+    monkeypatch.setattr(universe, "load_watchlist", lambda: [])
+    sids = universe.build_institutional_universe(
+        top_volume_n=0, include_top50=False,
+    )
+    assert sids == []

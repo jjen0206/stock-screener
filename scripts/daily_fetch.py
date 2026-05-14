@@ -1,9 +1,10 @@
-"""排程入口:全市場 bulk 抓價量 + 對 TOP_50 + watchlist 抓 institutional。
+"""排程入口:全市場 bulk 抓價量 + 對拓寬 universe 抓 institutional。
 
 設計:
 - daily_prices 用 TWSE/TPEx bulk endpoint(免 token + 一次拿全市場 ~2360 檔 < 30 秒)
-- institutional **lazy load**:只對 TW_TOP_50 + watchlist (~70 檔) 抓
-  避免 2360 檔 × FinMind = 燒爆 1500/小時 token 限額
+- institutional **拓寬 universe**:成交量 Top 300 + theme(~144 檔)+ watchlist
+  + TW_TOP_50 union(主公 2026-05-15 拍板,從 49 檔擴到 300-500 檔)
+  per-call sleep 0.4s 控速避開 FinMind 免費 600/hr token 上限
 - universe 順手 init(第一次跑會把全市場 stock_id 寫入 stocks 表)
 
 GitHub Actions runner (Azure IP) 不被 TWSE 擋,所以 bulk endpoint 可用。
@@ -31,7 +32,12 @@ from src.data_fetcher import (  # noqa: E402
     fetch_institutional,
     validate_daily_price_sanity,
 )
-from src.universe import TW_TOP_50, get_full_universe, load_watchlist  # noqa: E402
+from src.universe import (  # noqa: E402
+    TW_TOP_50,
+    build_institutional_universe,
+    get_full_universe,
+    load_watchlist,
+)
 
 # 健康警戒線:bulk daily_prices 抓到少於這數量視為異常 → exit 1 讓 GH Actions 標紅
 _MIN_BULK_ROWS_HEALTHY = 2000
@@ -40,6 +46,14 @@ _MIN_BULK_ROWS_HEALTHY = 2000
 # 還沒 publish 今日資料,sleep 後 retry。最多 3 次,間隔 5 分鐘。
 _BULK_RETRY_MAX = 3
 _BULK_RETRY_WAIT_SECS = 300
+
+# institutional 拓寬 universe 配置(主公 2026-05-15 拍板)
+# Top 300 volume + theme universe (~144) + watchlist + TW_TOP_50 union ≈ 350-500 檔
+_INST_TOP_VOLUME_N = 300
+_INST_VOLUME_LOOKBACK = 5
+# Per-call sleep:FinMind 免費 token 600/hr ≈ 10 calls/min → 6s/call 安全
+# 但 _api_call 內部已有 retry,500 檔 × 0.4s = 200s,搭配 retry buffer 仍在 1hr 內。
+_INST_PER_CALL_SLEEP_SECS = 0.4
 
 
 def _bulk_fetch_with_freshness_retry() -> "object":
@@ -156,17 +170,31 @@ def run(institutional_days: int = 7) -> dict:
         bulk_rows = db.upsert_daily_prices(rows)
         print(f"[FETCH] 寫入 {bulk_rows} 筆 daily_prices", flush=True)
 
-    # 3. 對 TW_TOP_50 + watchlist 抓 institutional(lazy load 邏輯)
-    inst_sids = set(s for s, _ in TW_TOP_50)
-    for s, _ in load_watchlist():
-        inst_sids.add(s)
-    inst_sids_list = sorted(inst_sids)
+    # 3. 對拓寬 universe 抓 institutional(主公 2026-05-15 拍板拓寬)
+    # = Top 300 by volume + theme universe (~144) + watchlist + TW_TOP_50
+    # 主公觀察:每日 49 檔太窄 → 「大戶進場」訊號幾乎抓不到 → 拓寬到 ~300-500
+    inst_sids_list = build_institutional_universe(
+        top_volume_n=_INST_TOP_VOLUME_N,
+        lookback_days=_INST_VOLUME_LOOKBACK,
+    )
+    # build_ 失敗 / SQLite 還沒填價量(GH Actions fresh container)→ 退回舊
+    # TW_TOP_50 + watchlist union 保底
+    if not inst_sids_list:
+        fallback = set(s for s, _ in TW_TOP_50)
+        for s, _ in load_watchlist():
+            fallback.add(s)
+        inst_sids_list = sorted(fallback)
+        print(
+            f"[FETCH] WARN: build_institutional_universe 回空 → fallback "
+            f"TOP_50 + watchlist = {len(inst_sids_list)} 檔",
+            flush=True,
+        )
     today = date.today().isoformat()
     start = (date.today() - timedelta(days=institutional_days)).isoformat()
 
     print(
-        f"[FETCH] 對 {len(inst_sids_list)} 檔(TOP_50 + watchlist)抓 institutional "
-        f"近 {institutional_days} 天...",
+        f"[FETCH] 對 {len(inst_sids_list)} 檔(Top {_INST_TOP_VOLUME_N} 量 + "
+        f"主題 + watchlist + TOP_50)抓 institutional 近 {institutional_days} 天...",
         flush=True,
     )
     inst_ok = 0
@@ -183,7 +211,12 @@ def run(institutional_days: int = 7) -> dict:
                     f"[FETCH]   {sid} institutional fail: {type(e).__name__}",
                     flush=True,
                 )
-        if i % 10 == 0:
+        # Rate-limit:FinMind 免費 600/hr,sleep 0.4s 確保整批 < 60 min。
+        # 連續 fail(多次 RuntimeError)時可能想退避更久,但留給 _api_call
+        # 內部 retry / FinMindAPIError 觸發。
+        if _INST_PER_CALL_SLEEP_SECS > 0 and i < n_inst:
+            time.sleep(_INST_PER_CALL_SLEEP_SECS)
+        if i % 50 == 0:
             print(f"[FETCH]   institutional {i}/{n_inst}...", flush=True)
 
     # 4. 對 watchlist 個股抓 90 天 daily_price 歷史(補 ATR/漲跌% 等需要歷史的指標)
@@ -247,7 +280,8 @@ def run(institutional_days: int = 7) -> dict:
     )
     print(
         f"  institutional: {inst_ok}/{n_inst} success "
-        f"(TW_TOP_50 + watchlist), fail={inst_fail}",
+        f"(Top {_INST_TOP_VOLUME_N} 量 + 主題 + watchlist + TOP_50), "
+        f"fail={inst_fail}",
         flush=True,
     )
     if sanity_issues:

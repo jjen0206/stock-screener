@@ -6,8 +6,21 @@ TW_TOP_50:
 
 load_watchlist():
   讀取使用者自訂關注清單(`data/watchlist.txt`),一行一個股號,# 開頭算註解。
+
+load_theme_universe():
+  讀取 `data/themes/*.yaml` 所有 sids 的 union,給 institutional/ shareholder
+  concentration backfill 當主題基底用。
+
+get_volume_top_n():
+  依最近 N 個交易日的平均成交量,從 daily_prices 算 Top M 檔。
+
+build_institutional_universe():
+  Top-volume + theme + TW_TOP_50 + watchlist 的 union,給 daily_fetch 抓
+  institutional 用(拓寬到主公拍板的 300-500 檔涵蓋)。
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 from src import config, database as db
 
@@ -214,7 +227,150 @@ def pure_stock_universe(min_history: int = 20) -> list[str]:
     ]
 
 
+THEMES_DIR = config.PROJECT_ROOT / "data" / "themes"
+
+
+def load_theme_universe(themes_dir: Path | None = None) -> list[str]:
+    """讀 `data/themes/*.yaml`,union 所有檔案內 `sids:` 清單。
+
+    YAML schema:
+        sids:
+          - "2330"
+          - "2317"
+          ...
+
+    沒有 yaml 套件 / 目錄不存在 / yaml 解析失敗 → 回 []。
+    回傳順序穩定:升序去重。
+    """
+    d = themes_dir or THEMES_DIR
+    if not d.exists():
+        return []
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return []
+    sids: set[str] = set()
+    for fp in sorted(d.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(fp.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            continue
+        raw_sids = data.get("sids") or []
+        if not isinstance(raw_sids, list):
+            continue
+        for s in raw_sids:
+            if s is None:
+                continue
+            sids.add(str(s).strip())
+    return sorted(s for s in sids if s)
+
+
+def get_volume_top_n(
+    top_n: int = 300,
+    lookback_days: int = 5,
+    db_path=None,
+) -> list[str]:
+    """依最近 `lookback_days` 個交易日的平均成交量,從 daily_prices 算 Top N 檔。
+
+    過濾:排除 TAIEX(大盤指數,not 個股)+ 非純股票(ETF / 槓桿 / 反向 / 債券)。
+    回傳順序依平均量降序;daily_prices 空 / 任何錯誤 → []。
+    """
+    if top_n < 1:
+        return []
+    try:
+        with db.get_conn(db_path) as conn:
+            row = conn.execute(
+                "SELECT MAX(date) AS d FROM daily_prices "
+                "WHERE stock_id != 'TAIEX'"
+            ).fetchone()
+            if not row or not row["d"]:
+                return []
+            latest = row["d"]
+            # 撈最近 lookback_days 個 distinct 日期(避免假日 / 空白日子拉低)
+            recent_dates = conn.execute(
+                "SELECT DISTINCT date FROM daily_prices "
+                "WHERE stock_id != 'TAIEX' AND date <= ? "
+                "ORDER BY date DESC LIMIT ?",
+                (latest, lookback_days),
+            ).fetchall()
+            if not recent_dates:
+                return []
+            min_date = recent_dates[-1]["date"]
+            # 聚合:平均量(SUM/COUNT 避開 NULL),要 stocks 表 join 拿 name
+            # 走過濾 ETF / 衍生品(is_pure_stock 同邏輯,SQL 端先粗刪 "00" 起頭)
+            rows = conn.execute(
+                "SELECT dp.stock_id, s.name, "
+                "       AVG(COALESCE(dp.volume, 0)) AS avg_vol "
+                "FROM daily_prices dp "
+                "LEFT JOIN stocks s ON s.stock_id = dp.stock_id "
+                "WHERE dp.date BETWEEN ? AND ? "
+                "  AND dp.stock_id != 'TAIEX' "
+                "  AND dp.stock_id NOT LIKE '00%' "
+                "GROUP BY dp.stock_id "
+                "HAVING avg_vol > 0 "
+                "ORDER BY avg_vol DESC "
+                "LIMIT ?",
+                (min_date, latest, top_n * 2),  # 多取 2x 給 python 端過濾
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+
+    out: list[str] = []
+    for r in rows:
+        sid = r["stock_id"]
+        name = r["name"]
+        if not is_pure_stock(sid, name):
+            continue
+        out.append(sid)
+        if len(out) >= top_n:
+            break
+    return out
+
+
+def build_institutional_universe(
+    top_volume_n: int = 300,
+    include_themes: bool = True,
+    include_watchlist: bool = True,
+    include_top50: bool = True,
+    lookback_days: int = 5,
+    db_path=None,
+) -> list[str]:
+    """組合 institutional 抓取的擴大 universe:Top-volume + 主題 + watchlist + Top50。
+
+    主公 2026-05-15 拍板:每日 institutional 抓 49 檔太窄(無大戶訊號)→
+    擴到 ~300-500 檔(成交量 Top N + theme universe + watchlist + Top50 union)。
+
+    Args:
+        top_volume_n: 成交量 Top N(預設 300)
+        include_themes: 是否納入 `data/themes/*.yaml` 主題(~144 檔)
+        include_watchlist: 是否納入 `data/watchlist.txt`
+        include_top50: 是否納入 TW_TOP_50(藍籌墊底,新上市量還沒衝高時保險)
+        lookback_days: 計算成交量 Top N 用幾天平均(預設 5)
+
+    Returns:
+        list[str] 升序去重的 stock_id 清單。
+    """
+    sids: set[str] = set()
+    if include_top50:
+        sids.update(s for s, _ in TW_TOP_50)
+    if include_watchlist:
+        sids.update(s for s, _ in load_watchlist())
+    if include_themes:
+        sids.update(load_theme_universe())
+    if top_volume_n > 0:
+        sids.update(
+            get_volume_top_n(
+                top_n=top_volume_n,
+                lookback_days=lookback_days,
+                db_path=db_path,
+            )
+        )
+    return sorted(sids)
+
+
 __all__ = [
-    "TW_TOP_50", "WATCHLIST_PATH", "load_watchlist",
+    "TW_TOP_50", "WATCHLIST_PATH", "THEMES_DIR", "load_watchlist",
     "get_full_universe", "is_pure_stock", "pure_stock_universe",
+    "load_theme_universe", "get_volume_top_n",
+    "build_institutional_universe",
 ]

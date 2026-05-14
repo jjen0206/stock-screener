@@ -42,6 +42,14 @@ def mock_universe(monkeypatch):
         ("2330", "台積電"), ("2454", "聯發科"),
     ])
     monkeypatch.setattr(daily_fetch, "load_watchlist", lambda: [])
+    # build_institutional_universe 縮成 mock — 後續測試專注 institutional ok/fail
+    # 邏輯,universe 來源細節在 test_universe_build_institutional 覆蓋
+    monkeypatch.setattr(
+        daily_fetch, "build_institutional_universe",
+        lambda **kw: ["2330", "2454"],
+    )
+    # Rate-limit sleep 在 unit test 跳過(實環境留)
+    monkeypatch.setattr(daily_fetch, "_INST_PER_CALL_SLEEP_SECS", 0)
     return fake_universe
 
 
@@ -72,7 +80,7 @@ def test_run_calls_bulk_and_writes_daily_prices(tmp_db, mock_universe, monkeypat
 
 
 def test_run_calls_institutional_for_top50_only(tmp_db, mock_universe, monkeypatch):
-    """institutional 只該對 TW_TOP_50 + watchlist 抓,不對全 universe。"""
+    """institutional 對 build_institutional_universe 回的清單抓,不對全 universe。"""
     monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
                         lambda: pd.DataFrame())
     inst_calls = []
@@ -82,11 +90,35 @@ def test_run_calls_institutional_for_top50_only(tmp_db, mock_universe, monkeypat
     )
 
     summary = daily_fetch.run(institutional_days=7)
-    # Mock 的 TW_TOP_50 = 2 檔(2330, 2454),watchlist 0 檔 → 該 2 次
+    # Mock 的 build_institutional_universe 回 ["2330", "2454"] → 該 2 次
     assert summary["institutional_ok"] == 2
     assert sorted(inst_calls) == ["2330", "2454"]
-    # 不該對 3680 抓(在 universe 但不在 TW_TOP_50)
+    # 不該對 3680 抓(在 universe 但不在 institutional universe)
     assert "3680" not in inst_calls
+
+
+def test_run_falls_back_when_institutional_universe_empty(
+    tmp_db, mock_universe, monkeypatch,
+):
+    """build_institutional_universe 回空 → fallback TW_TOP_50 + watchlist。"""
+    monkeypatch.setattr(
+        daily_fetch, "build_institutional_universe", lambda **kw: [],
+    )
+    monkeypatch.setattr(daily_fetch, "load_watchlist", lambda: [
+        ("3680", "家登"),
+    ])
+    monkeypatch.setattr(daily_fetch, "fetch_all_daily_prices_bulk",
+                        lambda: pd.DataFrame())
+    inst_calls: list[str] = []
+    monkeypatch.setattr(
+        daily_fetch, "fetch_institutional",
+        lambda sid, s, e: inst_calls.append(sid),
+    )
+
+    summary = daily_fetch.run(institutional_days=7)
+    # fallback = TW_TOP_50 (2 檔) + watchlist (1 檔) = 3 檔
+    assert summary["institutional_ok"] == 3
+    assert sorted(inst_calls) == ["2330", "2454", "3680"]
 
 
 def test_run_continues_on_institutional_failure(tmp_db, mock_universe, monkeypatch):
