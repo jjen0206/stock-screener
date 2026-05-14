@@ -132,3 +132,75 @@ def test_vbt_grid_results_table_created(tmp_path, monkeypatch):
         assert not missing, f"vbt_grid_results 缺欄位:{missing}"
     finally:
         db._reset_path_cache()
+
+
+# ============================================================================
+# 多策略 selector 守住(2026-05-14 加:vbt grid 擴大到 4 策略)
+# ============================================================================
+
+def test_render_vbt_grid_tab_has_strategy_selectbox():
+    """_render_vbt_grid_tab 必須 wire `selectbox` 讓主公切策略 — 多策略時關鍵。
+
+    用 inspect.getsource 找 `st.selectbox(` 呼叫 + 唯一 key
+    (`vbt_grid_strategy_selector`)避免 streamlit duplicate-widget 報錯。
+    """
+    src = inspect.getsource(app._render_vbt_grid_tab)
+    assert "st.selectbox" in src, (
+        "_render_vbt_grid_tab 缺 st.selectbox — 多策略時主公沒法切換"
+    )
+    assert "vbt_grid_strategy_selector" in src, (
+        "_render_vbt_grid_tab 的 selectbox 缺唯一 key,可能跟其他 widget 衝撞"
+    )
+
+
+def test_render_vbt_grid_tab_has_recommendation_caption():
+    """_render_vbt_grid_tab 必須帶「軍師判讀」字串,給每策略一句建議。"""
+    src = inspect.getsource(app._render_vbt_grid_tab)
+    assert "軍師判讀" in src, (
+        "_render_vbt_grid_tab 缺「軍師判讀」caption — 主公沒得看建議"
+    )
+
+
+def test_vbt_grid_loads_multi_strategy_rows(tmp_path, monkeypatch):
+    """`load_vbt_grid_results` 須能撈多策略 rows;`strategy=` filter 須濾掉其他。
+
+    塞 3 策略 × 2 hash 共 6 row,驗證:
+      - 不帶 filter → 6 row
+      - filter=volume_breakout → 2 row
+      - filter=bias_convergence → 2 row
+    """
+    from src import config
+
+    db_file = tmp_path / "multi.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    db._reset_path_cache()
+    try:
+        rows = []
+        for strat in ("volume_breakout", "bias_convergence", "macd_golden"):
+            for h in ("aaaa1111bbbb", "cccc2222dddd"):
+                rows.append({
+                    "strategy": strat,
+                    "params_hash": h,
+                    "params_json": "{}",
+                    "period_start": "2025-11-14",
+                    "period_end": "2026-05-13",
+                    "n_trades": 10,
+                    "total_return": 1.0,
+                    "sharpe": 0.5,
+                    "max_drawdown": 5.0,
+                    "win_rate": 50.0,
+                    "generated_at": "2026-05-14T00:00:00+00:00",
+                })
+        assert db.upsert_vbt_grid_results(rows) == 6
+
+        full = db.load_vbt_grid_results()
+        assert len(full) == 6, f"不帶 filter 該回 6 row, 拿到 {len(full)}"
+
+        vb = db.load_vbt_grid_results(strategy="volume_breakout")
+        assert len(vb) == 2, f"volume_breakout 該 2 row, 拿到 {len(vb)}"
+        assert set(vb["strategy"]) == {"volume_breakout"}
+
+        bc = db.load_vbt_grid_results(strategy="bias_convergence")
+        assert len(bc) == 2, f"bias_convergence 該 2 row, 拿到 {len(bc)}"
+    finally:
+        db._reset_path_cache()
