@@ -1407,8 +1407,12 @@ def screen_taiex_alpha(
             continue
         if df["date"].iloc[-1] != date:
             continue
-        curr = float(df["close"].iloc[-1])
-        prev = float(df["close"].iloc[-2])
+        curr_raw = df["close"].iloc[-1]
+        prev_raw = df["close"].iloc[-2]
+        if curr_raw is None or prev_raw is None or pd.isna(curr_raw) or pd.isna(prev_raw):
+            continue
+        curr = float(curr_raw)
+        prev = float(prev_raw)
         if prev <= 0:
             continue
         stock_pct = (curr - prev) / prev * 100

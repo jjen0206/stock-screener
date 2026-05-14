@@ -1033,6 +1033,67 @@ def test_taiex_alpha_taiex_up_returns_empty(tmp_db):
     assert df.empty
 
 
+def test_taiex_alpha_skips_null_close_without_crashing(tmp_db):
+    """個股 close 為 NULL(DB 髒資料)→ 跳過該檔,不炸 TypeError。"""
+    # 大盤跌 1%,符合 short-circuit 之後的逐檔處理路徑
+    db.upsert_daily_prices([
+        {"stock_id": "TAIEX", "date": _DATES[0],
+         "open": 17000, "high": 17000, "low": 17000, "close": 17000, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "TAIEX", "date": _DATES[1],
+         "open": 16830, "high": 16830, "low": 16830, "close": 16830, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    db.upsert_stocks([
+        {"stock_id": "NULLY", "name": "髒資料股", "market": "TW"},
+        {"stock_id": "ALPHA", "name": "獨立股", "market": "TW"},
+    ])
+    # NULLY 今日 close = None → 應被跳過
+    db.upsert_daily_prices([
+        {"stock_id": "NULLY", "date": _DATES[0],
+         "open": 50, "high": 50, "low": 50, "close": 50, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "NULLY", "date": _DATES[1],
+         "open": 51, "high": 51, "low": 51, "close": None, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    # ALPHA 正常,應入選 — 證明 None guard 不影響後續處理
+    db.upsert_daily_prices([
+        {"stock_id": "ALPHA", "date": _DATES[0],
+         "open": 100, "high": 100, "low": 100, "close": 100, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "ALPHA", "date": _DATES[1],
+         "open": 102, "high": 102, "low": 102, "close": 102, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    df = strat.screen_taiex_alpha(_DATES[1], stock_ids=["NULLY", "ALPHA"])
+    assert len(df) == 1
+    assert df.iloc[0]["stock_id"] == "ALPHA"
+
+
+def test_taiex_alpha_skips_null_prev_close(tmp_db):
+    """昨日 close 為 NULL → 也應跳過,不炸。"""
+    db.upsert_daily_prices([
+        {"stock_id": "TAIEX", "date": _DATES[0],
+         "open": 17000, "high": 17000, "low": 17000, "close": 17000, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "TAIEX", "date": _DATES[1],
+         "open": 16830, "high": 16830, "low": 16830, "close": 16830, "volume": 0,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    db.upsert_stocks([{"stock_id": "PNULL", "name": "前日髒", "market": "TW"}])
+    db.upsert_daily_prices([
+        {"stock_id": "PNULL", "date": _DATES[0],
+         "open": 50, "high": 50, "low": 50, "close": None, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "PNULL", "date": _DATES[1],
+         "open": 51, "high": 51, "low": 51, "close": 52, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    df = strat.screen_taiex_alpha(_DATES[1], stock_ids=["PNULL"])
+    assert df.empty
+
+
 # === 策略 16:revenue_acceleration(Phase 1) ===
 
 def test_revenue_acceleration_yoy_above_30_accelerating_passes(tmp_db):
