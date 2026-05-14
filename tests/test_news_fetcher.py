@@ -454,3 +454,60 @@ def test_news_notify_skips_when_no_unsent(tmp_db, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "無 unsent 重要新聞" in out
     assert m_post.call_count == 0
+
+
+def test_news_notify_no_push_flags_keep_fetch_skip_channels(
+    tmp_db, monkeypatch, capsys,
+):
+    """暫停推播模式 — workflow 帶 --no-telegram --no-discord 上去後:
+    - news 仍正常 fetch 進 DB(供 ML 訓練 + Streamlit「新聞」頁顯示)
+    - Telegram + Discord 都 0 push call(requests.post 不被叫)
+    """
+    fake_raw = [
+        {
+            "出表日期": "1150505", "發言日期": "1150504",
+            "發言時間": "143005", "公司代號": "2330",
+            "公司名稱": "台積電",
+            "主旨 ": "重大訴訟",
+            "符合條款": "第10款",
+            "事實發生日": "1150504",
+            "說明": "...",
+        },
+    ]
+    monkeypatch.setattr(
+        news_fetcher, "fetch_twse_news_raw", lambda timeout=15: fake_raw,
+    )
+    monkeypatch.setattr(
+        news_notify_mod, "fetch_and_store_news",
+        lambda db_path=None: (
+            news_fetcher.normalize_twse_news(fake_raw),
+            *news_fetcher.upsert_news(news_fetcher.normalize_twse_news(fake_raw)),
+        )[:3],
+    )
+    _mock_eligible_sids_open(monkeypatch, {"2330"})
+
+    # 模擬 prod env 有 token / webhook — 若 push 沒被 flag 擋,真送會被觸發
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://fake.example/hook")
+
+    with patch("requests.post") as m_post:
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "news_notify.py",
+                "--no-telegram", "--no-discord", "--batch-size", "5",
+            ],
+        )
+        code = news_notify_mod.main()
+
+    assert code == 0
+    # 兩個 channel 都被 flag skip,push 應為 0 call
+    assert m_post.call_count == 0
+
+    # fetch 仍正常進 DB
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT sid, subject FROM news WHERE sid='2330'"
+        ).fetchall()
+    assert len(rows) >= 1, "暫停推播後 news 仍應 fetch 進 DB"
+    assert "重大訴訟" in (rows[0]["subject"] or "")

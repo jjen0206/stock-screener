@@ -58,6 +58,10 @@ jobs:
           if [ -n "${{ inputs.batch_size }}" ]; then
             ARGS="$ARGS --batch-size ${{ inputs.batch_size }}"
           fi
+          # TODO[2026-05-15]: 暫停 Telegram / Discord 推播 — fetch 仍進 DB
+          # (供 ML 訓練 + Streamlit「新聞」頁顯示),只 skip push。
+          # 要恢復推播,刪掉下一行即可(或改成 export NEWS_NOTIFY_PUSH=on 控制)。
+          ARGS="$ARGS --no-telegram --no-discord"
           echo "Running: python scripts/news_notify.py $ARGS"
           python scripts/news_notify.py $ARGS
 
