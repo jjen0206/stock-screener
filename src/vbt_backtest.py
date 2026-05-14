@@ -79,6 +79,31 @@ def expand_params_grid(grid: dict[str, Iterable]) -> list[dict[str, Any]]:
     ]
 
 
+def _clean_close_matrix(close: pd.DataFrame) -> pd.DataFrame:
+    """把 close DataFrame 清成 vbt 可用的格式(全 finite & > 0)。
+
+    步驟:
+    1. close <= 0 統一當 NaN(壞資料,e.g. 上櫃權證在沒成交日寫 0)
+    2. ffill 把「停牌 / 資料殘缺」中間的洞補成上一個有效價
+    3. bfill 把「上市前 / 資料起點之前」的 leading NaN 補成第一個有效價
+    4. 還是全 NaN 的欄位丟掉(整檔都沒資料)
+
+    leading bfill 是安全的:screen_* 在資料不足的早期日子,lookback 達不到
+    `min_required` 會直接跳過該 sid,entries 不會在 bfill 出來的假價上觸發
+    → trade-level PnL 不受影響。
+
+    沒這層處理時(舊版只 ffill + 丟任意-NaN-欄),6 個月以上 universe 大量
+    sid 因 leading NaN 整欄被丟掉 → close.empty → grid 寫 0 trades
+    (即 macd_golden 全 0 trades 的成因)。
+    """
+    if close.empty:
+        return close
+    close = close.mask(close <= 0)
+    close = close.ffill().bfill()
+    valid_cols = close.columns[~close.isna().any()]
+    return close[valid_cols]
+
+
 def _build_signals_matrix(
     strategy_name: str,
     params: dict[str, Any],
@@ -150,11 +175,7 @@ def _build_signals_matrix(
         return None
 
     close = pd.DataFrame(close_data, index=pd.to_datetime(full_dates))
-    # vbt 要求 close 不能有 NaN(會 raise "order.price must be finite") — 用 ffill
-    # 處理停牌 / 上市前的洞;頭部還是 NaN 的 sid 整列丟掉,避免污染 portfolio。
-    close = close.ffill()
-    valid_cols = close.columns[~close.isna().any()]
-    close = close[valid_cols]
+    close = _clean_close_matrix(close)
     if close.empty:
         return None
 
@@ -381,6 +402,7 @@ __all__ = [
     "DEFAULT_SLIPPAGE",
     "DEFAULT_INIT_CASH",
     "DEFAULT_HOLD_DAYS",
+    "_clean_close_matrix",
     "expand_params_grid",
     "backtest_strategy_with_params",
     "persist_grid_results",

@@ -15,6 +15,8 @@ import pytest
 
 from src import config, database as db
 from src.vbt_backtest import (
+    _build_signals_matrix,
+    _clean_close_matrix,
     _hash_params,
     _make_exits_after_hold,
     _portfolio_stats,
@@ -83,6 +85,69 @@ def test_make_exits_after_hold_clamps_to_last_bar():
     exits = _make_exits_after_hold(entries, hold_days=3)
     # 3 天後超出 → 落在 index 4(clamp)
     assert exits.iloc[4, 0] == True  # noqa: E712
+
+
+# === _clean_close_matrix regression(macd_golden 全 0 trades 修法) ===
+
+def test_clean_close_matrix_preserves_col_with_leading_nan():
+    """leading NaN(資料起點之前)應被 bfill 補,column 不被丟。
+
+    舊版只 ffill + 丟任意-NaN-欄 → 6 個月 universe 大量 sid 被丟 → close.empty
+    → grid 寫 0 trades(macd_golden 全 0 trades 的成因)。
+    """
+    idx = pd.date_range("2025-01-01", periods=10, freq="D")
+    # AAA 前 3 天 NaN(上市前),BBB 全程都有
+    close = pd.DataFrame(
+        {
+            "AAA": [np.nan, np.nan, np.nan, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0],
+            "BBB": [100.0] * 10,
+        },
+        index=idx,
+    )
+    cleaned = _clean_close_matrix(close)
+    assert "AAA" in cleaned.columns, "leading-NaN 不應導致整欄被丟"
+    assert "BBB" in cleaned.columns
+    # leading NaN 被 bfill 成第一個有效價 50.0
+    assert cleaned.loc[idx[0], "AAA"] == 50.0
+    assert cleaned.loc[idx[2], "AAA"] == 50.0
+    # 原本有資料的不受影響
+    assert cleaned.loc[idx[3], "AAA"] == 50.0
+
+
+def test_clean_close_matrix_treats_zero_as_bad_and_ffills():
+    """close <= 0 當壞資料(權證沒成交日寫 0),ffill 補上一個有效價。
+
+    vbt.Portfolio.from_signals 對 price <= 0 會 raise
+    'order.price must be finite and greater than 0',
+    所以一定要在進 vbt 前處理掉。
+    """
+    idx = pd.date_range("2025-01-01", periods=6, freq="D")
+    # AAA 中間有 1 天 close=0(沒成交)
+    close = pd.DataFrame(
+        {"AAA": [10.0, 11.0, 0.0, 12.0, 13.0, 14.0]},
+        index=idx,
+    )
+    cleaned = _clean_close_matrix(close)
+    assert "AAA" in cleaned.columns
+    # 0.0 被當 NaN ffill → 11.0
+    assert cleaned.loc[idx[2], "AAA"] == 11.0
+    # 沒有 0 / 負 / NaN 殘留
+    assert (cleaned > 0).all().all()
+
+
+def test_clean_close_matrix_drops_all_nan_col():
+    """整欄都沒資料的 sid 還是要丟掉。"""
+    idx = pd.date_range("2025-01-01", periods=5, freq="D")
+    close = pd.DataFrame(
+        {
+            "AAA": [10.0, 11.0, 12.0, 13.0, 14.0],
+            "BBB": [np.nan] * 5,
+        },
+        index=idx,
+    )
+    cleaned = _clean_close_matrix(close)
+    assert "AAA" in cleaned.columns
+    assert "BBB" not in cleaned.columns
 
 
 # === _portfolio_stats fixture(不打 DB) ===
