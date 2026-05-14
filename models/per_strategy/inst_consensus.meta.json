@@ -1,6 +1,6 @@
 {
   "strategy": "inst_consensus",
-  "trained_at": "2026-05-10T15:17:56+00:00",
+  "trained_at": "2026-05-14T02:27:54+00:00",
   "samples": 5,
   "wins": 3,
   "win_rate": 0.6,

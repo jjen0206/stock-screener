@@ -1,0 +1,194 @@
+{
+  "tolerance": 0.02,
+  "rollback_count": 1,
+  "keep_count": 16,
+  "rows": [
+    {
+      "strategy": "volume_kd",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 1,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 2,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "ma_alignment",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 51,
+      "v3_status": "trained",
+      "v3_oob": 0.6204379562043796,
+      "v3_samples": 137,
+      "decision": "keep",
+      "reason": "v3 newly trained (samples 137); v1 was fallback"
+    },
+    {
+      "strategy": "bias_convergence",
+      "v1_status": "trained",
+      "v1_oob": 0.6513513513513514,
+      "v1_samples": 2220,
+      "v3_status": "trained",
+      "v3_oob": 0.6379888268156425,
+      "v3_samples": 2685,
+      "decision": "keep",
+      "reason": "OOB 0.6514 -> 0.6380 (\u0394=-0.0134) within tolerance"
+    },
+    {
+      "strategy": "macd_golden",
+      "v1_status": "trained",
+      "v1_oob": 0.531578947368421,
+      "v1_samples": 190,
+      "v3_status": "trained",
+      "v3_oob": 0.573076923076923,
+      "v3_samples": 260,
+      "decision": "keep",
+      "reason": "OOB 0.5316 -> 0.5731 (\u0394=+0.0415) within tolerance"
+    },
+    {
+      "strategy": "ma_squeeze_breakout",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 1,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 1,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "inst_consensus",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 5,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 5,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "bb_lower_rebound",
+      "v1_status": "trained",
+      "v1_oob": 0.6717171717171717,
+      "v1_samples": 198,
+      "v3_status": "trained",
+      "v3_oob": 0.6644295302013423,
+      "v3_samples": 298,
+      "decision": "keep",
+      "reason": "OOB 0.6717 -> 0.6644 (\u0394=-0.0073) within tolerance"
+    },
+    {
+      "strategy": "rsi_recovery",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 58,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 86,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "inst_silent_accum",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 10,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 10,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "volume_breakout",
+      "v1_status": "trained",
+      "v1_oob": 0.5523809523809524,
+      "v1_samples": 630,
+      "v3_status": "trained",
+      "v3_oob": 0.549936788874842,
+      "v3_samples": 791,
+      "decision": "keep",
+      "reason": "OOB 0.5524 -> 0.5499 (\u0394=-0.0024) within tolerance"
+    },
+    {
+      "strategy": "gap_up",
+      "v1_status": "trained",
+      "v1_oob": 0.5588865096359743,
+      "v1_samples": 467,
+      "v3_status": "trained",
+      "v3_oob": 0.52,
+      "v3_samples": 650,
+      "decision": "rollback",
+      "reason": "OOB 0.5589 -> 0.5200 (\u0394=-0.0389) > -0.02"
+    },
+    {
+      "strategy": "eps_acceleration",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 0,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 0,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "high_yield_stable",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 0,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 0,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "inst_oversold_reversal",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 23,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 33,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "taiex_alpha",
+      "v1_status": "trained",
+      "v1_oob": 0.5855535820011841,
+      "v1_samples": 1689,
+      "v3_status": "trained",
+      "v3_oob": 0.6045373665480427,
+      "v3_samples": 2248,
+      "decision": "keep",
+      "reason": "OOB 0.5856 -> 0.6045 (\u0394=+0.0190) within tolerance"
+    },
+    {
+      "strategy": "revenue_acceleration",
+      "v1_status": "fallback",
+      "v1_oob": null,
+      "v1_samples": 0,
+      "v3_status": "fallback",
+      "v3_oob": null,
+      "v3_samples": 0,
+      "decision": "keep",
+      "reason": "both fallback \u2014 no-op"
+    },
+    {
+      "strategy": "big_holder_inflow",
+      "v1_status": "missing",
+      "v1_oob": null,
+      "v1_samples": 0,
+      "v3_status": "trained",
+      "v3_oob": 0.7010309278350515,
+      "v3_samples": 388,
+      "decision": "keep",
+      "reason": "v3 newly trained (samples 388); v1 was missing"
+    }
+  ]
+}

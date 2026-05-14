@@ -1,55 +1,75 @@
 {
   "strategy": "taiex_alpha",
-  "trained_at": "2026-05-10T15:28:16+00:00",
-  "samples": 1689,
-  "wins": 839,
-  "win_rate": 0.49674363528715215,
+  "trained_at": "2026-05-14T02:34:16+00:00",
+  "samples": 2248,
+  "wins": 1161,
+  "win_rate": 0.516459074733096,
   "status": "trained",
-  "oob_score": 0.5855535820011841,
+  "oob_score": 0.6045373665480427,
   "feature_importances": [
     {
       "name": "macd_dif",
-      "importance": 0.1568351372058546
+      "importance": 0.16747547232538584
     },
     {
       "name": "atr_normalized",
-      "importance": 0.14825928665036633
+      "importance": 0.15425040849215393
     },
     {
       "name": "kd_d",
-      "importance": 0.12793774263203872
-    },
-    {
-      "name": "vol_ratio",
-      "importance": 0.12751551036704095
-    },
-    {
-      "name": "kd_k",
-      "importance": 0.11699064552488718
+      "importance": 0.12242695226129192
     },
     {
       "name": "macd_osc",
-      "importance": 0.11253617251088982
+      "importance": 0.10310093461702995
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.1022410643705097
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.099769927352316
     },
     {
       "name": "bias_pct",
-      "importance": 0.1096625123726648
+      "importance": 0.0938254332016765
     },
     {
       "name": "bb_position",
-      "importance": 0.09013158277090581
+      "importance": 0.08198748921192626
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.02526414131347553
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.019613815895629397
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.011680524249853845
     },
     {
       "name": "ma_alignment",
-      "importance": 0.005570611375303012
-    },
-    {
-      "name": "inst_5d",
-      "importance": 0.002693869166643851
+      "importance": 0.010771782666818963
     },
     {
       "name": "inst_10d",
-      "importance": 0.0018669294234048871
+      "importance": 0.0027240624662094037
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0027023461289047753
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.0021656454468178825
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0
     }
   ],
   "feature_names": [
@@ -63,7 +83,12 @@
     "bias_pct",
     "atr_normalized",
     "inst_5d",
-    "inst_10d"
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
   ],
   "min_train_samples": 100,
   "lookback_days": 200,

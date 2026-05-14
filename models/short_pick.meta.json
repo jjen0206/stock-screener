@@ -1,9 +1,9 @@
 {
-  "trained_at": "2026-05-10T15:11:05+00:00",
-  "samples": 540,
-  "n_train": 432,
-  "n_test": 108,
-  "features_count": 11,
+  "trained_at": "2026-05-14T02:13:27+00:00",
+  "samples": 1142,
+  "n_train": 913,
+  "n_test": 229,
+  "features_count": 16,
   "feature_names": [
     "kd_k",
     "kd_d",
@@ -15,16 +15,21 @@
     "bias_pct",
     "atr_normalized",
     "inst_5d",
-    "inst_10d"
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
   ],
   "min_history_days": 45,
   "metrics": {
-    "base_win_rate": 0.43703703703703706,
-    "accuracy": 0.6759259259259259,
-    "precision": 0.625,
-    "recall": 0.6382978723404256,
-    "f1": 0.631578947368421
+    "base_win_rate": 0.4553415061295972,
+    "accuracy": 0.6375545851528385,
+    "precision": 0.647887323943662,
+    "recall": 0.4423076923076923,
+    "f1": 0.5257142857142857
   },
   "model_type": "RandomForestClassifier",
-  "version": "v2"
+  "version": "v3"
 }

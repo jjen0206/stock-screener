@@ -1,0 +1,101 @@
+{
+  "strategy": "big_holder_inflow",
+  "trained_at": "2026-05-14T02:35:11+00:00",
+  "samples": 388,
+  "wins": 231,
+  "win_rate": 0.595360824742268,
+  "status": "trained",
+  "oob_score": 0.7010309278350515,
+  "feature_importances": [
+    {
+      "name": "kd_d",
+      "importance": 0.12699203271073592
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.10967280906161854
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.10395793661720512
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.09540291471358699
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.09472958333962223
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.08793033959122278
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.08715002429968532
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.08481852186441668
+    },
+    {
+      "name": "bb_position",
+      "importance": 0.08190237512454535
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.050541604052447356
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.030655551513475682
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.019021673086526004
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.015069457122357462
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.006268952491722
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.005886224410832608
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.0
+    }
+  ],
+  "feature_names": [
+    "kd_k",
+    "kd_d",
+    "macd_dif",
+    "macd_osc",
+    "ma_alignment",
+    "bb_position",
+    "vol_ratio",
+    "bias_pct",
+    "atr_normalized",
+    "inst_5d",
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
+  ],
+  "min_train_samples": 100,
+  "lookback_days": 200,
+  "target_pct": 0.05,
+  "stop_pct": 0.03,
+  "hold_days": 5,
+  "model_type": "RandomForestClassifier",
+  "n_estimators": 200,
+  "max_depth": 10
+}
