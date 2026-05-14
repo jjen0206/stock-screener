@@ -5678,16 +5678,19 @@ def _page_strategy_history() -> None:
         if not stats:
             st.info("📭 尚無聚合資料")
         else:
+            # pick_outcomes.return_d* 已用 percent 寫入(1.0 = +1%,由
+            # scripts/backtest_picks.py line 169 `* 100.0` 決定);UI 直接顯
+            # 不用再乘 100。hit_target / stopped_out 0/1 → * 100 變百分比。
             rows_view = []
             for s in stats:
                 key = s["strategy"]
                 rows_view.append({
                     "策略": STRATEGY_LABELS.get(key, key),
                     "命中數 N": int(s["n"] or 0),
-                    "D1 平均": f"{(s['avg_d1'] or 0) * 100:+.2f}%",
-                    "D3 平均": f"{(s['avg_d3'] or 0) * 100:+.2f}%",
-                    "D5 平均": f"{(s['avg_d5'] or 0) * 100:+.2f}%",
-                    "D10 平均": f"{(s['avg_d10'] or 0) * 100:+.2f}%",
+                    "D1 平均": f"{(s['avg_d1'] or 0):+.2f}%",
+                    "D3 平均": f"{(s['avg_d3'] or 0):+.2f}%",
+                    "D5 平均": f"{(s['avg_d5'] or 0):+.2f}%",
+                    "D10 平均": f"{(s['avg_d10'] or 0):+.2f}%",
                     "命中率(+3%)": f"{(s['hit_rate'] or 0) * 100:.1f}%",
                     "停損率(-3%)": f"{(s['stop_rate'] or 0) * 100:.1f}%",
                 })
@@ -5711,8 +5714,8 @@ def _page_strategy_history() -> None:
                 rows_view.append({
                     "推播日": r["pick_date"],
                     "命中數 N": int(r["n"] or 0),
-                    "D1 平均": f"{(r['avg_d1'] or 0) * 100:+.2f}%",
-                    "D5 平均": f"{(r['avg_d5'] or 0) * 100:+.2f}%",
+                    "D1 平均": f"{(r['avg_d1'] or 0):+.2f}%",
+                    "D5 平均": f"{(r['avg_d5'] or 0):+.2f}%",
                     "命中率": f"{(r['hit_rate'] or 0) * 100:.1f}%",
                     "停損率": f"{(r['stop_rate'] or 0) * 100:.1f}%",
                 })
@@ -5756,9 +5759,9 @@ def _page_strategy_history() -> None:
                     "股號": r["sid"],
                     "策略": STRATEGY_LABELS.get(key, key),
                     "進場價": f"{(r['entry_close'] or 0):.2f}",
-                    "D1": f"{(r['return_d1'] or 0) * 100:+.2f}%",
-                    "D5": f"{(r['return_d5'] or 0) * 100:+.2f}%",
-                    "D10": f"{(r['return_d10'] or 0) * 100:+.2f}%",
+                    "D1": f"{(r['return_d1'] or 0):+.2f}%",
+                    "D5": f"{(r['return_d5'] or 0):+.2f}%",
+                    "D10": f"{(r['return_d10'] or 0):+.2f}%",
                     "達標": "✅" if (r["hit_target"] or 0) >= 1 else "—",
                     "停損": "🛑" if (r["stopped_out"] or 0) >= 1 else "—",
                 })
