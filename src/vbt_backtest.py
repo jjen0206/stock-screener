@@ -150,6 +150,14 @@ def _build_signals_matrix(
         return None
 
     close = pd.DataFrame(close_data, index=pd.to_datetime(full_dates))
+    # vbt 要求 close 不能有 NaN(會 raise "order.price must be finite") — 用 ffill
+    # 處理停牌 / 上市前的洞;頭部還是 NaN 的 sid 整列丟掉,避免污染 portfolio。
+    close = close.ffill()
+    valid_cols = close.columns[~close.isna().any()]
+    close = close[valid_cols]
+    if close.empty:
+        return None
+
     entries = pd.DataFrame(
         False, index=close.index, columns=close.columns, dtype=bool,
     )
@@ -201,49 +209,49 @@ def _portfolio_stats(
         init_cash=init_cash,
     )
 
-    # pf.stats() 對多 column 是 DataFrame,對單 column 是 Series / scalar。
-    # 統一用 pf.total_return() + sharpe / drawdown,Series → 取 mean
-    def _to_scalar(val) -> float:
-        if isinstance(val, pd.Series):
-            return float(val.mean())
-        return float(val)
-
-    try:
-        total_return = _to_scalar(pf.total_return()) * 100
-    except Exception:  # noqa: BLE001
-        total_return = 0.0
-
-    try:
-        sharpe = _to_scalar(pf.sharpe_ratio())
-        if np.isnan(sharpe) or np.isinf(sharpe):
-            sharpe = 0.0
-    except Exception:  # noqa: BLE001
-        sharpe = 0.0
-
-    try:
-        max_dd = abs(_to_scalar(pf.max_drawdown())) * 100  # 百分比正值
-        if np.isnan(max_dd) or np.isinf(max_dd):
-            max_dd = 0.0
-    except Exception:  # noqa: BLE001
-        max_dd = 0.0
-
-    # win_rate from trades
+    # 多 column portfolio:每 column 多半只 1-2 trades(策略稀疏命中),per-column
+    # sharpe_ratio() 對沒 trades 的 column 是 NaN,mean 把全集稀釋掉。改用 trade-level
+    # PnL pct 計算策略整體指標:
+    #   - total_return = mean of trade returns × 100(每筆獨立部位的平均報酬 %)
+    #   - sharpe       = mean / std × sqrt(N)(annualized over the trade sample)
+    #   - max_drawdown = trade-level worst loss(% 正值)
+    #   - win_rate     = # winning trades / N × 100
+    n_trades = 0
+    total_return = 0.0
+    sharpe = 0.0
+    max_dd = 0.0
+    win_rate = 0.0
     try:
         trades = pf.trades
-        n_trades_raw = trades.count()
-        if isinstance(n_trades_raw, pd.Series):
-            n_trades = int(n_trades_raw.sum())
-        else:
-            n_trades = int(n_trades_raw)
-        if n_trades > 0:
-            win_rate = _to_scalar(trades.win_rate()) * 100
-            if np.isnan(win_rate):
-                win_rate = 0.0
-        else:
-            win_rate = 0.0
-    except Exception:  # noqa: BLE001
-        n_trades = 0
-        win_rate = 0.0
+        records = trades.records_readable
+        if records is not None and not records.empty:
+            ret_col = None
+            for c in ("Return", "Return [%]", "PnL", "Profit"):
+                if c in records.columns:
+                    ret_col = c
+                    break
+            if ret_col is not None:
+                returns = pd.to_numeric(records[ret_col], errors="coerce").dropna()
+                # Return 在 vbt 1.0 為 fraction(0.05 = +5%);% 欄位已 *100
+                if ret_col != "Return [%]":
+                    returns_pct = returns * 100
+                else:
+                    returns_pct = returns
+                n_trades = int(len(returns_pct))
+                if n_trades > 0:
+                    total_return = float(returns_pct.mean())
+                    win_rate = float((returns_pct > 0).sum() / n_trades * 100)
+                    max_dd = float(abs(returns_pct.min()))
+                    if n_trades >= 2 and float(returns_pct.std(ddof=1)) > 0:
+                        sharpe = float(
+                            returns_pct.mean()
+                            / returns_pct.std(ddof=1)
+                            * np.sqrt(n_trades)
+                        )
+                    if np.isnan(sharpe) or np.isinf(sharpe):
+                        sharpe = 0.0
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[VBT] portfolio stats compute failed: %s", e)
 
     return {
         "total_return": total_return,
