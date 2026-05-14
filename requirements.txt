@@ -21,6 +21,9 @@ joblib>=1.3.0
 # SHAP ML 解釋性(Top 3 feature 貢獻 — 告訴主公「為什麼這檔分數高」)
 shap>=0.44.0
 
+# vectorbt 回測引擎(grid search 策略級參數最佳化 — 17 策略 × N 組參數一次掃)
+vectorbt>=1.0.0
+
 # LLM(個股頁公司資訊 description / uniqueness / moat 生成,用 Gemini 1.5 Flash)
 # 註:Google 已將 google-generativeai 標 deprecated,等之後再 migrate google-genai
 google-generativeai>=0.7.0
