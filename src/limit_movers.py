@@ -281,7 +281,9 @@ def get_limit_down_after_up(
             for i in range(len(recent) - 1):
                 close_i = recent[i]["close"]
                 close_prev = recent[i + 1]["close"]
-                if close_prev and close_prev > 0:
+                if close_i is None or close_prev is None:
+                    continue
+                if close_prev > 0:
                     ret = (close_i - close_prev) / close_prev
                     if ret >= _LIMIT_THRESHOLD:
                         limit_up_dates.append(recent[i]["date"])
