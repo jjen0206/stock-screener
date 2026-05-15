@@ -40,6 +40,13 @@ _RETRY_DELAY_SECS = 1.0
 # 改 False 退回 phase 1 純 ml_prob 排序(出事時 kill-switch)。
 STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
 
+# 警示股過濾(2026-05-15 主公拍板,違約交割教訓 root cause):
+# - 硬擋 default_settlement + full_cash → exclude_warned_stocks 從 picks 剔
+# - soft 降權 attention / disposition / method_changed → ml_prob × 0.7 排序自然往後沉
+# 模組級 cache:_select_top_picks 跑完後把上一輪 excluded list 存這,format_top_picks_message
+# 撈出來組 caption 「✅ 已濾掉 N 檔警示股」。每次跑會被 reset(避免跨 run 殘留)。
+_LAST_EXCLUDED_WARNINGS: list[dict] = []
+
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +574,35 @@ def _select_top_picks(
         fallback_used = True
         top_n = fallback_top_n  # downgrade output 上限到 3
 
+    # 警示股過濾(2026-05-15 主公拍板,違約交割教訓):
+    #   - 硬擋:default_settlement + full_cash → 從 qualified 剔除
+    #   - soft 降權:attention / disposition / method_changed → ml_prob × 0.7
+    # excluded list 存模組級 cache,format_top_picks_message 撈出來組 caption。
+    # WARNING_FILTER_ENABLED=false → 整段退化 no-op,主公出事可立刻關。
+    global _LAST_EXCLUDED_WARNINGS
+    _LAST_EXCLUDED_WARNINGS = []
+    if qualified:
+        try:
+            from src.warnings_filter import (
+                exclude_warned_stocks, apply_soft_warning_penalty,
+            )
+            with db.get_conn() as _wconn:
+                qualified, excluded = exclude_warned_stocks(
+                    _wconn, qualified, as_of=date,
+                )
+                _LAST_EXCLUDED_WARNINGS = excluded
+                # soft 降權:in-place 改 ml_prob × 0.7,讓下面 sort 自動往後沉
+                apply_soft_warning_penalty(_wconn, qualified, as_of=date)
+            if excluded:
+                logger.info(
+                    "[NOTIFIER] 警示股硬擋 %d 檔: %s", len(excluded),
+                    [(e.get("sid"), e.get("warning_type")) for e in excluded],
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[NOTIFIER] 警示股過濾失敗,picks 不過警示濾鏡(救火 fallback)"
+            )
+
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
     # → ml_prob desc → 命中策略多 desc → sid asc
     # scoring 抽到 _compute_pick_score 共用,讓 format_yesterday_recap 算 top
@@ -1091,6 +1127,16 @@ def _format_short_picks_section(
             "⚠️ 今日無高信心 picks,降級顯示弱訊號 Top 3"
             "(僅過 ≥1 策略命中,未過 ML threshold)"
         )
+    # 警示股過濾 caption(2026-05-15 主公拍板)— 從 _LAST_EXCLUDED_WARNINGS 模組
+    # 級 cache 撈,_select_top_picks 跑完後填入。N=0 → graceful skip 不顯。
+    # _md_escape 不需要(caption 純中文 + emoji + 數字,無 _ * [ `)。
+    try:
+        from src.warnings_filter import format_excluded_caption
+        caption = format_excluded_caption(_LAST_EXCLUDED_WARNINGS)
+        if caption:
+            section_lines.append(caption)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] 警示股 caption 渲染失敗,略過")
     # per-pick blocks,中間用 mini separator(短 dash)避免跟 section ━━━━ 混淆
     pick_blocks = [format_pick_block(p, channel=channel) for p in picks]
     section_lines.append("")

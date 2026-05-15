@@ -5,6 +5,35 @@
 
 ---
 
+## 2026-05-15 — 警示股過濾(違約交割教訓 root cause)
+
+### Added
+
+**TWSE / TPEx 警示股 filter 三層防護**
+- DB schema `stock_warnings`(stock_id + warning_type + announced_date 三 PK,5 類:default_settlement / full_cash / attention / disposition / method_changed)+ 兩個 index(`feat(database): add stock_warnings table for TWSE warning records`)
+- 新 fetcher `scripts/fetch_stock_warnings.py`(BeautifulSoup 解析 TWSE punish / notice / disposition / method 公告頁;disposition 主端點失敗 fallback TWTBAU2;User-Agent 必填、retry 3 次)
+- 新 workflow `.github/workflows/stock-warnings.yml`(交易日收盤後 17:13 cron + commit cache.db,跟 daily-fetch / weekly-shareholder-fetch 並列)
+- 新 helper `src/warnings_filter.py`:`exclude_warned_stocks` 硬擋 default_settlement + full_cash;`apply_soft_warning_penalty` soft 降權 attention / disposition / method_changed(ml_prob × 0.7 排序自然往後沉);`format_excluded_caption` 組「✅ 已濾掉 N 檔警示股 (違約X 全額Y)」
+- `notifier._select_top_picks` 接線:跑完 confluence + ML threshold 後接警示濾鏡,`_format_short_picks_section` 顯 caption(`feat(notifier): wire stock-warning filter into top-picks pipeline`)
+- Kill-switch:`WARNING_FILTER_ENABLED=false` 退化整個 module 為 no-op,主公出事可立刻關
+- UI:`ui_cards._build_card_html` 加 `warnings` 參數,有 active warning → 紅色 ⚠️ badge inline 顯示類別中文(mobile-first 不用 hover-only,iPhone 窄屏看得見)
+- UI:`render_picks_cards` 走 `enrich_rows_with_warnings` 批次 SQL bulk-enrich,免每張卡 single query
+- UI:📊 個股深度頁加「⚠️ 警示紀錄」section,顯該 sid 過去 90 天 stock_warnings 時間軸(含已解除,綠 / 紅 status badge 區分)
+- requirements.txt 新增 `beautifulsoup4>=4.12.0`
+
+### Tests
+- `tests/test_fetch_stock_warnings.py` 15 cases:民國 / 西元日期 normalize、4 種 parser fixture、disposition fallback、idempotent re-fetch、User-Agent 必填、schema 對齊 production
+- `tests/test_warnings_filter.py` 15 cases:hard exclude / 過期 warning / soft penalty multiplier / kill-switch / caption 字串組成 / db helper 對齊
+- `tests/test_notifier_warning_wire.py` 8 cases:結構性 import / call guards、_LAST_EXCLUDED_WARNINGS 模組級 cache、soft penalty 改 ml_prob 後排序自動往後、kill-switch
+- `tests/test_page_stock_detail_warning_wire.py` 8 cases:section render guard、`_build_card_html` warnings 參數、AppTest 帶警示 sid 確認 section 出現、乾淨股 graceful skip
+
+### Notes
+- 主公昨天買到違約交割股,要實作 ⚠️ 警示股 filter 避免未來再撞 — root cause 是無資料源、無濾鏡、無 UI 提示三層全空
+- 設計分硬擋 / soft 降權雙層:違約交割 + 全額交割(picks 真會卡停損 → 直接剔);注意 / 處置 / 變更交易方法(資訊性訊號 → soft 降權留在 picks 但排後面)
+- TPEx 對應 endpoint 暫 TODO,後續 follow-up
+
+---
+
 ## 2026-05-14 — vectorbt 回測引擎升級
 
 ### Added
