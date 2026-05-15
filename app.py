@@ -108,7 +108,8 @@ from src.universe import (
 
 PAGES = [
     "🏠 首頁", "🔥 短線", "💎 長線", "📈 回測",
-    "🔍 個股", "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
+    "🔍 個股", "📊 個股深度",
+    "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
     "💼 交易紀錄", "🧪 實測追蹤", "📊 策略歷史",
     "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
@@ -905,6 +906,8 @@ def main() -> None:
         _page_backtest()
     elif page == "🔍 個股":
         _page_stock_query()
+    elif page == "📊 個股深度":
+        _page_stock_detail()
     elif page == "⭐ 關注":
         _page_watchlist()
     elif page == "🌡️ 市場熱度":
@@ -3262,6 +3265,427 @@ def _make_rsi_chart(df: pd.DataFrame, rsi14: pd.Series) -> go.Figure:
     )
     fig.update_xaxes(type="category")
     return fig
+
+
+# === 個股深度頁 ===
+
+def _make_detail_kline_chart(df: pd.DataFrame) -> go.Figure:
+    """個股深度頁 K 線 + MA20/MA60 + BB + Volume(2-row subplot)。
+
+    跟 _make_candlestick 同概念,但獨立函式讓深度頁不依賴查詢頁的 MA5/MA60
+    schema 假設(我們只算 MA20 / MA60)。
+    """
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=df["date"],
+            open=df["open"], high=df["high"],
+            low=df["low"], close=df["close"],
+            increasing_line_color="#d62728",
+            decreasing_line_color="#2ca02c",
+            name="K 線",
+        ),
+        row=1, col=1,
+    )
+    for col, color in [("ma20", "#ff7f0e"), ("ma60", "#9467bd")]:
+        if col in df.columns and df[col].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df["date"], y=df[col],
+                    name=col.upper(),
+                    line=dict(width=1.2, color=color),
+                ),
+                row=1, col=1,
+            )
+    if "bb_upper" in df.columns and df["bb_upper"].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"], y=df["bb_upper"], name="BB 上",
+                line=dict(width=1, dash="dot",
+                          color="rgba(120,120,120,0.7)"),
+            ),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"], y=df["bb_lower"], name="BB 下",
+                line=dict(width=1, dash="dot",
+                          color="rgba(120,120,120,0.7)"),
+                fill="tonexty", fillcolor="rgba(120,120,120,0.08)",
+            ),
+            row=1, col=1,
+        )
+    vol_colors = [
+        "#d62728" if c >= o else "#2ca02c"
+        for c, o in zip(df["close"], df["open"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=df["date"], y=df["volume"],
+            name="量", marker_color=vol_colors, showlegend=False,
+        ),
+        row=2, col=1,
+    )
+    fig.update_layout(
+        height=460,
+        xaxis_rangeslider_visible=False,
+        showlegend=True,
+        margin=dict(t=20, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=14)),
+        font=dict(size=14),
+    )
+    fig.update_xaxes(type="category", tickfont=dict(size=12), row=1, col=1)
+    fig.update_xaxes(type="category", tickfont=dict(size=12), row=2, col=1)
+    fig.update_yaxes(title_text="股價", tickfont=dict(size=12),
+                     title_font=dict(size=14), row=1, col=1)
+    fig.update_yaxes(title_text="量", tickfont=dict(size=12),
+                     title_font=dict(size=14), row=2, col=1)
+    return fig
+
+
+def _make_inst_stacked_bar(inst_rows: list[dict]) -> go.Figure:
+    """三大法人 stacked bar(單位:張)。inst_rows 是 DESC sort,我們轉 ASC 畫。"""
+    rows = list(reversed(inst_rows))  # ASC 給 x 軸時間由左到右
+    dates = [r["date"] for r in rows]
+
+    def _lots(field: str) -> list[int]:
+        return [round((r.get(field) or 0) / 1000) for r in rows]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=dates, y=_lots("foreign_buy_sell"), name="外資",
+        marker_color="#d62728",
+    ))
+    fig.add_trace(go.Bar(
+        x=dates, y=_lots("trust_buy_sell"), name="投信",
+        marker_color="#ff7f0e",
+    ))
+    fig.add_trace(go.Bar(
+        x=dates, y=_lots("dealer_buy_sell"), name="自營商",
+        marker_color="#1f77b4",
+    ))
+    fig.update_layout(
+        barmode="relative",  # 同正負同側疊,正負分開
+        height=320,
+        margin=dict(t=20, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.05, x=0, font=dict(size=14)),
+        font=dict(size=14),
+        yaxis_title="買賣超(張)",
+    )
+    fig.update_xaxes(type="category", tickfont=dict(size=12))
+    return fig
+
+
+def _make_shareholder_chart(rows: list[dict]) -> go.Figure:
+    """千張戶人數折線 + delta_w bar 雙軸。rows 已是 ASC。"""
+    dates = [r["week_end"] for r in rows]
+    counts = [r["holders_1000up_count"] for r in rows]
+    deltas = [r.get("holders_delta_w") or 0 for r in rows]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=dates, y=counts, name="千張戶人數",
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=2),
+            marker=dict(size=6),
+        ),
+        secondary_y=False,
+    )
+    bar_colors = [
+        "#d62728" if d > 0 else "#2ca02c" if d < 0 else "#aaa"
+        for d in deltas
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=dates, y=deltas, name="週變動",
+            marker_color=bar_colors, opacity=0.6,
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        height=320, margin=dict(t=30, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.05, x=0, font=dict(size=14)),
+        font=dict(size=14),
+    )
+    fig.update_xaxes(type="category", tickfont=dict(size=12))
+    fig.update_yaxes(title_text="千張戶數", secondary_y=False,
+                     tickfont=dict(size=12))
+    fig.update_yaxes(title_text="週變動(人)", secondary_y=True,
+                     tickfont=dict(size=12))
+    return fig
+
+
+def _render_detail_header(sid: str) -> None:
+    """個股深度頁頂端:股號 / 名稱 / 收盤價 / 漲跌幅 + 產業 badge + 加關注 button。"""
+    info = ensure_stock_info(sid)
+    name = info.get("name") if info else "(未知代號)"
+    industry = info.get("industry") if info else None
+
+    # 最新 close + 前一交易日 close(算漲跌幅)
+    with db.get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT date, close FROM daily_prices WHERE stock_id=? "
+                "ORDER BY date DESC LIMIT 2",
+                (sid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    close = rows[0]["close"] if rows else None
+    prev = rows[1]["close"] if len(rows) > 1 else None
+    chg_pct = (
+        (close - prev) / prev * 100.0
+        if close is not None and prev is not None and prev != 0
+        else None
+    )
+    chg_str = (
+        f"({'↑' if chg_pct >= 0 else '↓'}{abs(chg_pct):.2f}%)"
+        if chg_pct is not None else ""
+    )
+    close_str = f"{close:.2f}" if close is not None else "—"
+    title = f"📊 [{sid}] {name}　{close_str} {chg_str}"
+    st.markdown(f"### {title}")
+
+    cap_parts = []
+    if industry:
+        cap_parts.append(f"🏭 {industry}")
+    if rows:
+        cap_parts.append(f"📅 最新:{rows[0]['date']}")
+    if cap_parts:
+        st.caption("　·　".join(cap_parts))
+
+    starred = db.is_in_watchlist(sid)
+    label = (f"⭐ 已關注 移除" if starred else f"☆ 加入關注")
+    if st.button(label, key=f"detail_star_{sid}"):
+        if starred:
+            db.remove_from_watchlist(sid)
+            st.toast(f"已從關注移除 {sid}", icon="☆")
+        else:
+            db.add_to_watchlist(sid)
+            st.toast(f"已加入關注 {sid}", icon="⭐")
+        st.rerun()
+
+
+def _render_detail_paper_trade_status(sid: str) -> None:
+    """若該 sid 有 active paper_trade,顯示進場價 / 停損 / 目標 / 持有天數。"""
+    try:
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT entry_date, entry_price, target_price, "
+                "stop_price, current_stop, hold_days, expected_exit_date, "
+                "ml_prob, matched_strategies "
+                "FROM paper_trades WHERE sid=? AND status='active' "
+                "ORDER BY entry_date DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if not row:
+        st.caption("📭 此股無 active 實測倉位")
+        return
+
+    today = date.today()
+    try:
+        entry_dt = date.fromisoformat(row["entry_date"])
+        held = (today - entry_dt).days
+    except Exception:  # noqa: BLE001
+        held = None
+
+    cur_stop = row["current_stop"] if row["current_stop"] is not None else row["stop_price"]
+    st.markdown(
+        f"**進場日**:{row['entry_date']} @ {row['entry_price']:.2f} ｜ "
+        f"**目標**:{row['target_price']:.2f} ｜ "
+        f"**停損**:{cur_stop:.2f} ｜ "
+        f"**已持有**:{held if held is not None else '—'} 天 "
+        f"(預計持有 {row['hold_days']} 天)"
+    )
+    if row["matched_strategies"]:
+        st.caption(f"進場策略:{row['matched_strategies']}")
+
+
+def _render_detail_kline_tab(sid: str) -> None:
+    """K 線 tab:近 60 天日 K + MA20/60 + BB + Volume。"""
+    df = db.get_stock_kline_with_indicators(sid, days=60)
+    if df.empty:
+        st.info(
+            f"📭 找不到 **{sid}** 的歷史日線。"
+            "可能該股還沒進 daily_prices(關注後會自動補抓 90 天)。"
+        )
+        return
+    st.caption(
+        f"近 {len(df)} 個交易日 · {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}"
+    )
+    fig = _make_detail_kline_chart(df)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_detail_chip_tab(sid: str) -> None:
+    """籌碼 tab:近 7 日法人 stacked + 近 12 週千張戶。"""
+    st.markdown("#### 近 7 日法人買賣超")
+    inst = db.get_inst_history(sid, days=7)
+    if not inst:
+        st.info(
+            "🔍 此股近期無法人籌碼資料。"
+            "(覆蓋率有限,主要是高市值 / 關注清單)"
+        )
+    else:
+        st.plotly_chart(_make_inst_stacked_bar(inst), use_container_width=True)
+
+    st.markdown("#### 千張戶趨勢(近 12 週)")
+    sh = db.get_shareholder_history(sid, weeks=12)
+    if not sh:
+        st.info(
+            "📭 無千張戶資料。TDCC 週快照覆蓋限上市股,新上市或上櫃常無。"
+        )
+    else:
+        st.plotly_chart(_make_shareholder_chart(sh), use_container_width=True)
+
+
+def _render_detail_ml_tab(sid: str) -> None:
+    """ML 解釋 tab:命中策略列表 + ML 分數 + SHAP top features + 歷史命中。"""
+    st.markdown("#### 過去策略命中(近 30 筆)")
+    hist = db.get_pick_history_for_sid(sid, limit=30)
+    if not hist:
+        st.info("📭 此股近期未被任一策略命中。")
+    else:
+        rows_df = pd.DataFrame([
+            {
+                "命中日": r["pick_date"],
+                "策略": STRATEGY_LABELS.get(r["strategy"], r["strategy"]),
+                "ML 機率": r["ml_prob"],
+                "進場價": r["entry_close"],
+                "D5 報酬 %": (
+                    r["return_d5"] * 100 if r["return_d5"] is not None else None
+                ),
+                "達標": (
+                    "✅" if r["hit_target"] == 1 else
+                    "❌" if r["stopped_out"] == 1 else
+                    ("—" if r["return_d5"] is None else "")
+                ),
+            }
+            for r in hist
+        ])
+        st.dataframe(
+            rows_df, use_container_width=True, hide_index=True,
+            column_config={
+                "ML 機率": st.column_config.NumberColumn(format="%.2f"),
+                "進場價": st.column_config.NumberColumn(format="%.2f"),
+                "D5 報酬 %": st.column_config.NumberColumn(format="%+.2f"),
+            },
+        )
+
+    st.markdown("#### 最新 ML 解釋(SHAP top features)")
+    shap = db.get_shap_for_sid_latest(sid)
+    if not shap or not shap.get("top_features"):
+        st.info("📭 該 sid 還沒有 SHAP 解釋(尚未進過 daily_picks 或未生成)。")
+        return
+    label = STRATEGY_LABELS.get(shap["strategy"], shap["strategy"])
+    st.caption(
+        f"取自 {shap['pick_date']} · 策略路由:{label}"
+    )
+    top_df = pd.DataFrame([
+        {
+            "feature": f.get("feature"),
+            "value": f.get("value"),
+            "contribution": f.get("contribution"),
+            "contribution_pct": f.get("contribution_pct"),
+            "direction": f.get("direction"),
+        }
+        for f in shap["top_features"][:8]
+    ])
+    st.dataframe(
+        top_df, use_container_width=True, hide_index=True,
+        column_config={
+            "value": st.column_config.NumberColumn(format="%.3f"),
+            "contribution": st.column_config.NumberColumn(format="%+.3f"),
+            "contribution_pct": st.column_config.NumberColumn(format="%.2%"),
+        },
+    )
+
+
+def _render_detail_news_tab(sid: str) -> None:
+    """新聞 tab:近 7 日該 sid 重大訊息列表。"""
+    news = db.get_news_for_sid(sid, days=7)
+    if not news:
+        st.info("📭 近 7 日無重大訊息。")
+        return
+    st.caption(f"近 7 日共 {len(news)} 則重大訊息(最新先)")
+    for n in news[:30]:  # 限 30 則避免爆 page
+        # 時間 + 標題 一行;description 摺進 expander
+        time_str = (n["publish_time"] or "")[:6]
+        time_pretty = (
+            f"{time_str[:2]}:{time_str[2:4]}" if len(time_str) >= 4 else ""
+        )
+        head = f"**{n['publish_date']}** {time_pretty}　{n['subject']}"
+        with st.expander(head, expanded=False):
+            if n.get("article_no"):
+                st.caption(f"條款:{n['article_no']}")
+            if n.get("fact_date"):
+                st.caption(f"事實日:{n['fact_date']}")
+            desc = n.get("description") or ""
+            if desc:
+                # 限 1200 字,新聞 raw 偶爾很長,避免 mobile 滾不完
+                st.markdown(desc[:1200] + ("..." if len(desc) > 1200 else ""))
+
+
+def _page_stock_detail() -> None:
+    """📊 個股深度頁(C 計畫最後一件)。
+
+    從任何 page 點 sid → set session_state['detail_sid'] + pending_nav
+    → 本頁讀 detail_sid 渲染:
+      Header → 4 個 tab(K 線 / 籌碼 / ML / 新聞)→ paper_trade 狀態。
+
+    Mobile-first:無多欄 st.columns,改 st.tabs 4 個 tab,單屏切換。
+    """
+    st.header("📊 個股深度")
+    db.init_db()
+
+    # query param ?sid=2330 / session_state['detail_sid'] / 預設輸入
+    default_sid = "2330"
+    try:
+        qp = st.query_params.get("sid")
+    except Exception:  # noqa: BLE001
+        qp = None
+    if qp:
+        default_sid = str(qp)
+    if "detail_sid" in st.session_state and st.session_state["detail_sid"]:
+        default_sid = str(st.session_state["detail_sid"])
+
+    sid = st.text_input(
+        "股號",
+        value=default_sid,
+        key="detail_sid_input",
+        help="輸入 4 碼股號(例 2330)— 上方可從各 page 點「📊 看細節」直接跳入",
+    ).strip()
+    if not sid:
+        st.info("請輸入股號。")
+        return
+    # 同步寫回 session_state(下次返回保留)
+    st.session_state["detail_sid"] = sid
+
+    _render_detail_header(sid)
+
+    tab_k, tab_chip, tab_ml, tab_news = st.tabs([
+        "📈 K 線", "🚦 籌碼", "🧠 ML 解釋", "📰 新聞",
+    ])
+    with tab_k:
+        _render_detail_kline_tab(sid)
+    with tab_chip:
+        _render_detail_chip_tab(sid)
+    with tab_ml:
+        _render_detail_ml_tab(sid)
+    with tab_news:
+        _render_detail_news_tab(sid)
+
+    st.markdown("---")
+    st.markdown("#### 🧪 實測倉位")
+    _render_detail_paper_trade_status(sid)
 
 
 # === 回測頁 ===
