@@ -204,6 +204,10 @@ def test_run_writes_rows_to_db(tmp_db):
         fetcher.URL_NOTICE: _ATTENTION_HTML,
         fetcher.URL_DISPOSITION: _DISPOSITION_HTML,
         fetcher.URL_METHOD_CHANGED: _METHOD_HTML,
+        # TPEx 沒給 fixture 就會打真實 API,測試會 flaky → 餵空 list 隔離
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
     }
     summary = fetcher.run(html_overrides=overrides)
     # default 2 + attention 1 + disposition 1 + full_cash 1 + method_changed 1 = 6
@@ -229,6 +233,9 @@ def test_run_idempotent_same_pk_no_dup(tmp_db):
         fetcher.URL_NOTICE: _ATTENTION_HTML,
         fetcher.URL_DISPOSITION: _DISPOSITION_HTML,
         fetcher.URL_METHOD_CHANGED: _METHOD_HTML,
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
     }
     fetcher.run(html_overrides=overrides)
     fetcher.run(html_overrides=overrides)  # 第二次跑
@@ -300,4 +307,296 @@ def test_db_schema_aligned_with_production(tmp_db):
     }
     assert expected.issubset(cols), (
         f"stock_warnings schema 缺欄位,實有 {cols}"
+    )
+
+
+# ============================================================================
+# TPEx (上櫃) — OpenAPI v1 JSON parsers
+# ============================================================================
+
+def test_normalize_tpex_date_roc_compact():
+    """民國連寫 YYYMMDD → ISO。TPEx disposal / attention / cmode 用此格式。"""
+    assert fetcher.normalize_tpex_date("1150514") == "2026-05-14"
+    assert fetcher.normalize_tpex_date("1140131") == "2025-01-31"
+
+
+def test_normalize_tpex_date_ad_compact():
+    """西元連寫 YYYYMMDD → ISO。TPEx warning_note 用此格式。"""
+    assert fetcher.normalize_tpex_date("20260514") == "2026-05-14"
+    assert fetcher.normalize_tpex_date("20250131") == "2025-01-31"
+
+
+def test_normalize_tpex_date_falls_back_to_normalize_date():
+    """有分隔符格式走 fallback,跟 TWSE 通用 normalizer 結果一致。"""
+    assert fetcher.normalize_tpex_date("114/05/14") == "2025-05-14"
+    assert fetcher.normalize_tpex_date("2026-05-14") == "2026-05-14"
+
+
+def test_normalize_tpex_date_invalid():
+    assert fetcher.normalize_tpex_date(None) is None
+    assert fetcher.normalize_tpex_date("") is None
+    assert fetcher.normalize_tpex_date("not a date") is None
+
+
+def test_parse_tpex_period_tilde():
+    """處置期 "1150515~1150528" → (起, 迄)。"""
+    eff_from, eff_to = fetcher._parse_tpex_period("1150515~1150528")
+    assert eff_from == "2026-05-15"
+    assert eff_to == "2026-05-28"
+
+
+def test_parse_tpex_period_invalid():
+    assert fetcher._parse_tpex_period(None) == (None, None)
+    assert fetcher._parse_tpex_period("") == (None, None)
+
+
+_TPEX_DISPOSITION_JSON = """[
+  {
+    "Date": "1150514",
+    "SecuritiesCompanyCode": "4966",
+    "CompanyName": "譜瑞-KY",
+    "DispositionPeriod": "1150515~1150528",
+    "DispositionReasons": "因連續3個營業日達本中心作業要點第四條第一項第一款",
+    "DisposalCondition": "詳細處置條件文字"
+  },
+  {
+    "Date": "1150514",
+    "SecuritiesCompanyCode": "3236",
+    "CompanyName": "千如",
+    "DispositionPeriod": "1150515~1150528",
+    "DispositionReasons": "處置事由 B",
+    "DisposalCondition": "處置條件 B"
+  }
+]"""
+
+
+def test_parse_tpex_disposition_extracts_rows():
+    rows = fetcher.parse_tpex_disposition_json(
+        _TPEX_DISPOSITION_JSON, source_url=fetcher.TPEX_URL_DISPOSITION,
+    )
+    assert len(rows) == 2
+    by_sid = {r["stock_id"]: r for r in rows}
+    assert "4966" in by_sid
+    r = by_sid["4966"]
+    assert r["warning_type"] == "disposition"
+    # 民國 114/05/14 → 西元 2025-05-14(不是 2026 — 重要 normalize 檢查)
+    assert r["announced_date"] == "2026-05-14", (
+        "民國 115 = 西元 2026 — normalize_tpex_date 要正確 +1911"
+    )
+    assert r["effective_from"] == "2026-05-15"
+    assert r["effective_to"] == "2026-05-28"
+    assert "連續3個營業日" in r["reason"]
+    assert r["source_url"] == fetcher.TPEX_URL_DISPOSITION
+
+
+_TPEX_ATTENTION_JSON = """[
+  {
+    "Date": "1150514",
+    "SecuritiesCompanyCode": "3236",
+    "CompanyName": "千如",
+    "TradingInformation": "最近六個營業日(含當日)之累積週轉率為88.28%",
+    "ClosePrice": "40.20",
+    "PriceEarningRatio": "125.63"
+  }
+]"""
+
+
+def test_parse_tpex_attention_extracts_row():
+    rows = fetcher.parse_tpex_attention_json(
+        _TPEX_ATTENTION_JSON, source_url=fetcher.TPEX_URL_ATTENTION,
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["stock_id"] == "3236"
+    assert r["warning_type"] == "attention"
+    assert r["announced_date"] == "2026-05-14"
+    # attention endpoint 沒處置期 → effective_from 補公告日,effective_to None
+    assert r["effective_from"] == "2026-05-14"
+    assert r["effective_to"] is None
+    assert "週轉率" in r["reason"]
+
+
+_TPEX_CMODE_JSON = """[
+  {
+    "Date": "1150515",
+    "SecuritiesCompanyCode": "3064",
+    "CompanyName": "泰偉",
+    "AlteredTrading": "Ｙ",
+    "PeriodicTrading": "",
+    "ManagedStock": "",
+    "MatchingFrequency": "",
+    "SuspensionOfTrading": "",
+    "FinancialAnnouncements": "Ｙ"
+  },
+  {
+    "Date": "1150515",
+    "SecuritiesCompanyCode": "9999",
+    "CompanyName": "管理股測試",
+    "AlteredTrading": "",
+    "PeriodicTrading": "",
+    "ManagedStock": "Ｙ",
+    "MatchingFrequency": "",
+    "SuspensionOfTrading": "",
+    "FinancialAnnouncements": ""
+  },
+  {
+    "Date": "1150515",
+    "SecuritiesCompanyCode": "8888",
+    "CompanyName": "停止交易測試",
+    "AlteredTrading": "",
+    "PeriodicTrading": "",
+    "ManagedStock": "",
+    "MatchingFrequency": "",
+    "SuspensionOfTrading": "Ｙ",
+    "FinancialAnnouncements": ""
+  },
+  {
+    "Date": "1150515",
+    "SecuritiesCompanyCode": "7777",
+    "CompanyName": "全空跳過",
+    "AlteredTrading": "",
+    "PeriodicTrading": "",
+    "ManagedStock": "",
+    "MatchingFrequency": "",
+    "SuspensionOfTrading": "",
+    "FinancialAnnouncements": ""
+  }
+]"""
+
+
+def test_parse_tpex_cmode_classifies_full_cash_vs_method_changed():
+    rows = fetcher.parse_tpex_cmode_json(
+        _TPEX_CMODE_JSON, source_url=fetcher.TPEX_URL_CMODE,
+    )
+    by_sid = {r["stock_id"]: r for r in rows}
+    # 4 筆中 1 筆全空 → 跳過,只剩 3 筆
+    assert "7777" not in by_sid, "全空 flag 不該寫入"
+    assert set(by_sid.keys()) == {"3064", "9999", "8888"}
+
+    # AlteredTrading=Ｙ + FinancialAnnouncements=Ｙ → method_changed(soft)
+    assert by_sid["3064"]["warning_type"] == "method_changed"
+    assert "變更交易方法" in by_sid["3064"]["reason"]
+    assert "財務報告未申報" in by_sid["3064"]["reason"]
+
+    # ManagedStock=Ｙ → full_cash(hard block,管理股票 = TWSE 全額交割等價)
+    assert by_sid["9999"]["warning_type"] == "full_cash"
+    assert "管理股票" in by_sid["9999"]["reason"]
+
+    # SuspensionOfTrading=Ｙ → full_cash(picks 不該推已停交易股)
+    assert by_sid["8888"]["warning_type"] == "full_cash"
+    assert "停止交易" in by_sid["8888"]["reason"]
+
+
+def test_parse_tpex_cmode_accepts_halfwidth_y():
+    """半形 Y 也應該被認為是旗標(防 TPEx 改字)。"""
+    half_width = _TPEX_CMODE_JSON.replace("Ｙ", "Y")
+    rows = fetcher.parse_tpex_cmode_json(
+        half_width, source_url=fetcher.TPEX_URL_CMODE,
+    )
+    by_sid = {r["stock_id"]: r for r in rows}
+    assert by_sid["9999"]["warning_type"] == "full_cash"
+
+
+def test_parse_tpex_empty_json_returns_empty_list():
+    assert fetcher.parse_tpex_disposition_json(
+        "", source_url=fetcher.TPEX_URL_DISPOSITION,
+    ) == []
+    assert fetcher.parse_tpex_disposition_json(
+        "[]", source_url=fetcher.TPEX_URL_DISPOSITION,
+    ) == []
+    assert fetcher.parse_tpex_attention_json(
+        "[]", source_url=fetcher.TPEX_URL_ATTENTION,
+    ) == []
+    assert fetcher.parse_tpex_cmode_json(
+        "[]", source_url=fetcher.TPEX_URL_CMODE,
+    ) == []
+
+
+def test_parse_tpex_malformed_json_raises():
+    """parse 失敗應該 raise(讓 CI exit 1,別 silent skip — 違約交割教訓)。"""
+    with pytest.raises(Exception):  # JSONDecodeError 子類
+        fetcher.parse_tpex_disposition_json(
+            "this is not json", source_url=fetcher.TPEX_URL_DISPOSITION,
+        )
+
+
+def test_parse_tpex_skips_rows_with_missing_required_fields():
+    bad = """[
+      {"Date": "", "SecuritiesCompanyCode": "1234"},
+      {"Date": "1150514", "SecuritiesCompanyCode": ""}
+    ]"""
+    assert fetcher.parse_tpex_disposition_json(
+        bad, source_url=fetcher.TPEX_URL_DISPOSITION,
+    ) == []
+    assert fetcher.parse_tpex_attention_json(
+        bad, source_url=fetcher.TPEX_URL_ATTENTION,
+    ) == []
+
+
+# ============================================================================
+# 端到端:TWSE + TPEx 同時跑
+# ============================================================================
+
+def test_run_writes_tpex_rows_to_db(tmp_db):
+    """TWSE + TPEx 一起餵 fixture,確認兩家警示都進 stock_warnings(共表)。"""
+    overrides = {
+        # TWSE — 沿用上面 TWSE fixture
+        fetcher.URL_PUNISH: _DEFAULT_SETTLEMENT_HTML,
+        fetcher.URL_NOTICE: _ATTENTION_HTML,
+        fetcher.URL_DISPOSITION: _DISPOSITION_HTML,
+        fetcher.URL_METHOD_CHANGED: _METHOD_HTML,
+        # TPEx
+        fetcher.TPEX_URL_ATTENTION: _TPEX_ATTENTION_JSON,
+        fetcher.TPEX_URL_DISPOSITION: _TPEX_DISPOSITION_JSON,
+        fetcher.TPEX_URL_CMODE: _TPEX_CMODE_JSON,
+    }
+    summary = fetcher.run(html_overrides=overrides)
+    # TWSE 6 (見上) + TPEx attention 1 + disposition 2 + cmode (3 非空) = 12
+    assert summary["rows_parsed"] == 12
+    assert summary["rows_written"] == 12
+    # by_type 合併計數
+    assert summary["by_type"]["default_settlement"] == 2  # TWSE only
+    assert summary["by_type"]["attention"] == 1 + 1       # TWSE + TPEx
+    assert summary["by_type"]["disposition"] == 1 + 2     # TWSE + TPEx
+    # TPEx full_cash 2(管理 + 停止)+ TWSE full_cash 1 = 3
+    assert summary["by_type"]["full_cash"] == 3
+    # TPEx method_changed 1 + TWSE method_changed 1 = 2
+    assert summary["by_type"]["method_changed"] == 2
+
+    with db.get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) AS c FROM stock_warnings"
+        ).fetchone()["c"]
+    assert n == 12
+
+
+def test_run_idempotent_with_tpex(tmp_db):
+    """同 fixture 跑兩次 → TWSE + TPEx 都 PK 防重(共表測試)。"""
+    overrides = {
+        fetcher.URL_PUNISH: _DEFAULT_SETTLEMENT_HTML,
+        fetcher.URL_NOTICE: _ATTENTION_HTML,
+        fetcher.URL_DISPOSITION: _DISPOSITION_HTML,
+        fetcher.URL_METHOD_CHANGED: _METHOD_HTML,
+        fetcher.TPEX_URL_ATTENTION: _TPEX_ATTENTION_JSON,
+        fetcher.TPEX_URL_DISPOSITION: _TPEX_DISPOSITION_JSON,
+        fetcher.TPEX_URL_CMODE: _TPEX_CMODE_JSON,
+    }
+    fetcher.run(html_overrides=overrides)
+    fetcher.run(html_overrides=overrides)
+    with db.get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) AS c FROM stock_warnings"
+        ).fetchone()["c"]
+    assert n == 12, "PK 防重失敗,TWSE/TPEx 共表出現重複"
+
+
+def test_sources_list_covers_twse_and_tpex():
+    """確認 _SOURCES 表同時含 TWSE 與 TPEx 條目(防有人 commit 漏掉一邊)。"""
+    markets = {market for _, _, _, market in fetcher._SOURCES}
+    assert "TWSE" in markets
+    assert "TPEx" in markets
+    # TPEx 至少要有 3 source(attention / disposition / cmode)
+    tpex_count = sum(1 for _, _, _, m in fetcher._SOURCES if m == "TPEx")
+    assert tpex_count >= 3, (
+        f"TPEx source 數 < 3,實有 {tpex_count}(可能漏 endpoint)"
     )
