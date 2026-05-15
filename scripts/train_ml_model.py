@@ -111,6 +111,36 @@ def main() -> int:
     ml_predictor.save_model(model, out_path)
     print(f"[TRAIN] 模型已存 {out_path}", flush=True)
 
+    # 訓練 calibrator(time-based 最後 20% holdout)+ 印 raw vs calibrated brier
+    try:
+        from src import ml_calibration
+
+        # build_training_dataset 內每 sid sliding window asc 排,跨 sid 不嚴格時序
+        # → 仍用 train_with_calibration 簡單後 20% holdout(對「整體分布」夠用,
+        #   想嚴格 per-sid time split 要動 build_training_dataset 拿 date column)。
+        _, calibrator, cal_metrics = ml_predictor.train_with_calibration(X, y)
+        cal_path = ml_calibration.save_calibrator(calibrator, "short_pick")
+        print(
+            f"[TRAIN] Calibrator({calibrator.method})已存 {cal_path} — "
+            f"holdout n={cal_metrics['n_holdout']}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN] Brier raw={cal_metrics['raw_brier']:.4f} → "
+            f"calibrated={cal_metrics['calibrated_brier']:.4f} "
+            f"(Δ={cal_metrics['calibrated_brier'] - cal_metrics['raw_brier']:+.4f}, 越低越好)",
+            flush=True,
+        )
+        # 把 brier 灌進 metrics dict 給 meta.json
+        metrics["calibration"] = {
+            "method": calibrator.method,
+            "n_holdout": cal_metrics["n_holdout"],
+            "raw_brier": cal_metrics["raw_brier"],
+            "calibrated_brier": cal_metrics["calibrated_brier"],
+        }
+    except Exception as e:  # noqa: BLE001
+        print(f"[TRAIN] Calibrator 訓練失敗(non-fatal):{type(e).__name__}: {e}", flush=True)
+
     # dump sidecar metadata 給「⚙️ 系統」頁顯示
     meta_path = ml_predictor.dump_model_meta(
         out_path,

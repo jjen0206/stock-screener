@@ -623,8 +623,12 @@ def predict_short_pick_winrate(
     stock_id: str,
     target_date: str,
     db_path: str | Path | None = None,
+    calibrator=None,
 ) -> float | None:
     """對單檔單日預測 win 機率(0-1)。資料不足 → None。
+
+    calibrator 不為 None 且 ML_CALIBRATION_ENABLED 開啟 → raw_prob 經
+    calibrator.transform 才回傳;否則維持 raw_prob(完全 backward-compat)。
 
     print(flush=True) 取代 logger.warning,確保 GitHub Actions / streamlit cloud
     log 看得到 sklearn 端失敗(predict_proba shape / dtype / class mismatch)。
@@ -638,14 +642,24 @@ def predict_short_pick_winrate(
         # class 1 = win 的機率(predict_proba 的 columns 是 model.classes_ 順序)
         if 1 in model.classes_:
             idx = list(model.classes_).index(1)
-            return float(proba[idx])
-        # weird case:model 訓練時沒看到 win class(全 loss)
-        print(
-            f"[ML/predict] {stock_id}@{target_date} model.classes_="
-            f"{list(model.classes_)} 沒包含 1,回 0.0",
-            flush=True,
-        )
-        return 0.0
+            raw = float(proba[idx])
+        else:
+            # weird case:model 訓練時沒看到 win class(全 loss)
+            print(
+                f"[ML/predict] {stock_id}@{target_date} model.classes_="
+                f"{list(model.classes_)} 沒包含 1,回 0.0",
+                flush=True,
+            )
+            return 0.0
+        # 套校正
+        if calibrator is not None:
+            from src import ml_calibration
+
+            calibrated = ml_calibration.apply_calibration(
+                model, calibrator, np.array([raw]),
+            )
+            return float(calibrated[0])
+        return raw
     except Exception as e:  # noqa: BLE001
         # 雲端 log:logger.warning 不一定 capture,改 print 確保看得到
         print(
@@ -662,8 +676,13 @@ def predict_batch(
     stock_ids: list[str],
     target_date: str,
     db_path: str | Path | None = None,
+    calibrator=None,
 ) -> dict[str, float | None]:
     """對一批 sids 預測 win 機率,一次 model.predict_proba 而非 N 次。
+
+    calibrator 不為 None 且 ML_CALIBRATION_ENABLED 開啟 → raw_prob 經
+    calibrator.transform 才回傳;否則維持 raw_prob(完全 backward-compat,
+    既有 callers 沒傳 calibrator 行為一致)。
 
     回 {sid: prob_up | None};資料不足(extract_features 回 None)的 sid
     在 dict 內仍出現但值為 None。
@@ -693,8 +712,18 @@ def predict_batch(
         probas = model.predict_proba(X)
         if 1 in model.classes_:
             idx = list(model.classes_).index(1)
-            for sid, prob_row in zip(sids_with_features, probas):
-                out[sid] = float(prob_row[idx])
+            raw_probs = np.asarray([float(r[idx]) for r in probas])
+            if calibrator is not None:
+                from src import ml_calibration
+
+                calibrated = ml_calibration.apply_calibration(
+                    model, calibrator, raw_probs,
+                )
+                for sid, p in zip(sids_with_features, calibrated):
+                    out[sid] = float(p)
+            else:
+                for sid, p in zip(sids_with_features, raw_probs):
+                    out[sid] = float(p)
         else:
             # 罕見:訓練資料全 loss class
             print(
@@ -763,6 +792,15 @@ def dump_model_meta(
         "model_type": model_type,
         "version": version,
     }
+    # calibration block(若 train flow 有跑 calibration)— 給 system_brief 讀
+    cal = metrics.get("calibration")
+    if cal:
+        meta["calibration"] = {
+            "method": cal.get("method"),
+            "n_holdout": int(cal.get("n_holdout", 0)),
+            "raw_brier": float(cal.get("raw_brier", 0.0)),
+            "calibrated_brier": float(cal.get("calibrated_brier", 0.0)),
+        }
     p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
 
@@ -824,6 +862,22 @@ def load_strategy_model(strategy_name: str):
     return load_model(per_strategy_model_path(strategy_name))
 
 
+def load_strategy_calibrator(strategy_name: str):
+    """載入 models/calibrators/<strategy>.pkl;檔不存在 → 回 None。
+
+    Calibration kill-switch / fallback graceful:caller 直接拿 None 傳給
+    predict_for_strategy,該函式內部會走 raw prob。
+    """
+    from src import ml_calibration
+    return ml_calibration.load_calibrator(strategy_name)
+
+
+def load_short_pick_calibrator():
+    """載入 models/calibrators/short_pick.pkl;不存在 → None。"""
+    from src import ml_calibration
+    return ml_calibration.load_calibrator("short_pick")
+
+
 def predict_for_strategy(
     strategy_name: str | None,
     stock_ids: list[str],
@@ -831,6 +885,8 @@ def predict_for_strategy(
     fallback_model=None,
     db_path: str | Path | None = None,
     strategy_model=None,
+    strategy_calibrator=None,
+    fallback_calibrator=None,
 ) -> dict[str, float | None]:
     """Stage 2B per-strategy inference 路由 — 優先用 per-strategy model,沒就用
     fallback(通用)model。
@@ -840,6 +896,10 @@ def predict_for_strategy(
     每 D × 每 strategy 不會反覆 read pkl(N×N 次 IO)。strategy_name 仍保留
     當 metadata,讓 log 看得出哪個策略在預測。
 
+    校正:同樣由 caller 預載 calibrator 傳入。chosen=strategy_model 時用
+    strategy_calibrator,否則用 fallback_calibrator。calibrator 為 None
+    時直接 raw prob(完全 backward-compat,既有 callers 行為不變)。
+
     Args:
         strategy_name: 紀錄用 strategy name(可以 None);**已不再觸發 disk
             load**。caller 想路由 per-strategy 必須自己傳 strategy_model。
@@ -848,6 +908,8 @@ def predict_for_strategy(
         fallback_model: 通用模型;strategy_model 沒給時用。None 時兩個都沒
             → 全 None dict 回傳。
         strategy_model: 已載入的 per-strategy model;優先於 fallback。
+        strategy_calibrator: 對應 strategy_model 的 calibrator(可以 None)
+        fallback_calibrator: 對應 fallback_model 的 calibrator(可以 None)
 
     Returns:
         {sid: prob | None};沒任何 model + sids 非空 → {sid: None}
@@ -855,11 +917,131 @@ def predict_for_strategy(
     if not stock_ids:
         return {}
 
-    chosen = strategy_model if strategy_model is not None else fallback_model
+    use_strategy = strategy_model is not None
+    chosen = strategy_model if use_strategy else fallback_model
+    chosen_cal = strategy_calibrator if use_strategy else fallback_calibrator
     if chosen is None:
         return {sid: None for sid in stock_ids}
 
-    return predict_batch(chosen, stock_ids, target_date, db_path=db_path)
+    return predict_batch(
+        chosen, stock_ids, target_date,
+        db_path=db_path, calibrator=chosen_cal,
+    )
+
+
+def train_with_calibration(
+    X: pd.DataFrame,
+    y: pd.Series,
+    dates: pd.Series | None = None,
+    *,
+    holdout_frac: float = 0.2,
+    calibration_method: str = "isotonic",
+    rf_kwargs: dict | None = None,
+) -> tuple:
+    """Train base RF on first (1-holdout) samples + fit calibrator on holdout。
+
+    時序 split:把 X / y 按 dates(沒給就假設 caller 已排好)排序,**最後**
+    holdout_frac 比例的樣本做 holdout(不能 random shuffle — 時間序列 random
+    split 會 leak 未來資訊回 train)。
+
+    args:
+        X / y:訓練資料(features + label)
+        dates:對應每 row 的 date(YYYY-MM-DD 字串);None → 假設 X 已時序排好
+        holdout_frac:後段 holdout 比例(default 0.2)
+        calibration_method:'isotonic'(預設)/ 'platt';樣本 < 500 自動 fallback platt
+        rf_kwargs:覆寫 RandomForest 預設 hyperparams
+
+    returns:
+        (base_model, calibrator, metrics) — metrics 含 holdout / train sample 數、
+        raw + calibrated brier score、calibration method used、win_rate 等。
+        樣本 < 50 或 holdout 全同類 → raise ValueError(對齊 train_short_pick_model)。
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    from src import ml_calibration
+
+    if len(X) < 50:
+        raise ValueError(
+            f"訓練資料太少({len(X)} samples),最少 50 筆才能 train"
+        )
+    if len(X) != len(y):
+        raise ValueError(f"X / y 長度不一致:{len(X)} vs {len(y)}")
+
+    # 時序排序:dates 給的話按其排,否則假設 X 已排好
+    if dates is not None:
+        if len(dates) != len(X):
+            raise ValueError(
+                f"dates / X 長度不一致:{len(dates)} vs {len(X)}"
+            )
+        order = pd.Series(list(dates)).reset_index(drop=True).argsort(
+            kind="stable",
+        )
+        X_sorted = X.iloc[order].reset_index(drop=True)
+        y_sorted = pd.Series(y).iloc[order].reset_index(drop=True)
+    else:
+        X_sorted = X.reset_index(drop=True)
+        y_sorted = pd.Series(y).reset_index(drop=True)
+
+    # 後段 holdout
+    n = len(X_sorted)
+    holdout_n = max(1, int(round(n * holdout_frac)))
+    train_n = n - holdout_n
+    if train_n < 30:
+        raise ValueError(
+            f"扣 holdout 後訓練集太少({train_n} < 30),holdout_frac 太大或資料不足"
+        )
+    X_train = X_sorted.iloc[:train_n]
+    y_train = y_sorted.iloc[:train_n].astype(int)
+    X_holdout = X_sorted.iloc[train_n:]
+    y_holdout = y_sorted.iloc[train_n:].astype(int)
+
+    if len(set(y_train.tolist())) < 2:
+        raise ValueError(
+            "train 段全同類(time-based split 偏掉了),無法 train 二元分類"
+        )
+    if len(set(y_holdout.tolist())) < 2:
+        raise ValueError(
+            "holdout 段全同類,無法 fit calibrator(需 win + loss 都有)"
+        )
+
+    kwargs = dict(
+        n_estimators=100,
+        max_depth=5,
+        min_samples_leaf=5,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    if rf_kwargs:
+        kwargs.update(rf_kwargs)
+    model = RandomForestClassifier(**kwargs)
+    model.fit(X_train, y_train)
+
+    # raw probs on holdout for calibration + brier
+    raw_holdout = ml_calibration._extract_positive_proba(model, X_holdout)
+    raw_metrics = ml_calibration.compute_calibration_metrics(
+        np.asarray(y_holdout), raw_holdout,
+    )
+
+    calibrator = ml_calibration.fit_calibrator(
+        model, X_holdout, y_holdout, method=calibration_method,
+    )
+    calibrated_holdout = calibrator.transform(raw_holdout)
+    cal_metrics = ml_calibration.compute_calibration_metrics(
+        np.asarray(y_holdout), calibrated_holdout,
+    )
+
+    metrics = {
+        "n_train": int(train_n),
+        "n_holdout": int(holdout_n),
+        "n_total": int(n),
+        "win_rate_overall": float(np.mean(y_sorted)),
+        "calibration_method": calibrator.method,
+        "raw_brier": raw_metrics["brier_score"],
+        "calibrated_brier": cal_metrics["brier_score"],
+        "raw_reliability_bins": raw_metrics["reliability_bins"],
+        "calibrated_reliability_bins": cal_metrics["reliability_bins"],
+    }
+    return model, calibrator, metrics
 
 
 __all__ = [
@@ -870,11 +1052,14 @@ __all__ = [
     "compute_label",
     "build_training_dataset",
     "train_short_pick_model",
+    "train_with_calibration",
     "predict_short_pick_winrate",
     "predict_batch",
     "save_model",
     "load_model",
     "load_strategy_model",
+    "load_strategy_calibrator",
+    "load_short_pick_calibrator",
     "predict_for_strategy",
     "per_strategy_model_path",
     "dump_model_meta",

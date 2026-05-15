@@ -227,25 +227,32 @@ def train_one(
             "status": "fallback",
             "oob_score": None,
             "pkl_path": None,
+            "calibration": None,
         }
 
     # 真的訓:RandomForest with OOB
     from sklearn.ensemble import RandomForestClassifier
+    from src import ml_calibration
 
+    # gather_training_set 內 rows 按 (date asc, sid) 序 append,所以 row order
+    # 就是時序;最後 20% holdout 走 train_with_calibration 邏輯(time-based)
+    train_df = train_df.sort_values(["date"], kind="stable").reset_index(drop=True)
     X = train_df[ml_predictor.FEATURE_NAMES].copy()
     y = train_df["label"].astype(int)
+    dates = train_df["date"]
 
     rf_params = _rf_params_for(strategy_name)
-    model = RandomForestClassifier(
-        n_estimators=rf_params["n_estimators"],
-        max_depth=rf_params["max_depth"],
-        min_samples_leaf=rf_params["min_samples_leaf"],
-        class_weight="balanced",
-        oob_score=True,
-        bootstrap=True,
-        random_state=42,
-        n_jobs=-1,
-    )
+    base_rf_kwargs = {
+        "n_estimators": rf_params["n_estimators"],
+        "max_depth": rf_params["max_depth"],
+        "min_samples_leaf": rf_params["min_samples_leaf"],
+        "class_weight": "balanced",
+        "oob_score": True,
+        "bootstrap": True,
+        "random_state": 42,
+        "n_jobs": -1,
+    }
+    model = RandomForestClassifier(**base_rf_kwargs)
     model.fit(X, y)
     oob_score = float(getattr(model, "oob_score_", 0.0))
 
@@ -255,6 +262,55 @@ def train_one(
     )
 
     ml_predictor.save_model(model, pkl_path)
+
+    # 訓練 calibrator(time-based 後 20% holdout 重訓一個 base + 算 raw/cal brier)
+    # 注意:save 的 base model 仍是「全資料訓的 model」(production 用)— calibrator
+    # 是用 holdout 評估 + fit,跟 production model 共用同份 X 拍 raw probs 算 brier。
+    calibration_info: dict | None = None
+    try:
+        # 用全資料 model 對全資料的 holdout 段算 raw probs,fit calibrator
+        n = len(X)
+        holdout_n = max(1, int(round(n * 0.2)))
+        train_n = n - holdout_n
+        X_holdout = X.iloc[train_n:]
+        y_holdout = y.iloc[train_n:]
+        if len(set(y_holdout.tolist())) >= 2:
+            raw_holdout = ml_calibration._extract_positive_proba(model, X_holdout)
+            raw_metrics = ml_calibration.compute_calibration_metrics(
+                y_holdout.to_numpy(), raw_holdout,
+            )
+            calibrator = ml_calibration.fit_calibrator(
+                model, X_holdout, y_holdout, method="isotonic",
+            )
+            cal_path = ml_calibration.save_calibrator(calibrator, strategy_name)
+            calibrated_holdout = calibrator.transform(raw_holdout)
+            cal_metrics = ml_calibration.compute_calibration_metrics(
+                y_holdout.to_numpy(), calibrated_holdout,
+            )
+            calibration_info = {
+                "method": calibrator.method,
+                "n_holdout": int(holdout_n),
+                "raw_brier": float(raw_metrics["brier_score"]),
+                "calibrated_brier": float(cal_metrics["brier_score"]),
+                "pkl_path": str(cal_path),
+            }
+            print(
+                f"[TRAIN-PS] {strategy_name}: calibrator({calibrator.method}) "
+                f"Brier {raw_metrics['brier_score']:.4f} → "
+                f"{cal_metrics['brier_score']:.4f}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[TRAIN-PS] {strategy_name}: holdout 全同類,跳過 calibrator",
+                flush=True,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[TRAIN-PS] {strategy_name}: calibrator 訓練失敗(non-fatal):"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
 
     meta = {
         "strategy": strategy_name,
@@ -278,6 +334,8 @@ def train_one(
         "max_depth": rf_params["max_depth"],
         "min_samples_leaf": rf_params["min_samples_leaf"],
     }
+    if calibration_info:
+        meta["calibration"] = calibration_info
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
     )
@@ -290,6 +348,7 @@ def train_one(
         "status": "trained",
         "oob_score": oob_score,
         "pkl_path": str(pkl_path),
+        "calibration": calibration_info,
     }
 
 
@@ -301,15 +360,22 @@ def _print_summary(results: list[dict]) -> None:
     print("", flush=True)
     print(
         f"{'Strategy':<24s} {'Samples':>8s} {'Wins':>6s} "
-        f"{'WinRate':>8s} {'OOB':>7s} {'Status':>10s}",
+        f"{'WinRate':>8s} {'OOB':>7s} {'Brier raw→cal':>15s} {'Status':>10s}",
         flush=True,
     )
-    print("-" * 72, flush=True)
+    print("-" * 90, flush=True)
     for r in results:
         oob = f"{r['oob_score'] * 100:>6.1f}%" if r["oob_score"] is not None else "    n/a"
+        cal = r.get("calibration")
+        if cal:
+            brier_str = (
+                f"{cal['raw_brier']:.3f}→{cal['calibrated_brier']:.3f}"
+            )
+        else:
+            brier_str = "n/a"
         print(
             f"{r['strategy']:<24s} {r['samples']:>8d} {r['wins']:>6d} "
-            f"{r['win_rate'] * 100:>7.1f}% {oob} {r['status']:>10s}",
+            f"{r['win_rate'] * 100:>7.1f}% {oob} {brier_str:>15s} {r['status']:>10s}",
             flush=True,
         )
     print("", flush=True)

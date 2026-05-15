@@ -53,11 +53,15 @@ def _train_one_split(
     X_test: pd.DataFrame,
     y_test: pd.Series,
     rf_kwargs: dict | None = None,
+    calibrate: bool = True,
 ) -> dict:
-    """一個 split 內訓 + 評(train + test 各算 ROC / PR / log loss)。
+    """一個 split 內訓 + 評(train + test 各算 ROC / PR / log loss + Brier)。
 
     rf_kwargs:覆寫 default _RF_KWARGS(供 per-strategy 客製 hyperparams,
     e.g. gap_up 用 max_depth=5 / min_samples_leaf=10 抑制 overfit)。
+
+    calibrate=True 時額外算 calibrated 的 brier(用 X_train 後 20% holdout
+    fit calibrator),讓 WF 評估能對比 raw vs calibrated 校準狀況。
     """
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import (
@@ -70,6 +74,25 @@ def _train_one_split(
     model = RandomForestClassifier(**kwargs)
     model.fit(X_train, y_train)
 
+    # 訓 calibrator(用 X_train 後 20% holdout — 不再 leak X_test 進去)
+    calibrator = None
+    if calibrate:
+        try:
+            from src import ml_calibration
+
+            n = len(X_train)
+            cal_holdout = max(10, int(round(n * 0.2)))
+            cal_train_n = n - cal_holdout
+            if cal_train_n >= 30 and cal_holdout >= 10:
+                X_cal = X_train.iloc[cal_train_n:]
+                y_cal = y_train.iloc[cal_train_n:]
+                if len(set(y_cal.tolist())) >= 2:
+                    calibrator = ml_calibration.fit_calibrator(
+                        model, X_cal, y_cal, method="isotonic",
+                    )
+        except Exception:  # noqa: BLE001
+            calibrator = None
+
     def _eval(X, y):
         # predict_proba 對 class=1 的欄(class_weight=balanced 仍會輸出 [P0, P1])
         proba = model.predict_proba(X)
@@ -79,6 +102,17 @@ def _train_one_split(
         else:
             # 訓練資料全 0(極端 case)→ 給 0.0,後續 metric 全是 NaN 不能算
             p1 = np.zeros(len(X))
+        # raw brier(永遠算,單類也算得出來)
+        y_arr = np.asarray(y, dtype=float)
+        raw_brier = float(np.mean((y_arr - p1) ** 2)) if len(y_arr) else float("nan")
+        # calibrated brier:有 calibrator 才算
+        cal_brier = float("nan")
+        if calibrator is not None and len(p1):
+            try:
+                p1_cal = calibrator.transform(p1)
+                cal_brier = float(np.mean((y_arr - p1_cal) ** 2))
+            except Exception:  # noqa: BLE001
+                cal_brier = float("nan")
         # 單類 → roc_auc / pr_auc 算不出來(sklearn raise),回 NaN
         unique_y = set(np.unique(y).tolist())
         if len(unique_y) < 2:
@@ -86,6 +120,8 @@ def _train_one_split(
                 "roc_auc": float("nan"),
                 "pr_auc": float("nan"),
                 "log_loss": float("nan"),
+                "brier": raw_brier,
+                "calibrated_brier": cal_brier,
                 "n": int(len(y)),
                 "pos_rate": float(np.mean(y)),
             }
@@ -93,6 +129,8 @@ def _train_one_split(
             "roc_auc": float(roc_auc_score(y, p1)),
             "pr_auc": float(average_precision_score(y, p1)),
             "log_loss": float(log_loss(y, np.clip(p1, 1e-7, 1 - 1e-7))),
+            "brier": raw_brier,
+            "calibrated_brier": cal_brier,
             "n": int(len(y)),
             "pos_rate": float(np.mean(y)),
         }
@@ -340,11 +378,14 @@ def walkforward_summary(results: list[dict]) -> dict:
       results 為空 → 全 NaN(caller 自己決定如何處理)。
     """
     if not results:
+        empty_stat = {k: float("nan") for k in ("mean", "std", "min", "max")}
         return {
             "n_splits": 0,
-            "test_roc_auc": {k: float("nan") for k in ("mean", "std", "min", "max")},
-            "test_pr_auc": {k: float("nan") for k in ("mean", "std", "min", "max")},
-            "test_log_loss": {k: float("nan") for k in ("mean", "std", "min", "max")},
+            "test_roc_auc": dict(empty_stat),
+            "test_pr_auc": dict(empty_stat),
+            "test_log_loss": dict(empty_stat),
+            "test_brier_raw": dict(empty_stat),
+            "test_brier_calibrated": dict(empty_stat),
             "train_roc_auc_mean": float("nan"),
         }
 
@@ -363,6 +404,11 @@ def walkforward_summary(results: list[dict]) -> dict:
     test_pr = [r["test"]["pr_auc"] for r in results]
     test_ll = [r["test"]["log_loss"] for r in results]
     train_roc = [r["train"]["roc_auc"] for r in results]
+    # brier:_train_one_split 加進來,舊 split 沒這欄 → graceful NaN
+    test_brier_raw = [r["test"].get("brier", float("nan")) for r in results]
+    test_brier_cal = [
+        r["test"].get("calibrated_brier", float("nan")) for r in results
+    ]
 
     train_roc_arr = np.array(
         [v for v in train_roc if not np.isnan(v)], dtype=float
@@ -374,6 +420,8 @@ def walkforward_summary(results: list[dict]) -> dict:
         "test_roc_auc": _agg(test_roc),
         "test_pr_auc": _agg(test_pr),
         "test_log_loss": _agg(test_ll),
+        "test_brier_raw": _agg(test_brier_raw),
+        "test_brier_calibrated": _agg(test_brier_cal),
         "train_roc_auc_mean": train_roc_mean,
     }
 

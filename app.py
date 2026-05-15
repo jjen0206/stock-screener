@@ -39,6 +39,7 @@ def _toc(label: str) -> None:
 
 _TIMING_START: dict[str, float] = {}
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -625,6 +626,36 @@ def _get_strategy_ml_model(strategy_name: str):
         return None
 
 
+@st.cache_resource(show_spinner=False)
+def _get_strategy_ml_calibrator(strategy_name: str):
+    """cache load per-strategy calibrator;不存在 → None(caller fallback raw prob)。"""
+    try:
+        from src.ml_predictor import load_strategy_calibrator
+        return load_strategy_calibrator(strategy_name)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/enrich] _get_strategy_ml_calibrator({strategy_name}) exception:"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _get_short_pick_calibrator():
+    """cache load 通用 short_pick calibrator;不存在 → None。"""
+    try:
+        from src.ml_predictor import load_short_pick_calibrator
+        return load_short_pick_calibrator()
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[ML/enrich] _get_short_pick_calibrator exception:"
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+        return None
+
+
 def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
     """套用 picks 過濾鏈 — confluence(共識)+ confidence(ML 機率)雙層。
 
@@ -706,8 +737,12 @@ def _enrich_df_with_ml_prob(
             return enriched
         from src.ml_predictor import predict_batch
         sids = df["stock_id"].tolist()
+        general_calibrator = _get_short_pick_calibrator()
         try:
-            probs = predict_batch(general_model, sids, trade_date)
+            probs = predict_batch(
+                general_model, sids, trade_date,
+                calibrator=general_calibrator,
+            )
         except Exception as e:  # noqa: BLE001
             print(
                 f"[ML/enrich] predict_batch 失敗:{type(e).__name__}: {e}",
@@ -725,6 +760,7 @@ def _enrich_df_with_ml_prob(
     )
 
     from src.ml_predictor import predict_for_strategy
+    general_calibrator = _get_short_pick_calibrator()
     all_probs: dict[str, float | None] = {}
     for chosen, group_df in enriched.groupby(
         "_chosen_strategy", dropna=False, sort=False,
@@ -733,9 +769,11 @@ def _enrich_df_with_ml_prob(
         if pd.isna(chosen) or chosen is None:
             chosen_name = None
             sm = None
+            sc = None
         else:
             chosen_name = str(chosen)
             sm = _get_strategy_ml_model(chosen_name)
+            sc = _get_strategy_ml_calibrator(chosen_name)
         try:
             probs = predict_for_strategy(
                 strategy_name=chosen_name,
@@ -743,6 +781,8 @@ def _enrich_df_with_ml_prob(
                 target_date=trade_date,
                 fallback_model=general_model,
                 strategy_model=sm,
+                strategy_calibrator=sc,
+                fallback_calibrator=general_calibrator,
             )
         except Exception as e:  # noqa: BLE001
             print(
@@ -6486,6 +6526,56 @@ def _render_vbt_grid_tab() -> None:
     )
 
 
+def _render_reliability_diagram(strategy: str) -> None:
+    """畫某策略的 reliability diagram(holdout 內 10 bins 預測 vs 實際命中率)。
+
+    從 calibrator pkl + 對應 base model 不再重算 raw probs(訓練時 dataset
+    沒持久化),改成 reconstruct calibrator 的 input grid:show 校正曲線從
+    0→1 的形狀(model → calibrator 的轉換),搭配對角線當「完美校準」基線。
+
+    沒 calibrator → 顯示空狀態提示。
+    """
+    try:
+        from src import ml_calibration
+
+        cal = ml_calibration.load_calibrator(strategy)
+        if cal is None:
+            st.info(f"找不到 calibrator(`models/calibrators/{strategy}.pkl`)")
+            return
+        # 在 [0, 1] 上取 11 個點看映射形狀
+        grid = np.linspace(0.0, 1.0, 11)
+        mapped = cal.transform(grid)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1],
+            mode="lines",
+            line=dict(dash="dash", color="gray"),
+            name="完美校準(對角線)",
+        ))
+        fig.add_trace(go.Scatter(
+            x=grid, y=mapped,
+            mode="lines+markers",
+            name=f"{strategy} 校正曲線 ({cal.method})",
+            line=dict(color="#1f77b4", width=2),
+        ))
+        fig.update_layout(
+            xaxis_title="模型 raw probability",
+            yaxis_title="calibrator 轉換後 prob",
+            xaxis=dict(range=[0, 1]),
+            yaxis=dict(range=[0, 1]),
+            height=320,
+            margin=dict(l=40, r=20, t=20, b=40),
+            showlegend=True,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "曲線在對角線上方 = 模型低估(校正後拉高);"
+            "下方 = 模型高估(校正後壓低)。轉折越明顯,raw RF 越偏離真實機率。"
+        )
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Reliability diagram 渲染失敗:{type(e).__name__}: {e}")
+
+
 def _page_system_brief() -> None:
     """📋 系統結論頁 — 軍師主觀統整 DB + 策略表現 + 市場狀態 + 建議。
 
@@ -6654,6 +6744,38 @@ def _page_system_brief() -> None:
     feats = ml.get("top_features") or []
     if feats:
         st.caption("**Top 5 features**: " + " · ".join(feats))
+
+    # === ML 機率校準健康度(2026-05-15 加) ===
+    cal_health = ml.get("calibration_health") or []
+    if cal_health:
+        st.markdown("#### 🎯 ML 機率校準 (Brier score)")
+        df_cal = pd.DataFrame([
+            {
+                "策略": c["strategy"],
+                "method": c.get("method") or "—",
+                "holdout N": c.get("n_holdout") or 0,
+                "Raw Brier": f"{c['raw_brier']:.3f}" if c["raw_brier"] == c["raw_brier"] else "—",
+                "校正後 Brier": f"{c['calibrated_brier']:.3f}" if c["calibrated_brier"] == c["calibrated_brier"] else "—",
+                "Δ (改善)": (
+                    f"{c['raw_brier'] - c['calibrated_brier']:+.3f}"
+                    if c["raw_brier"] == c["raw_brier"] and c["calibrated_brier"] == c["calibrated_brier"]
+                    else "—"
+                ),
+                "健康": "✅" if c["is_healthy"] else "⚠️",
+            }
+            for c in cal_health
+        ])
+        st.dataframe(df_cal, use_container_width=True, hide_index=True)
+        st.caption(
+            "Brier score 越低越好(perfect=0, random≈0.25, > 0.3 偏離校準)。"
+            "✅ = 校正後 < 0.25,信心度可作決策依據;⚠️ = 校正失效,UI 預測請打折看。"
+        )
+        # Reliability diagram 折疊區(取第一個有 calibration block 的 strategy 畫)
+        first_health = cal_health[0]
+        with st.expander(
+            f"📊 Reliability diagram — {first_health['strategy']}", expanded=False,
+        ):
+            _render_reliability_diagram(first_health["strategy"])
 
     # === 觀察清單 ===
     st.markdown("### 🎯 今日觀察清單")

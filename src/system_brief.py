@@ -193,6 +193,11 @@ def _build_ml_performance(
     short_pick_roc_auc:meta.json 沒存 ROC AUC（schema 只有 accuracy/precision/
     recall/f1）→ 用 accuracy 代替，欄位名稱保留 short_pick_roc_auc 對齊主公規格。
     若主公後續校準腳本補 roc_auc 進 meta，自動切換用之。
+
+    `calibration_health`(2026-05-15 加):從 short_pick.meta.json + per_strategy
+    meta.json 內 calibration block 拿 raw/calibrated Brier,給 UI 畫 per-strategy
+    校準健康度。每個 entry:{strategy, raw_brier, calibrated_brier, method,
+    n_holdout, is_healthy(< 0.25 視為健康)}。
     """
     if models_dir is None:
         models_dir = config.PROJECT_ROOT / "models"
@@ -204,7 +209,20 @@ def _build_ml_performance(
         "calibration_sample_n": 0,
         "top_features": [],
         "model_trained_at": None,
+        "calibration_health": [],
     }
+
+    def _cal_entry(name: str, cal_block: dict) -> dict:
+        cb = float(cal_block.get("calibrated_brier", float("nan")))
+        rb = float(cal_block.get("raw_brier", float("nan")))
+        return {
+            "strategy": name,
+            "method": cal_block.get("method"),
+            "n_holdout": int(cal_block.get("n_holdout", 0)),
+            "raw_brier": rb,
+            "calibrated_brier": cb,
+            "is_healthy": (cb == cb) and cb < 0.25,  # NaN 自動 False
+        }
 
     if meta_path.exists():
         try:
@@ -217,8 +235,31 @@ def _build_ml_performance(
             out["model_trained_at"] = meta.get("trained_at")
             features = meta.get("feature_names") or []
             out["top_features"] = list(features)[:5]
+            cal_block = meta.get("calibration")
+            if cal_block:
+                out["calibration_health"].append(
+                    _cal_entry("short_pick", cal_block)
+                )
         except (OSError, json.JSONDecodeError):
             pass
+
+    # per-strategy calibrators 健康度(meta.json 內 calibration 區塊)
+    per_strategy_dir = Path(models_dir) / "per_strategy"
+    if per_strategy_dir.exists():
+        for meta_file in sorted(per_strategy_dir.glob("*.meta.json")):
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                cal_block = meta.get("calibration")
+                if not cal_block:
+                    continue
+                strategy_name = meta.get("strategy") or meta_file.stem.replace(
+                    ".meta", "",
+                )
+                out["calibration_health"].append(
+                    _cal_entry(strategy_name, cal_block)
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
 
     # calibration:最近 N 天 ml_prob > 0.6 的 picks 真實命中率
     today_iso = _today_iso()
