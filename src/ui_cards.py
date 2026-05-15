@@ -101,33 +101,52 @@ def _build_card_html(
                     f"🏭 {ind_str}</div>"
                 )
 
-    # ⚠️ 警示股 badge(2026-05-15 主公拍板,違約交割教訓):有 active warning →
-    # sid 區塊加紅色背景 badge,類別中文直顯(不用 hover-only,iPhone 窄屏要看到)。
-    # 多個 warning → 用 ` · ` 串接;違約 / 全額排前(主公最在意這兩類)。
+    # ⚠️ 警示股 badge(2026-05-15 主公拍板;同日 amendment:不 hard exclude,
+    # 只標註 + 顯眼 badge 讓主公自己決定):
+    #   - SEVERE (default_settlement / full_cash) → 紅底白字加粗 13px(最顯眼)
+    #   - SOFT   (attention / disposition / method_changed) → 黃底紅字 11px
+    # 同 pick 兩類都中 → render 兩個 badge(主公看到全貌)。Mobile-first inline
+    # 不靠 hover,iPhone 窄屏一眼就看到。
     warning_html = ""
     if warnings:
         from src.warnings_filter import (
-            HARD_EXCLUDE_TYPES, WARNING_TYPE_LABELS,
+            SEVERE_PENALTY_TYPES, SOFT_PENALTY_TYPES, WARNING_TYPE_LABELS,
         )
-        # 排序:HARD_EXCLUDE_TYPES 優先,其他按 announced_date desc
-        def _wt_priority(w: dict) -> tuple[int, str]:
-            wt = str(w.get("warning_type", ""))
-            pri = 0 if wt in HARD_EXCLUDE_TYPES else 1
-            return (pri, str(w.get("announced_date", "")))
-        sorted_w = sorted(warnings, key=_wt_priority)
-        labels = []
-        for w in sorted_w:
+        # 分嚴重等級 group + dedupe
+        severe_labels: list[str] = []
+        soft_labels: list[str] = []
+        for w in warnings:
             wt = str(w.get("warning_type", ""))
             label = WARNING_TYPE_LABELS.get(wt, wt)
-            if label and label not in labels:  # dedupe
-                labels.append(label)
-        if labels:
-            warning_html = (
-                f"<div style='font-size:11px;color:#fff;background:#d62728;"
-                f"padding:2px 6px;border-radius:4px;display:inline-block;"
-                f"margin-top:2px;font-weight:500'>"
-                f"⚠️ {' · '.join(labels)}</div>"
+            if not label:
+                continue
+            if wt in SEVERE_PENALTY_TYPES:
+                if label not in severe_labels:
+                    severe_labels.append(label)
+            elif wt in SOFT_PENALTY_TYPES:
+                if label not in soft_labels:
+                    soft_labels.append(label)
+            else:  # 未分類 → 當 SOFT 處理
+                if label not in soft_labels:
+                    soft_labels.append(label)
+        badge_parts: list[str] = []
+        if severe_labels:
+            # 嚴重:紅底白字加粗 13px,iPhone 窄屏絕對看得見
+            badge_parts.append(
+                f"<div style='font-size:13px;color:#fff;background:#d62728;"
+                f"padding:3px 8px;border-radius:4px;display:inline-block;"
+                f"margin-top:3px;font-weight:700;border:1px solid #a71d2a'>"
+                f"⚠️ {' · '.join(severe_labels)}</div>"
             )
+        if soft_labels:
+            # 一般:黃底紅字 11px(視覺次序低於 SEVERE)
+            badge_parts.append(
+                f"<div style='font-size:11px;color:#a64500;background:#fff3cd;"
+                f"padding:2px 6px;border-radius:4px;display:inline-block;"
+                f"margin-top:3px;font-weight:500;border:1px solid #ffe69c'>"
+                f"⚠ {' · '.join(soft_labels)}</div>"
+            )
+        warning_html = "".join(badge_parts)
 
     # row 1 / 股號 + 名稱(股名為主視覺:18px 500;股號 13px secondary 化為 label)
     sid_block = (

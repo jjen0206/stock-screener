@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-05-15 — 警示股 annotate-only(amendment:不替主公做隱藏決定)
+
+### Changed
+- **拿掉 hard exclude**:同日稍早版本 `exclude_warned_stocks` 把違約 / 全額股直接從 picks 剔除,違反「軍師主動提示風險,但不替主公做隱藏決定」原則 — 違約股偶爾反彈很猛,主公有時有特殊資訊想接刀,系統沒資格替他擋
+- `src/warnings_filter.py`:
+  - `exclude_warned_stocks` → 改為 `annotate_warned_stocks(conn, picks, as_of=None)` 只**標註**,picks 不過濾(in-place 注入 'warnings' 欄位)
+  - `apply_soft_warning_penalty` 加重分流:SEVERE (default_settlement / full_cash) → ml_prob × 0.3 沉到推薦末段但仍顯;SOFT (attention / disposition / method_changed) → ml_prob × 0.7 維持
+  - `format_excluded_caption` rename `format_warning_caption`,文案改「⚠️ 推薦中含 N 檔警示股 (違約X 全額Y ...) — 風險已標註,進場與否主公自行判斷」
+  - `HARD_EXCLUDE_TYPES` rename `SEVERE_PENALTY_TYPES`(語意:嚴重等級降權,不是過濾)
+  - kill-switch `WARNING_FILTER_ENABLED` rename `WARNING_ANNOTATE_ENABLED`(精準描述新行為)
+- `src/notifier.py`:
+  - `_select_top_picks` 拔掉 hard exclude call,只留 annotate + soft penalty
+  - 模組級 cache `_LAST_EXCLUDED_WARNINGS` rename `_LAST_ANNOTATED_WARNINGS`
+  - `_format_short_picks_section` 改用 `format_warning_caption`,picks 範圍只算 top N(避免 caption 含未顯示的 picks)
+- `src/ui_cards.py`:badge 分嚴重等級樣式 — SEVERE 紅底白字加粗 13px(iPhone 窄屏絕對看見)/ SOFT 黃底紅字 11px;同 pick 兩類都中 → render 兩個 badge 全貌
+
+### Tests
+- `tests/test_warnings_filter.py` 重寫:18 cases 驗 annotate **不過濾** + SEVERE × 0.3 / SOFT × 0.7 + mixed types 取 SEVERE 不被稀釋 + 新文案不能含「已濾掉」+ regression guard 守住舊 hard-exclude API 已移除
+- `tests/test_notifier_warning_wire.py` 重寫:9 cases 驗警示股**仍在 picks 中**(只是排序往後)+ caption 出現新文案 + 舊 `exclude_warned_stocks` / `_LAST_EXCLUDED_WARNINGS` 不能再出現
+
+### Rationale
+主公規矩:**主動提示風險,但不替主公做隱藏決定**。隱藏會讓主公失去判斷的機會。改用「強弱軟降權 + UI 顯眼 badge + caption 提示」讓主公自己看到自己決定 — 嚴重的(違約 / 全額)用 ×0.3 沉到末段但仍顯,一般的(注意 / 處置 / 變更方法)用 ×0.7 自然往後。
+
+---
+
 ## 2026-05-15 — 警示股過濾(違約交割教訓 root cause)
 
 ### Added

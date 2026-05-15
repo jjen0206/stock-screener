@@ -40,12 +40,14 @@ _RETRY_DELAY_SECS = 1.0
 # 改 False 退回 phase 1 純 ml_prob 排序(出事時 kill-switch)。
 STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
 
-# 警示股過濾(2026-05-15 主公拍板,違約交割教訓 root cause):
-# - 硬擋 default_settlement + full_cash → exclude_warned_stocks 從 picks 剔
-# - soft 降權 attention / disposition / method_changed → ml_prob × 0.7 排序自然往後沉
-# 模組級 cache:_select_top_picks 跑完後把上一輪 excluded list 存這,format_top_picks_message
-# 撈出來組 caption 「✅ 已濾掉 N 檔警示股」。每次跑會被 reset(避免跨 run 殘留)。
-_LAST_EXCLUDED_WARNINGS: list[dict] = []
+# 警示股標註 + 軟降權(2026-05-15 主公拍板;同日 amendment:不替主公隱藏決定,
+# 拿掉 hard exclude,改成全 soft + UI badge):
+# - SEVERE (default_settlement / full_cash) → ml_prob × 0.3 嚴重的自動沉到末段但仍顯
+# - SOFT   (attention / disposition / method_changed) → ml_prob × 0.7
+# 模組級 cache:_select_top_picks 跑完後把帶 warning 的 picks 存這(包含被警示但
+# 仍出現在推薦中的 picks),format_top_picks_message 撈出組 caption「⚠️ 推薦中含 N 檔
+# 警示股」— 文案是提示而非「已濾掉」(主公規矩:不替他做隱藏決定)。
+_LAST_ANNOTATED_WARNINGS: list[dict] = []
 
 
 logger = logging.getLogger(__name__)
@@ -574,33 +576,39 @@ def _select_top_picks(
         fallback_used = True
         top_n = fallback_top_n  # downgrade output 上限到 3
 
-    # 警示股過濾(2026-05-15 主公拍板,違約交割教訓):
-    #   - 硬擋:default_settlement + full_cash → 從 qualified 剔除
-    #   - soft 降權:attention / disposition / method_changed → ml_prob × 0.7
-    # excluded list 存模組級 cache,format_top_picks_message 撈出來組 caption。
-    # WARNING_FILTER_ENABLED=false → 整段退化 no-op,主公出事可立刻關。
-    global _LAST_EXCLUDED_WARNINGS
-    _LAST_EXCLUDED_WARNINGS = []
+    # 警示股 annotate + 軟降權(2026-05-15 amendment:不 hard exclude,主公自己看):
+    #   - annotate:命中 active warning → 注 'warnings' 欄位給 UI badge / caption
+    #   - SEVERE penalty:default_settlement / full_cash → ml_prob × 0.3 沉到末段
+    #   - SOFT   penalty:attention / disposition / method_changed → ml_prob × 0.7
+    # 警示股仍會出現在 picks(只是排序往後),WARNING_ANNOTATE_ENABLED=false → no-op。
+    global _LAST_ANNOTATED_WARNINGS
+    _LAST_ANNOTATED_WARNINGS = []
     if qualified:
         try:
             from src.warnings_filter import (
-                exclude_warned_stocks, apply_soft_warning_penalty,
+                annotate_warned_stocks, apply_soft_warning_penalty,
             )
             with db.get_conn() as _wconn:
-                qualified, excluded = exclude_warned_stocks(
+                annotated_sids = annotate_warned_stocks(
                     _wconn, qualified, as_of=date,
                 )
-                _LAST_EXCLUDED_WARNINGS = excluded
-                # soft 降權:in-place 改 ml_prob × 0.7,讓下面 sort 自動往後沉
+                # soft penalty(分嚴重等級)— in-place 改 ml_prob,讓下面 sort 自動排後
                 apply_soft_warning_penalty(_wconn, qualified, as_of=date)
-            if excluded:
+            # 收集被 annotate 的 picks 給 caption(注意:這是 reference,
+            # 後續 sort 後仍指向同 dict,'warnings' 欄位不會丟)
+            _LAST_ANNOTATED_WARNINGS = [
+                p for p in qualified if p.get("warnings")
+            ]
+            if annotated_sids:
                 logger.info(
-                    "[NOTIFIER] 警示股硬擋 %d 檔: %s", len(excluded),
-                    [(e.get("sid"), e.get("warning_type")) for e in excluded],
+                    "[NOTIFIER] 警示股標註 %d 檔(仍在 picks,排序自動往後): %s",
+                    len(annotated_sids),
+                    [(p.get("sid"), p.get("warning_types"))
+                     for p in _LAST_ANNOTATED_WARNINGS],
                 )
         except Exception:  # noqa: BLE001
             logger.exception(
-                "[NOTIFIER] 警示股過濾失敗,picks 不過警示濾鏡(救火 fallback)"
+                "[NOTIFIER] 警示股標註失敗,picks 不過警示標註(救火 fallback)"
             )
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
@@ -1127,12 +1135,15 @@ def _format_short_picks_section(
             "⚠️ 今日無高信心 picks,降級顯示弱訊號 Top 3"
             "(僅過 ≥1 策略命中,未過 ML threshold)"
         )
-    # 警示股過濾 caption(2026-05-15 主公拍板)— 從 _LAST_EXCLUDED_WARNINGS 模組
-    # 級 cache 撈,_select_top_picks 跑完後填入。N=0 → graceful skip 不顯。
-    # _md_escape 不需要(caption 純中文 + emoji + 數字,無 _ * [ `)。
+    # 警示股 caption(2026-05-15 amendment:annotate-only,不 hard exclude)。
+    # 直接從 picks(已限縮為 top N 推播範圍)撈帶 'warnings' 的,讓 caption 數字
+    # 跟訊息內容一致(_LAST_ANNOTATED_WARNINGS 是全 qualified 範圍,可能包含
+    # 沒進 top N 的 picks,用 picks 自己的更精準)。
+    # 文案:「⚠️ 推薦中含 N 檔警示股 ...」— 不用「已濾掉」這種代主公決定的措辭。
     try:
-        from src.warnings_filter import format_excluded_caption
-        caption = format_excluded_caption(_LAST_EXCLUDED_WARNINGS)
+        from src.warnings_filter import format_warning_caption
+        annotated_in_message = [p for p in picks if p.get("warnings")]
+        caption = format_warning_caption(annotated_in_message)
         if caption:
             section_lines.append(caption)
     except Exception:  # noqa: BLE001
