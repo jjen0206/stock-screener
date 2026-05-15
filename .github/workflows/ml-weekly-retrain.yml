@@ -1,0 +1,267 @@
+name: ML Weekly Retrain (walk-forward A/B gate)
+
+# 週日 03:00 TW = 週六 19:00 UTC。比 retrain-ml.yml(週日 22:13 TW)早 19 小時 —
+# 這條走 walk-forward A/B gate(更嚴格的 OOS 評估),retrain-ml 走 random split
+# accuracy gate(寬鬆,backward-compat)。週日早上 03:00 跑完後,如果 KEEP 結果
+# 推上 main,當天 22:13 retrain-ml 重跑只是 random split 二次驗證。
+#
+# 流程(對齊 commit c0c1bbc weekly workflow + commit 0b90444 A/B gate 邏輯):
+# 1. 備份現有 .pkl → .pre_retrain.bak
+# 2. 跑 eval_walkforward.py 拿 OLD baseline(現有 model meta + dataset 評)
+# 3. 訓新 short_pick.pkl + per_strategy/*.pkl
+# 4. 再跑 eval_walkforward.py 拿 NEW
+# 5. 對每個 model:NEW 平均 walk-forward ROC < OLD - 0.02 → rollback .pre_retrain.bak
+# 6. Telegram push 結果摘要
+on:
+  schedule:
+    - cron: "0 19 * * 6"
+  workflow_dispatch:
+    inputs:
+      force_keep:
+        description: "強制 KEEP(略過 walk-forward A/B gate)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ml-weekly-retrain
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    # walk-forward × 2(OLD baseline + NEW)+ train 通用 2 分鐘 + per-strategy
+    # 8-10 分鐘 + preload + 緩衝。eval_walkforward 對 9 model × 5 splits ~5 分鐘。
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 備份現有 pkl → .pre_retrain.bak
+        run: |
+          for f in models/short_pick.pkl models/per_strategy/*.pkl; do
+            if [ -f "$f" ]; then
+              cp "$f" "$f.pre_retrain.bak"
+              echo "[BACKUP] $f → $f.pre_retrain.bak"
+            fi
+          done
+
+      - name: 跑 OLD walk-forward baseline(現有 dataset + 現有 FEATURE_NAMES)
+        run: |
+          python scripts/eval_walkforward.py --models all
+          # 把剛跑的 evaluated_at 存起來,稍後 NEW 跑完用 timestamp 區分 OLD vs NEW
+          python <<'PYEOF'
+          import os, sqlite3
+          from src.config import DATABASE_PATH
+          conn = sqlite3.connect(DATABASE_PATH)
+          ts = conn.execute(
+              "SELECT MAX(evaluated_at) FROM ml_walkforward_results"
+          ).fetchone()[0] or ""
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'OLD_EVAL_TS={ts}\n')
+          print(f'[GATE] OLD_EVAL_TS={ts}')
+          PYEOF
+
+      - name: 訓新 short_pick.pkl
+        run: python scripts/train_ml_model.py
+
+      - name: 訓新 per_strategy/*.pkl(11 strategies × 200 day lookback)
+        # 全 11 fallback 才 exit 1;讓 workflow 繼續算 A/B gate
+        continue-on-error: true
+        run: python scripts/train_per_strategy_ml.py --lookback 200
+
+      - name: 跑 NEW walk-forward(訓完後評估,看新 dataset 是否退化)
+        run: |
+          # sleep 1 秒確保 evaluated_at 跟 OLD 不同(timestamp 精度到 second)
+          sleep 1
+          python scripts/eval_walkforward.py --models all
+
+      - name: A/B gate — 比 NEW vs OLD,退步 > 0.02 ROC → rollback .pre_retrain.bak
+        env:
+          FORCE_KEEP: ${{ github.event.inputs.force_keep }}
+        run: |
+          python <<'PYEOF'
+          import json, os, shutil, sqlite3
+          from pathlib import Path
+          from src.config import DATABASE_PATH
+
+          OLD_TS = os.environ.get('OLD_EVAL_TS', '')
+          force = os.environ.get('FORCE_KEEP', 'false') == 'true'
+          TOLERANCE = 0.02
+
+          conn = sqlite3.connect(DATABASE_PATH)
+          conn.row_factory = sqlite3.Row
+
+          # NEW evaluated_at = MAX excluding OLD_TS
+          if OLD_TS:
+              new_ts = conn.execute(
+                  "SELECT MAX(evaluated_at) FROM ml_walkforward_results "
+                  "WHERE evaluated_at != ?", (OLD_TS,),
+              ).fetchone()[0]
+          else:
+              new_ts = conn.execute(
+                  "SELECT MAX(evaluated_at) FROM ml_walkforward_results"
+              ).fetchone()[0]
+
+          if not new_ts:
+              print('[GATE] 沒有 NEW eval 結果,abort')
+              raise SystemExit(1)
+
+          def _agg(ts):
+              if not ts:
+                  return {}
+              rows = conn.execute(
+                  "SELECT model_name, AVG(roc_auc) AS m, COUNT(*) AS n "
+                  "FROM ml_walkforward_results WHERE evaluated_at = ? "
+                  "GROUP BY model_name", (ts,),
+              ).fetchall()
+              return {r['model_name']: float(r['m']) for r in rows if r['m'] is not None}
+
+          old = _agg(OLD_TS)
+          new = _agg(new_ts)
+          print(f'[GATE] OLD_TS={OLD_TS} ({len(old)} models)')
+          print(f'[GATE] NEW_TS={new_ts} ({len(new)} models)')
+
+          # 對每個 model 比較;沒 OLD 的 model(首次)→ KEEP
+          decisions = {}
+          for name in sorted(set(old) | set(new)):
+              o = old.get(name)
+              n = new.get(name)
+              if n is None:
+                  # NEW 沒這 model(訓練失敗 / dataset 空)→ 不動 pkl
+                  decisions[name] = ('NO_DATA', o, n)
+                  continue
+              if o is None:
+                  decisions[name] = ('KEEP_FIRST', o, n)
+                  continue
+              delta = n - o
+              if delta < -TOLERANCE and not force:
+                  decisions[name] = ('ROLLBACK', o, n)
+              else:
+                  decisions[name] = ('KEEP', o, n)
+
+          # 執行 rollback
+          rolled_back = []
+          for name, (verdict, o, n) in decisions.items():
+              if verdict != 'ROLLBACK':
+                  continue
+              # short_pick / per_strategy 路徑
+              if name == 'short_pick':
+                  pkl = Path('models/short_pick.pkl')
+              else:
+                  pkl = Path('models/per_strategy') / f'{name}.pkl'
+              bak = pkl.with_suffix(pkl.suffix + '.pre_retrain.bak')
+              if bak.exists():
+                  shutil.copy(bak, pkl)
+                  rolled_back.append(name)
+                  print(f'[GATE] ROLLBACK {name}: NEW {n:.4f} < OLD {o:.4f} - {TOLERANCE} → restored {pkl}')
+              else:
+                  print(f'[GATE] ROLLBACK {name} (NEW {n:.4f} < OLD {o:.4f}) BUT no backup → keep new')
+
+          # 統計 + 寫 GITHUB_ENV
+          n_keep = sum(1 for v, _, _ in decisions.values() if v in ('KEEP', 'KEEP_FIRST'))
+          n_rollback = len(rolled_back)
+          n_nodata = sum(1 for v, _, _ in decisions.values() if v == 'NO_DATA')
+
+          # 摘要 — short_pick 詳細,per_strategy 統計
+          sp = decisions.get('short_pick', ('NO_DATA', None, None))
+          sp_msg = ''
+          if sp[0] not in ('NO_DATA',):
+              o_str = f'{sp[1]:.4f}' if sp[1] is not None else 'n/a'
+              n_str = f'{sp[2]:.4f}' if sp[2] is not None else 'n/a'
+              sp_msg = f'short_pick ROC {o_str}→{n_str} {sp[0]}'
+
+          ps_decisions = {k: v for k, v in decisions.items() if k != 'short_pick'}
+          ps_keep = sum(1 for v, _, _ in ps_decisions.values() if v in ('KEEP', 'KEEP_FIRST'))
+          ps_rollback = sum(1 for v, _, _ in ps_decisions.values() if v == 'ROLLBACK')
+          ps_total = len(ps_decisions)
+          ps_msg = f'per_strategy {ps_total} 中 {ps_keep} KEEP {ps_rollback} ROLLBACK'
+
+          summary = f'📊 ML 週重訓:{sp_msg} / {ps_msg}'
+          print(f'[GATE] {summary}')
+
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'AB_SUMMARY={summary}\n')
+              f.write(f'AB_KEEP={n_keep}\n')
+              f.write(f'AB_ROLLBACK={n_rollback}\n')
+              f.write(f'AB_NODATA={n_nodata}\n')
+
+          # 把 decisions json dump 給後續 commit message 用
+          out_path = Path('models/ab_summary.json')
+          out_path.parent.mkdir(parents=True, exist_ok=True)
+          out_path.write_text(json.dumps({
+              'old_ts': OLD_TS, 'new_ts': new_ts,
+              'tolerance': TOLERANCE, 'force': force,
+              'decisions': {k: {'verdict': v[0], 'old_roc': v[1], 'new_roc': v[2]} for k, v in decisions.items()},
+              'rolled_back': rolled_back,
+          }, indent=2, ensure_ascii=False), encoding='utf-8')
+          print(f'[GATE] 寫 {out_path}')
+          PYEOF
+
+      - name: Commit & push 新模型 + ab_summary
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/short_pick.pkl models/short_pick.meta.json
+          git add models/per_strategy/ models/ab_summary.json
+          if git diff --staged --quiet; then
+            echo "[RETRAIN] 模型內容無變(random_state 鎖死且資料沒變),不 commit"
+            exit 0
+          fi
+          git commit -F - <<MSGEND
+          chore(ml): weekly walk-forward retrain — ${AB_KEEP} KEEP / ${AB_ROLLBACK} ROLLBACK
+
+          ${AB_SUMMARY}
+
+          Auto-generated by .github/workflows/ml-weekly-retrain.yml.
+          A/B gate:walk-forward ROC AUC mean,新 < 舊 - 0.02 → rollback。
+
+          KEEP:        ${AB_KEEP}
+          ROLLBACK:    ${AB_ROLLBACK}
+          NO_DATA:     ${AB_NODATA}
+          OLD eval ts: ${OLD_EVAL_TS}
+          Run ID:      ${{ github.run_id }}
+          MSGEND
+          # rebase + retry 避免跟其他 workflow 撞 push
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "[RETRAIN] rebase failed, abort"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "[RETRAIN] push OK (attempt $i)"
+              exit 0
+            fi
+            echo "[RETRAIN] push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "::error::push 失敗 5 次,放棄"
+          exit 1
+
+      - name: Telegram push 結果摘要
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "[NOTIFY] 缺 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID,跳過"
+            exit 0
+          fi
+          MSG="${AB_SUMMARY:-📊 ML 週重訓:gate 失敗(A/B step 沒跑到)}"
+          curl -sS --fail -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="${MSG}" \
+            || echo "[NOTIFY] Telegram push 失敗(non-blocking)"
