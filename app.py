@@ -534,6 +534,18 @@ def _render_high_confidence_sidebar() -> None:
         help="該 pick 需被 N 個策略同時命中才顯示。N=1 等同關閉,N=2 預設。",
         key="confluence_n",
     )
+    # 跨策略共識 quick filter — 用 consensus meta(含分類)而不是 raw matched
+    # length,跨類別才會被算進來;同類別重複命中不算。預設 off。
+    st.sidebar.toggle(
+        "⭐ 只顯示 2+ 策略共識",
+        value=False,
+        help=(
+            "只顯示被 ≥ 2 策略共識命中的 picks(根據 src.consensus 統計)。"
+            "與上方 confluence N 差異:此 filter 用『跨類別』維度 — 跨類共識 "
+            "≥ 1 才視為共識股,純同類別重複不算。"
+        ),
+        key="consensus_only_on",
+    )
 
 
 def _matched_strategies_for_sid(agg: dict[str, dict], sid: str) -> list[str]:
@@ -561,6 +573,46 @@ def _enrich_df_with_matched_strategies(
         lambda sid: _matched_strategies_for_sid(agg, sid)
     )
     return enriched
+
+
+def _enrich_df_with_consensus(
+    df: "pd.DataFrame", agg: dict[str, dict],
+) -> "pd.DataFrame":
+    """把跨策略共識 meta 注入 df['consensus'] — ui_cards 渲 badge 用。
+
+    與 _enrich_df_with_matched_strategies 不同:matched_strategies 是 list,
+    consensus 是 dict(含 strategy_count / categories / category_count)。
+    沒命中策略的 sid → None。
+    """
+    if df is None or df.empty:
+        return df
+    from src.consensus import compute_strategy_consensus
+    strategy_to_sids: dict[str, list[str]] = {}
+    for sid, info in (agg or {}).items():
+        for strat_key in (info.get("details") or {}).keys():
+            strategy_to_sids.setdefault(strat_key, []).append(sid)
+    consensus_map = compute_strategy_consensus(strategy_to_sids)
+    enriched = df.copy()
+    enriched["consensus"] = enriched["stock_id"].map(
+        lambda sid: consensus_map.get(str(sid))
+    )
+    return enriched
+
+
+def _row_has_consensus(row: dict, min_count: int = 2) -> bool:
+    """判斷某 row 是否被 ≥ min_count 個策略共識命中。
+
+    優先看 row['consensus']['strategy_count'](新),沒值就 fallback 看
+    row['matched_strategies'] 的 length(legacy)。讓「⭐ 只顯示 2+ 策略
+    共識」filter 對未 enrich 的 caller 也仍能 graceful 運作。
+    """
+    cons = row.get("consensus") if isinstance(row, dict) else None
+    if isinstance(cons, dict):
+        try:
+            return int(cons.get("strategy_count", 0)) >= min_count
+        except (TypeError, ValueError):
+            pass
+    return len(row.get("matched_strategies") or []) >= min_count
 
 
 def _per_strategy_threshold_for_pick(matched: list[str]) -> float | None:
@@ -646,6 +698,13 @@ def _apply_confidence_filter(rows: list[dict]) -> tuple[list[dict], int]:
             r for r in rows
             if len(r.get("matched_strategies") or []) >= n_required
         ]
+        if not rows:
+            return [], total
+
+    # 1b. 跨策略共識 quick filter(可獨立 on/off)— 只留 strategy_count ≥ 2 的
+    # picks。consensus 欄未 enrich(legacy 路徑)時 fallback 看 matched_strategies。
+    if st.session_state.get("consensus_only_on", False):
+        rows = [r for r in rows if _row_has_consensus(r, min_count=2)]
         if not rows:
             return [], total
 
@@ -1066,13 +1125,16 @@ def _page_dashboard() -> None:
                             None,
                         )
                         # 先 enrich 全部(不限 head 3),才能對 ML 過濾後再取 Top 3
-                        df_full = _enrich_df_with_matched_strategies(
-                            _enrich_df_with_ml_prob(
-                                _enrich_df_with_win_rate(
-                                    aggregated_to_dataframe(agg), agg,
+                        df_full = _enrich_df_with_consensus(
+                            _enrich_df_with_matched_strategies(
+                                _enrich_df_with_ml_prob(
+                                    _enrich_df_with_win_rate(
+                                        aggregated_to_dataframe(agg), agg,
+                                    ),
+                                    trade_date=today_iso,
+                                    agg=agg,
                                 ),
-                                trade_date=today_iso,
-                                agg=agg,
+                                agg,
                             ),
                             agg,
                         )
@@ -1762,11 +1824,14 @@ def _page_short() -> None:
     _tic("short_aggregated_to_df")
     from src.strategies import enrich_with_analyst_target
     df = enrich_with_analyst_target(
-        _enrich_df_with_matched_strategies(
-            _enrich_df_with_ml_prob(
-                _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
-                trade_date=today_iso,
-                agg=agg,
+        _enrich_df_with_consensus(
+            _enrich_df_with_matched_strategies(
+                _enrich_df_with_ml_prob(
+                    _enrich_df_with_win_rate(aggregated_to_dataframe(agg), agg),
+                    trade_date=today_iso,
+                    agg=agg,
+                ),
+                agg,
             ),
             agg,
         ),
@@ -1870,15 +1935,21 @@ def _page_short() -> None:
                 st.info("📭 此分類本日無入選。")
                 continue
             sub_df = enrich_with_analyst_target(
-                _enrich_df_with_matched_strategies(
-                    _enrich_df_with_ml_prob(
-                        _enrich_df_with_win_rate(
-                            aggregated_to_dataframe(sub_agg), sub_agg,
+                _enrich_df_with_consensus(
+                    _enrich_df_with_matched_strategies(
+                        _enrich_df_with_ml_prob(
+                            _enrich_df_with_win_rate(
+                                aggregated_to_dataframe(sub_agg), sub_agg,
+                            ),
+                            trade_date=today_iso,
+                            agg=sub_agg,
                         ),
-                        trade_date=today_iso,
-                        agg=sub_agg,
+                        sub_agg,
                     ),
-                    sub_agg,
+                    # consensus 用 full agg(不是 sub_agg)— 跨類別共識的票
+                    # 來源不能被 category tab 切掉,否則卡片就看不到「跨類」
+                    # 的 ⭐⭐ 標籤。
+                    agg,
                 ),
             )
             sub_rows = sub_df.to_dict("records")
@@ -3477,6 +3548,66 @@ def _render_detail_header(sid: str) -> None:
             db.add_to_watchlist(sid)
             st.toast(f"已加入關注 {sid}", icon="⭐")
         st.rerun()
+
+    # 策略命中 + 共識 block — 從最近 daily_picks 撈該 sid 命中過哪些策略 +
+    # 分類。沒撈到資料 → graceful skip(該股可能不在最近的選股結果裡)。
+    _render_detail_strategy_hits(sid)
+
+
+def _render_detail_strategy_hits(sid: str) -> None:
+    """個股深度頁:列出該 sid 在最近 daily_picks 命中的策略 + 分類 + 共識 tier。
+
+    Mobile-first:單欄文字,每策略一行(中文標籤 + 類別 chip);最後加共識 badge。
+    沒命中任何策略(該 sid 不在 daily_picks 內) → 空 caption skip。
+    """
+    latest_date: str | None = None
+    try:
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(trade_date) AS d FROM daily_picks "
+                "WHERE universe='pure_stock'"
+            ).fetchone()
+        if row and row["d"]:
+            latest_date = str(row["d"])
+    except sqlite3.OperationalError:
+        latest_date = None
+    if not latest_date:
+        return
+    try:
+        agg = db.load_daily_picks(latest_date, "pure_stock")
+    except Exception:  # noqa: BLE001
+        agg = None
+    if not agg or sid not in agg:
+        return
+    details = agg[sid].get("details") or {}
+    matched = list(details.keys())
+    if not matched:
+        return
+
+    from src.strategies import STRATEGY_LABELS
+    from src.consensus import (
+        STRATEGY_CATEGORIES, compute_strategy_consensus, consensus_badge,
+    )
+    # 共識:用同日 agg 全 sid 算(category_count 才會反映全市場跨類維度)
+    strategy_to_sids: dict[str, list[str]] = {}
+    for _sid, info in agg.items():
+        for s in (info.get("details") or {}).keys():
+            strategy_to_sids.setdefault(s, []).append(_sid)
+    cons_map = compute_strategy_consensus(strategy_to_sids)
+    meta = cons_map.get(sid)
+    badge_text, tier = consensus_badge(meta)
+
+    with st.expander(f"🎯 策略命中({len(matched)})— {latest_date}", expanded=True):
+        if badge_text:
+            st.markdown(
+                f"**共識**:{badge_text}  "
+                f"(跨 {meta['category_count']} 類別 / "
+                f"{meta['strategy_count']} 策略)"
+            )
+        for s in matched:
+            label = STRATEGY_LABELS.get(s, s)
+            cat = STRATEGY_CATEGORIES.get(s, "未分類")
+            st.markdown(f"・**{label}** `<{cat}>`")
 
 
 def _render_detail_paper_trade_status(sid: str) -> None:
@@ -5834,13 +5965,16 @@ def _page_paper_tracking() -> None:
                         None,
                         None,
                     )
-                    df_full = _enrich_df_with_matched_strategies(
-                        _enrich_df_with_ml_prob(
-                            _enrich_df_with_win_rate(
-                                aggregated_to_dataframe(agg), agg,
+                    df_full = _enrich_df_with_consensus(
+                        _enrich_df_with_matched_strategies(
+                            _enrich_df_with_ml_prob(
+                                _enrich_df_with_win_rate(
+                                    aggregated_to_dataframe(agg), agg,
+                                ),
+                                trade_date=today_iso,
+                                agg=agg,
                             ),
-                            trade_date=today_iso,
-                            agg=agg,
+                            agg,
                         ),
                         agg,
                     )

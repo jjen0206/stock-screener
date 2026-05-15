@@ -56,6 +56,57 @@ def _fire_emoji(n_signals: int) -> str:
     return "🔥🔥🔥"  # 3+
 
 
+def _build_consensus_badge_html(consensus: dict | None) -> str:
+    """跨策略共識 badge — 接在股名後 inline 顯示。
+
+    格式:
+      跨類 ≥3 票  → `⭐⭐⭐ 強共識`(紅 #d62728,粗體)
+      跨類 2 票   → `⭐⭐ 共識`   (橙 #ff7f0e)
+      同類 2+ 票  → `⭐`         (灰 #888,不加字)
+      其他       → 空字串
+
+    `title` 屬性給滑鼠 hover / 手機長按時看具體命中策略 — mobile 短訊息友善
+    (不額外多塞一行 HTML)。
+
+    建立 HTML 時把 strategy keys 轉中文 label;查不到 fallback 顯 raw key。
+    """
+    if not consensus:
+        return ""
+    from src.consensus import consensus_badge
+    badge_text, tier = consensus_badge(consensus)
+    if not badge_text or tier == "none":
+        return ""
+    color_map = {
+        "cross_3": "#d62728",  # 紅,強訊號
+        "cross_2": "#ff7f0e",  # 橙,中強
+        "same_cat": "#888",    # 灰,弱
+    }
+    weight_map = {"cross_3": 600, "cross_2": 500, "same_cat": 400}
+    color = color_map.get(tier, "#888")
+    weight = weight_map.get(tier, 400)
+    # tooltip:中文 label 列出來,mobile 長按 / 桌機 hover 可看
+    try:
+        from src.strategies import STRATEGY_LABELS
+    except Exception:  # noqa: BLE001 — test 環境若 import 失敗仍回空 tooltip
+        STRATEGY_LABELS = {}
+    strats = consensus.get("strategies") or []
+    labels = [STRATEGY_LABELS.get(s, s) for s in strats]
+    cats = consensus.get("categories") or []
+    title_text = f"{', '.join(labels)}" if labels else ""
+    if cats:
+        title_text = f"{title_text} | 類別:{', '.join(cats)}"
+    # title attr 內 HTML 必須 escape — 雙引號特別小心(會切斷 attr)
+    title_safe = (
+        title_text.replace("&", "&amp;").replace('"', "&quot;")
+        .replace("<", "&lt;").replace(">", "&gt;")
+    )
+    return (
+        f" <span title=\"{title_safe}\" "
+        f"style='font-size:12px;color:{color};font-weight:{weight};"
+        f"margin-left:6px;white-space:nowrap;'>{badge_text}</span>"
+    )
+
+
 def _build_card_html(
     sid: str,
     name: str,
@@ -70,6 +121,7 @@ def _build_card_html(
     n_signals: int,
     industry: str | None = None,
     industry_heat: int = 0,
+    consensus: dict | None = None,
 ) -> str:
     """組整張卡片的 HTML(row 1 + row 2 + 右側 metadata)— 給 st.markdown
     一次吐出,省 streamlit widget 開銷。row 3 的「加入關注」/「展開詳細」
@@ -96,11 +148,15 @@ def _build_card_html(
                     f"🏭 {ind_str}</div>"
                 )
 
+    # 共識 badge:同類 2+ 票=⭐ / 跨類 2 票=⭐⭐ 共識 / 跨類 3+ 票=⭐⭐⭐ 強共識。
+    # title attr 列出具體哪幾個策略(mobile 長按 / desktop hover 才會顯)。
+    badge_html = _build_consensus_badge_html(consensus)
+
     # row 1 / 股號 + 名稱(股名為主視覺:18px 500;股號 13px secondary 化為 label)
     sid_block = (
         f"<div><div style='font-size:11px;color:#888'>股號</div>"
         f"<div style='font-size:13px;font-weight:400;color:#888'>{sid}</div>"
-        f"<div style='font-size:18px;font-weight:500'>{name}</div>"
+        f"<div style='font-size:18px;font-weight:500'>{name}{badge_html}</div>"
         f"{industry_html}</div>"
     )
 
@@ -267,6 +323,9 @@ def render_pick_card(
     except (TypeError, ValueError):
         industry_heat = 0
 
+    # 跨策略共識 meta(notifier._select_top_picks 注入;舊 caller 沒給 → None)
+    consensus_meta = row.get("consensus")
+
     with st.container(border=True):
         # Row 1 + Row 2(整段 HTML 一次吐出 — 省 streamlit widget tree)
         st.markdown(
@@ -284,6 +343,7 @@ def render_pick_card(
                 n_signals=n_signals,
                 industry=industry,
                 industry_heat=industry_heat,
+                consensus=consensus_meta,
             ),
             unsafe_allow_html=True,
         )
