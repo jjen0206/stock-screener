@@ -45,7 +45,8 @@ _tps = importlib.util.module_from_spec(_spec)
 sys.modules["train_per_strategy_ml"] = _tps
 _spec.loader.exec_module(_tps)
 
-# 預設 8 個 per_strategy(已 trained,跟 commit 0b90444 對齊)
+# 預設 7 個 per_strategy(2026-05-15 拿掉 gap_up — 已下架 ML 過濾,改走 rule-based;
+# 見 docs/gap-up-decision-2026-05-15.md。需手動評估 gap_up 仍可 --models gap_up)
 DEFAULT_PER_STRATEGY = [
     "ma_alignment",
     "bias_convergence",
@@ -54,7 +55,6 @@ DEFAULT_PER_STRATEGY = [
     "volume_breakout",
     "taiex_alpha",
     "big_holder_inflow",
-    "gap_up",
 ]
 
 # 預設改 None / 50 / 300:依 docs/ml-overfit-root-cause.md

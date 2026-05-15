@@ -92,6 +92,12 @@ DEFAULT_VOL_BREAKOUT_PARAMS: dict[str, Any] = {
 DEFAULT_GAP_UP_PARAMS: dict[str, Any] = {
     "gap_pct_min": 1.5,            # open 至少高於昨日 close 此 %
     "gap_vol_ratio_min": 1.5,      # 獨立 key 避免跟其他策略 vol_ratio_min 衝撞
+    # 量比上限:過去 1 年 diagnose 顯示 vol_ratio > 3x 那群反而 WR 44.8%
+    # (低於 baseline 40.7% 只 +4pp,而 1.5-3x 那群 WR 50.3% — sweet spot 在這)
+    # 假說:極端高量多是「主力出貨 / 利多出盡」一日量爆,後續 mean revert。
+    # 詳見 docs/gap-up-decision-2026-05-15.md。3.0 是 diagnose bucket 邊界,
+    # 不是 ad-hoc 拍腦袋。如要關閉上限 → 設 float("inf") / None。
+    "gap_vol_ratio_max": 3.0,
 }
 
 # === Phase 1 新加 5 個策略 (12-16) 預設參數 ===
@@ -1019,7 +1025,7 @@ def _evaluate_gap_up(
     # 收紅
     if today_close <= today_open:
         return None
-    # 量比 ≥ 1.5
+    # 量比 ≥ 1.5 且 < 3.0(2026-05-15 加上限 — diagnose 顯示 >3x 反而 mean revert)
     today_vol = float(df["volume"].iloc[-1])
     prev_5_vol = df["volume"].iloc[-6:-1]
     if len(prev_5_vol) < 5:
@@ -1027,6 +1033,9 @@ def _evaluate_gap_up(
     ma_vol = float(prev_5_vol.mean())
     vol_ratio = today_vol / ma_vol if ma_vol > 0 else 0.0
     if vol_ratio < p["gap_vol_ratio_min"]:
+        return None
+    vol_ratio_max = p.get("gap_vol_ratio_max")
+    if vol_ratio_max is not None and vol_ratio >= vol_ratio_max:
         return None
     return {
         "stock_id": str(df["stock_id"].iloc[-1]) if "stock_id" in df.columns else "",
@@ -1834,7 +1843,6 @@ STRATEGY_LABELS: dict[str, str] = {
 #   macd_golden         0.60 → 100% WR (30d: 30 fires)
 #   bb_lower_rebound    0.50 → 75.8% WR (30d: 33 fires)
 #   volume_breakout     0.65 → 100% WR (30d: 74 fires)
-#   gap_up              0.60 → 100% WR (30d: 108 fires)
 #   ma_alignment        0.55 → 100% WR (126d: 45 fires;60d: 26 fires < 30 邊緣)
 #                       — Stage 2B 重校準把 0.60 → 0.55:同 100% WR 但 fires 多
 #                       8 個(126d 37→45),60d 多 5 個(21→26)。60d 仍不過嚴格
@@ -1843,13 +1851,19 @@ STRATEGY_LABELS: dict[str, str] = {
 # 沒過 winner / 沒跑(sample 太小)的策略不放 dict 內(.get → None,不過濾):
 #   rsi_recovery(38 samples 結構性 sparse,200/365/560-day 全試過皆 38)/
 #   volume_kd / ma_squeeze_breakout / inst_consensus / inst_silent_accum
+#
+# 2026-05-15 gap_up 下架 ML 過濾(走路 B):scripts/diagnose_gap_up.py 顯示
+# 整體 WR 48.0% vs baseline 40.7%(+7.26pp edge),但 467-sample WF ROC=0.4926
+# 接近 random — ML 從 16 個 v3 features 學不到「哪些 gap_up follow-through」。
+# Diagnose 找到的真正 sub-edge 在 vol_ratio sweet spot(1.5-3x),用 rule-based
+# 過濾(DEFAULT_GAP_UP_PARAMS.gap_vol_ratio_max=3.0)就能取得,不需要 ML。
+# 詳見 docs/gap-up-decision-2026-05-15.md。
 STRATEGY_ML_THRESHOLDS: dict[str, float] = {
     "ma_alignment": 0.55,
     "bias_convergence": 0.65,
     "macd_golden": 0.60,
     "bb_lower_rebound": 0.50,
     "volume_breakout": 0.65,
-    "gap_up": 0.60,
 }
 
 

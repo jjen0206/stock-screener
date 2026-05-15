@@ -66,15 +66,11 @@ DEFAULT_RF_PARAMS = {
 }
 
 # Per-strategy 覆寫(只對 overfit 風險高的 strategy 加強 regularization)
-# gap_up: POST WF ROC 0.4875 < random — 收斂 depth + 提高 leaf min_samples
-# 抑制 overfit(2026-05-15 主公拍板)
-STRATEGY_RF_PARAMS: dict[str, dict] = {
-    "gap_up": {
-        "n_estimators": 200,
-        "max_depth": 5,
-        "min_samples_leaf": 10,
-    },
-}
+# 2026-05-15:gap_up override 移除。Diagnose 顯示 ML 從現有 features 學不到
+# gap_up follow-through(WR edge 在 vol_ratio sweet spot,不在 features 內),
+# 已改走路 B(rule-based 過濾,從 STRATEGY_ML_THRESHOLDS 拿掉 gap_up)。
+# 詳見 docs/gap-up-decision-2026-05-15.md。
+STRATEGY_RF_PARAMS: dict[str, dict] = {}
 
 
 def _rf_params_for(strategy_name: str) -> dict:
