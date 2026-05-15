@@ -503,6 +503,32 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_ml_walkforward_model "
     "ON ml_walkforward_results(model_name, evaluated_at DESC)",
+    # stock_warnings:TWSE/TPEx 警示股紀錄(2026-05-15 主公拍板加入,違約交割
+    # 教訓 root cause)。warning_type 五分類:
+    #   default_settlement (違約交割) - 真會卡停損,picks 硬擋
+    #   full_cash         (全額交割股) - 同硬擋
+    #   attention         (注意股)     - soft 降權(score × 0.7)
+    #   disposition       (處置股)     - soft 降權
+    #   method_changed    (變更交易方法) - soft 降權
+    # effective_to NULL = 仍生效(尚未解除);非 NULL = 該日結束生效。
+    # PK (stock_id, warning_type, announced_date) 同 sid 可被多次列入(歷史)。
+    """
+    CREATE TABLE IF NOT EXISTS stock_warnings (
+        stock_id        TEXT NOT NULL,
+        warning_type    TEXT NOT NULL,
+        announced_date  TEXT NOT NULL,
+        effective_from  TEXT,
+        effective_to    TEXT,
+        reason          TEXT,
+        source_url      TEXT,
+        fetched_at      TEXT NOT NULL,
+        PRIMARY KEY (stock_id, warning_type, announced_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_stock_warnings_sid_type "
+    "ON stock_warnings(stock_id, warning_type)",
+    "CREATE INDEX IF NOT EXISTS idx_stock_warnings_effective_to "
+    "ON stock_warnings(effective_to)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
@@ -3403,6 +3429,153 @@ def get_shap_for_sid_latest(
     }
 
 
+# === stock_warnings:TWSE/TPEx 警示股紀錄(2026-05-15 加) ===
+
+def upsert_stock_warnings(
+    rows: Iterable[dict], db_path: str | Path | None = None,
+) -> int:
+    """寫入 / 更新警示股紀錄(同 PK 覆寫,讓 fetcher 重複跑 idempotent)。
+
+    rows 每筆需有:stock_id, warning_type, announced_date。
+    optional:effective_from, effective_to, reason, source_url。
+    fetched_at 自動補 now()。
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    now = _now_iso()
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO stock_warnings
+                (stock_id, warning_type, announced_date, effective_from,
+                 effective_to, reason, source_url, fetched_at)
+            VALUES
+                (:stock_id, :warning_type, :announced_date, :effective_from,
+                 :effective_to, :reason, :source_url, :fetched_at)
+            ON CONFLICT(stock_id, warning_type, announced_date) DO UPDATE SET
+                effective_from=excluded.effective_from,
+                effective_to=excluded.effective_to,
+                reason=excluded.reason,
+                source_url=excluded.source_url,
+                fetched_at=excluded.fetched_at
+            """,
+            [
+                {
+                    "stock_id": str(r["stock_id"]).strip(),
+                    "warning_type": str(r["warning_type"]).strip(),
+                    "announced_date": str(r["announced_date"]).strip(),
+                    "effective_from": r.get("effective_from"),
+                    "effective_to": r.get("effective_to"),
+                    "reason": r.get("reason"),
+                    "source_url": r.get("source_url"),
+                    "fetched_at": r.get("fetched_at") or now,
+                }
+                for r in rows_list
+            ],
+        )
+    return len(rows_list)
+
+
+def get_active_warnings_for_sids(
+    sids: Iterable[str],
+    warning_types: Iterable[str] | None = None,
+    as_of: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, list[dict]]:
+    """撈該批 sids 在 as_of 仍生效的警示紀錄。
+
+    生效定義:effective_to IS NULL OR effective_to >= as_of。
+
+    回 {sid: [warning_dict, ...]} — 沒命中的 sid key 不會在 dict 裡。
+    每個 warning_dict 含:warning_type, announced_date, effective_from,
+                           effective_to, reason, source_url。
+    """
+    sids_list = [str(s).strip() for s in sids if s]
+    if not sids_list:
+        return {}
+    if as_of is None:
+        as_of = datetime.now(timezone.utc).date().isoformat()
+    init_db(db_path)
+    placeholders = ",".join("?" * len(sids_list))
+    sql = (
+        "SELECT stock_id, warning_type, announced_date, effective_from, "
+        "       effective_to, reason, source_url "
+        "FROM stock_warnings "
+        f"WHERE stock_id IN ({placeholders}) "
+        "AND (effective_to IS NULL OR effective_to >= ?)"
+    )
+    params: list = list(sids_list) + [as_of]
+    if warning_types is not None:
+        wt_list = [str(t).strip() for t in warning_types if t]
+        if not wt_list:
+            return {}
+        wt_ph = ",".join("?" * len(wt_list))
+        sql += f" AND warning_type IN ({wt_ph})"
+        params.extend(wt_list)
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["stock_id"], []).append({
+            "warning_type": r["warning_type"],
+            "announced_date": r["announced_date"],
+            "effective_from": r["effective_from"],
+            "effective_to": r["effective_to"],
+            "reason": r["reason"],
+            "source_url": r["source_url"],
+        })
+    return out
+
+
+def get_warning_history_for_sid(
+    sid: str,
+    days: int = 90,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """該 sid 過去 N 天所有警示紀錄(含已解除),時間軸排序(announced_date desc)。
+
+    給「📊 個股深度」頁的「⚠️ 警示紀錄」區塊用。
+    回 list[dict] 每筆:warning_type, announced_date, effective_from,
+                         effective_to, reason, source_url, is_active。
+    is_active 由 effective_to NULL or >= today 推算。
+    """
+    from datetime import date, timedelta
+    init_db(db_path)
+    cutoff = (date.today() - timedelta(days=int(days))).isoformat()
+    today_iso = date.today().isoformat()
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT warning_type, announced_date, effective_from, "
+                "       effective_to, reason, source_url "
+                "FROM stock_warnings "
+                "WHERE stock_id=? AND announced_date >= ? "
+                "ORDER BY announced_date DESC",
+                (str(sid).strip(), cutoff),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    out: list[dict] = []
+    for r in rows:
+        et = r["effective_to"]
+        is_active = (et is None) or (str(et) >= today_iso)
+        out.append({
+            "warning_type": r["warning_type"],
+            "announced_date": r["announced_date"],
+            "effective_from": r["effective_from"],
+            "effective_to": r["effective_to"],
+            "reason": r["reason"],
+            "source_url": r["source_url"],
+            "is_active": bool(is_active),
+        })
+    return out
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -3452,5 +3625,8 @@ __all__ = [
     "get_news_for_sid",
     "get_pick_history_for_sid",
     "get_shap_for_sid_latest",
+    "upsert_stock_warnings",
+    "get_active_warnings_for_sids",
+    "get_warning_history_for_sid",
     "SCHEMA",
 ]

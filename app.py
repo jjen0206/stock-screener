@@ -3616,6 +3616,71 @@ def _render_detail_ml_tab(sid: str) -> None:
     )
 
 
+def _render_detail_warnings_section(sid: str) -> None:
+    """⚠️ 警示紀錄 section(2026-05-15 主公拍板,違約交割教訓 root cause)。
+
+    顯示該 sid 過去 90 天所有 stock_warnings(含已解除),時間軸排序
+    (announced_date desc)。沒紀錄 → graceful skip 不顯整 section
+    (避免乾淨股出現一行「無警示」雜訊)。
+
+    Mobile-first:單欄 st.markdown,無 st.columns。已解除 vs 仍生效用色塊區分,
+    iPhone 窄屏直接看到。
+    """
+    try:
+        history = db.get_warning_history_for_sid(sid, days=90)
+    except Exception:  # noqa: BLE001
+        history = []
+    if not history:
+        return  # 乾淨股不顯 section,避免雜訊
+    from src.warnings_filter import WARNING_TYPE_LABELS
+    st.markdown("---")
+    n_active = sum(1 for w in history if w.get("is_active"))
+    title = f"#### ⚠️ 警示紀錄(近 90 天 · {len(history)} 筆"
+    if n_active:
+        title += f",仍生效 {n_active}"
+    title += ")"
+    st.markdown(title)
+    if n_active:
+        st.warning(
+            f"⚠️ 此股目前有 {n_active} 筆警示生效中,進場前請評估風險"
+        )
+    for w in history:
+        wt = str(w.get("warning_type", ""))
+        label = WARNING_TYPE_LABELS.get(wt, wt)
+        announced = w.get("announced_date") or "—"
+        eff_from = w.get("effective_from")
+        eff_to = w.get("effective_to")
+        reason = w.get("reason") or ""
+        is_active = bool(w.get("is_active"))
+        # 仍生效紅色 / 已解除灰色
+        badge_bg = "#d62728" if is_active else "#888"
+        status = "生效中" if is_active else "已解除"
+        period_str = ""
+        if eff_from:
+            period_str = f"{eff_from}"
+            if eff_to:
+                period_str += f" → {eff_to}"
+            else:
+                period_str += " → 持續"
+        st.markdown(
+            f"<div style='border-left:4px solid {badge_bg};"
+            f"padding:6px 10px;margin:6px 0;background:rgba(128,128,128,0.05)'>"
+            f"<div style='font-size:13px;font-weight:500'>"
+            f"<span style='background:{badge_bg};color:#fff;padding:1px 6px;"
+            f"border-radius:3px;font-size:11px;margin-right:6px'>{status}</span>"
+            f"{label}</div>"
+            f"<div style='font-size:12px;color:#888'>公告 {announced}"
+            + (f" · 處置 {period_str}" if period_str else "")
+            + "</div>"
+            + (
+                f"<div style='font-size:12px;margin-top:4px'>{reason[:200]}</div>"
+                if reason else ""
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def _render_detail_news_tab(sid: str) -> None:
     """新聞 tab:近 7 日該 sid 重大訊息列表。"""
     news = db.get_news_for_sid(sid, days=7)
@@ -3677,6 +3742,9 @@ def _page_stock_detail() -> None:
     st.session_state["detail_sid"] = sid
 
     _render_detail_header(sid)
+
+    # ⚠️ 警示紀錄 section(乾淨股 graceful skip 不顯,有警示時顯眼提示)
+    _render_detail_warnings_section(sid)
 
     tab_k, tab_chip, tab_ml, tab_news = st.tabs([
         "📈 K 線", "🚦 籌碼", "🧠 ML 解釋", "📰 新聞",

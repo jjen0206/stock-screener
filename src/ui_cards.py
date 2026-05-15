@@ -70,12 +70,17 @@ def _build_card_html(
     n_signals: int,
     industry: str | None = None,
     industry_heat: int = 0,
+    warnings: list[dict] | None = None,
 ) -> str:
     """組整張卡片的 HTML(row 1 + row 2 + 右側 metadata)— 給 st.markdown
     一次吐出,省 streamlit widget 開銷。row 3 的「加入關注」/「展開詳細」
     button 不在這裡(button 必須走 st.button,不能塞 HTML)。
 
     回字串(unsafe_allow_html=True render)。
+
+    warnings: list[dict] 每筆 {warning_type, ...} — 該檔目前生效的警示紀錄
+    (從 db.get_active_warnings_for_sids 取得)。有值 → 在股號區塊加紅色
+    ⚠️ badge,直接顯類別中文(mobile-first:不用 hover-only,iPhone 窄屏看得見)。
     """
     from src.ui_format import color_for, arrow_for, COLOR_FLAT
 
@@ -96,12 +101,40 @@ def _build_card_html(
                     f"🏭 {ind_str}</div>"
                 )
 
+    # ⚠️ 警示股 badge(2026-05-15 主公拍板,違約交割教訓):有 active warning →
+    # sid 區塊加紅色背景 badge,類別中文直顯(不用 hover-only,iPhone 窄屏要看到)。
+    # 多個 warning → 用 ` · ` 串接;違約 / 全額排前(主公最在意這兩類)。
+    warning_html = ""
+    if warnings:
+        from src.warnings_filter import (
+            HARD_EXCLUDE_TYPES, WARNING_TYPE_LABELS,
+        )
+        # 排序:HARD_EXCLUDE_TYPES 優先,其他按 announced_date desc
+        def _wt_priority(w: dict) -> tuple[int, str]:
+            wt = str(w.get("warning_type", ""))
+            pri = 0 if wt in HARD_EXCLUDE_TYPES else 1
+            return (pri, str(w.get("announced_date", "")))
+        sorted_w = sorted(warnings, key=_wt_priority)
+        labels = []
+        for w in sorted_w:
+            wt = str(w.get("warning_type", ""))
+            label = WARNING_TYPE_LABELS.get(wt, wt)
+            if label and label not in labels:  # dedupe
+                labels.append(label)
+        if labels:
+            warning_html = (
+                f"<div style='font-size:11px;color:#fff;background:#d62728;"
+                f"padding:2px 6px;border-radius:4px;display:inline-block;"
+                f"margin-top:2px;font-weight:500'>"
+                f"⚠️ {' · '.join(labels)}</div>"
+            )
+
     # row 1 / 股號 + 名稱(股名為主視覺:18px 500;股號 13px secondary 化為 label)
     sid_block = (
         f"<div><div style='font-size:11px;color:#888'>股號</div>"
         f"<div style='font-size:13px;font-weight:400;color:#888'>{sid}</div>"
         f"<div style='font-size:18px;font-weight:500'>{name}</div>"
-        f"{industry_html}</div>"
+        f"{warning_html}{industry_html}</div>"
     )
 
     # row 1 / 股價 + 漲跌(股價數字 18px + 依漲跌染色)
@@ -267,6 +300,17 @@ def render_pick_card(
     except (TypeError, ValueError):
         industry_heat = 0
 
+    # ⚠️ 警示股 badge:caller 注入 row['warnings'] 即用,沒注入 → 自動 lookup
+    # (single-card 場景一筆 SQL 不貴;批次 caller 應 pre-enrich 走 enrich_rows_with_warnings)
+    warnings_for_card = row.get("warnings")
+    if warnings_for_card is None and sid:
+        try:
+            from src import database as _db
+            _wmap = _db.get_active_warnings_for_sids([str(sid)])
+            warnings_for_card = _wmap.get(str(sid))
+        except Exception:  # noqa: BLE001
+            warnings_for_card = None
+
     with st.container(border=True):
         # Row 1 + Row 2(整段 HTML 一次吐出 — 省 streamlit widget tree)
         st.markdown(
@@ -284,6 +328,7 @@ def render_pick_card(
                 n_signals=n_signals,
                 industry=industry,
                 industry_heat=industry_heat,
+                warnings=warnings_for_card,
             ),
             unsafe_allow_html=True,
         )
@@ -784,8 +829,32 @@ def _toggle_expander(flag_key: str) -> None:
 # 放進 row 3 button 列 + body 在卡片下方,維持「點才跑」的 lazy 行為不變。
 
 
+def enrich_rows_with_warnings(rows: list[dict]) -> None:
+    """In-place 把該批 rows 對應的 active warnings 注入 row['warnings']。
+
+    一次 SQL bulk lookup,比每張卡片 single-row 查省 N-1 次 query。
+    任何 SQL 錯誤(表不存在 / DB lock)silent skip,卡片照常 render(無 badge)。
+    """
+    if not rows:
+        return
+    sids = [str(r.get("stock_id") or r.get("sid") or "") for r in rows]
+    sids = [s for s in sids if s]
+    if not sids:
+        return
+    try:
+        from src import database as _db
+        wmap = _db.get_active_warnings_for_sids(sids)
+    except Exception:  # noqa: BLE001
+        return
+    for r in rows:
+        sid = str(r.get("stock_id") or r.get("sid") or "")
+        if sid in wmap:
+            r["warnings"] = wmap[sid]
+
+
 def render_picks_cards(rows: list[dict], **kwargs: Any) -> None:
-    """批次渲染多張卡片。"""
+    """批次渲染多張卡片(自動 bulk-enrich warnings,免每張卡再 query)。"""
+    enrich_rows_with_warnings(rows)
     for row in rows:
         render_pick_card(row, **kwargs)
 
@@ -821,6 +890,8 @@ def render_picks_cards_paginated(
     shown = st.session_state.get(shown_key, page_size)
     shown = min(shown, total)
 
+    # bulk-enrich warnings 一次,只對 shown 那批(不必為了「載入更多」按鈕後才看到的 row 跑)
+    enrich_rows_with_warnings(rows[:shown])
     for row in rows[:shown]:
         render_pick_card(row, **kwargs)
 
@@ -868,5 +939,6 @@ __all__ = [
     "render_pick_card",
     "render_picks_cards",
     "render_picks_cards_paginated",
+    "enrich_rows_with_warnings",
     "view_mode_toggle",
 ]

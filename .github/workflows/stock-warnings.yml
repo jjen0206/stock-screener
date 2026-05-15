@@ -1,0 +1,56 @@
+name: Stock Warnings Fetch
+
+# 抓 TWSE / TPEx 警示股紀錄(違約交割 / 注意 / 處置 / 全額交割 / 變更交易方法)
+# - cron: "13 9 * * 1-5" → UTC 09:13 = 台灣時間 17:13(每個交易日收盤後 30 分鐘)
+#   TWSE 收盤 13:30,公告通常 14:00-16:00 出齊;17:13 抓給足夠 buffer
+# - 主公拍板:獨立 workflow,跟 daily-fetch / weekly-shareholder-fetch 並列
+on:
+  schedule:
+    - cron: "13 9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # commit data/cache.db
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch TWSE/TPEx stock warnings
+        run: python scripts/fetch_stock_warnings.py
+
+      # push race retry:跟 weekly-shareholder-fetch / daily-fetch 同 pattern,
+      # 跨 workflow 同時段推 main 用 rebase + retry 5 次避免 [rejected]。
+      - name: Commit cache.db if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/cache.db || true
+          if git diff --quiet --staged; then
+            echo "No stock_warnings changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(warnings): TWSE/TPEx stock warnings snapshot [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[WARNINGS] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::stock_warnings push 失敗 5 次"
