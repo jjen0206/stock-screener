@@ -131,6 +131,109 @@ def test_walkforward_n_splits_none_uses_all_data():
     assert results[-1]["train"]["n"] > results[0]["train"]["n"]
 
 
+def _make_panel_features(n_dates: int = 60, sids_per_date: int = 4, seed: int = 11):
+    """panel data:同 date 多 sid 一筆,模擬 per_strategy 真實樣本結構。
+
+    用來驗證 split_by='date' 不會讓同日 sids 跨 train/test。
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2025-01-01", periods=n_dates).strftime("%Y-%m-%d")
+    rows = []
+    for d in dates:
+        for sid_i in range(sids_per_date):
+            feat_a = rng.normal()
+            feat_b = rng.normal()
+            logit = 0.6 * feat_a + 0.4 * feat_b + rng.normal(scale=0.3)
+            rows.append({
+                "date": d,
+                "stock_id": f"{1000 + sid_i}",
+                "feat_a": feat_a,
+                "feat_b": feat_b,
+                "y": int(logit > 0),
+            })
+    return pd.DataFrame(rows)
+
+
+def test_walkforward_split_by_date_keeps_same_day_sids_together():
+    """split_by='date' invariant:同日 sids 不可橫跨 train / test fold。
+
+    Why:主公拍板「by-date split 進一步消除 cross-sectional 虛高」
+    (2026-05-15)— row split 把同日 4 個 sids 切到 train/test 兩邊,
+    test 等於看 train 同日的其他 sid 預測自己,虛高 ROC。
+    """
+    df = _make_panel_features(n_dates=60, sids_per_date=4)  # 240 rows / 60 dates
+    results = wf.walkforward_train_test(
+        df,
+        n_splits=None,
+        test_size=5,       # 5 days per fold
+        min_train_size=20, # 20 days first train
+        split_by="date",
+    )
+    assert len(results) >= 1
+    for r in results:
+        train_dates = set(df[
+            (df["date"] >= r["train_start"]) & (df["date"] <= r["train_end"])
+        ]["date"].unique())
+        test_dates = set(df[
+            (df["date"] >= r["test_start"]) & (df["date"] <= r["test_end"])
+        ]["date"].unique())
+        # 核心 invariant:train / test 不共用任何 date
+        intersect = train_dates & test_dates
+        assert not intersect, (
+            f"split_by='date' 違反 invariant:date {sorted(intersect)} 同時在 "
+            f"train [{r['train_start']}..{r['train_end']}] 跟 test "
+            f"[{r['test_start']}..{r['test_end']}]"
+        )
+        # train_end 嚴格早於 test_start(時序遞增)
+        assert r["train_end"] < r["test_start"], (
+            f"split_by='date' train_end {r['train_end']} 應早於 test_start {r['test_start']}"
+        )
+
+
+def test_walkforward_split_by_date_test_size_is_days():
+    """date mode:test_size=5 day → 每 fold test row 數 = 5 days × sids_per_date。"""
+    df = _make_panel_features(n_dates=60, sids_per_date=4)
+    results = wf.walkforward_train_test(
+        df, n_splits=1, test_size=5, min_train_size=20, split_by="date",
+    )
+    assert len(results) == 1
+    # 5 days × 4 sids = 20 rows
+    assert results[0]["test"]["n"] == 20
+
+
+def test_walkforward_split_by_date_invalid_value_raises():
+    df = _make_panel_features(n_dates=40)
+    with pytest.raises(ValueError, match="split_by"):
+        wf.walkforward_train_test(
+            df, n_splits=1, test_size=5, min_train_size=20, split_by="invalid",
+        )
+
+
+def test_walkforward_split_by_date_too_few_dates_raises():
+    """date mode:min_train_size 大於 unique dates → 立刻 raise。"""
+    df = _make_panel_features(n_dates=10, sids_per_date=3)
+    with pytest.raises(ValueError, match="unique dates"):
+        wf.walkforward_train_test(
+            df, n_splits=1, test_size=2, min_train_size=20, split_by="date",
+        )
+
+
+def test_walkforward_split_by_row_default_unchanged():
+    """backward compat:split_by default='row',行為跟之前一樣。"""
+    df = _make_panel_features(n_dates=60, sids_per_date=4)  # 240 rows
+    results_default = wf.walkforward_train_test(
+        df, n_splits=3, test_size=20, min_train_size=100,
+    )
+    results_explicit_row = wf.walkforward_train_test(
+        df, n_splits=3, test_size=20, min_train_size=100, split_by="row",
+    )
+    assert len(results_default) == len(results_explicit_row)
+    for a, b in zip(results_default, results_explicit_row):
+        assert a["split_idx"] == b["split_idx"]
+        # row mode 邏輯沒變 → metric 完全相同
+        assert a["test"]["roc_auc"] == b["test"]["roc_auc"]
+
+
 def test_walkforward_test_size_50_default_in_eval():
     """scripts/eval_walkforward.py 預設 test_size=50, min_train=300, n_splits=None。
 

@@ -64,6 +64,12 @@ DEFAULT_TEST_SIZE = 50
 DEFAULT_MIN_TRAIN = 300
 PER_STRATEGY_LOOKBACK = 200
 
+# split_by='date' 模式用日數(unique trading dates),預設較小:per_strategy
+# strategy fire 在少數密集 dates(e.g. taiex_alpha 只有 12 unique dates 但 2248
+# rows),用 row-mode 同等量級 min_train 會直接 0 split,故壓低成 days 數量級。
+DEFAULT_TEST_SIZE_DAYS = 3
+DEFAULT_MIN_TRAIN_DAYS = 15
+
 
 def build_short_pick_dataset_with_dates(
     stock_ids: list[str] | None = None,
@@ -132,9 +138,14 @@ def _write_results_to_db(
     model_name: str,
     results: list[dict],
     evaluated_at: str,
+    split_method: str = "row",
     db_path: str | Path | None = None,
 ) -> None:
-    """把 walkforward_train_test 結果寫進 ml_walkforward_results。"""
+    """把 walkforward_train_test 結果寫進 ml_walkforward_results。
+
+    split_method:'row'(舊)/ 'date'(by-date,2026-05-15 加)— 同表混存,
+    讓 PRE/POST 對照 query 可分。
+    """
     if not results:
         return
     with db.get_conn(db_path) as conn:
@@ -145,8 +156,8 @@ def _write_results_to_db(
                     model_name, split_idx, train_start, train_end,
                     test_start, test_end, train_n, test_n,
                     roc_auc, pr_auc, log_loss, train_roc_auc,
-                    evaluated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evaluated_at, split_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     model_name,
@@ -162,6 +173,7 @@ def _write_results_to_db(
                     r["test"]["log_loss"],
                     r["train"]["roc_auc"],
                     evaluated_at,
+                    split_method,
                 ),
             )
         conn.commit()
@@ -190,8 +202,12 @@ def evaluate_model(
     n_splits: int,
     test_size: int,
     min_train_size: int,
+    split_by: str = "row",
 ) -> tuple[list[dict], dict]:
-    """跑 walk-forward,回 (per-split results, summary)。"""
+    """跑 walk-forward,回 (per-split results, summary)。
+
+    split_by:'row'(舊)/ 'date'(2026-05-15 加,消 cross-sectional 虛高)。
+    """
     if df.empty:
         return [], wf.walkforward_summary([])
     feature_cols = [
@@ -205,6 +221,7 @@ def evaluate_model(
         min_train_size=min_train_size,
         feature_cols=feature_cols,
         rf_kwargs=_rf_kwargs_for_model(model_name),
+        split_by=split_by,
     )
     return results, wf.walkforward_summary(results)
 
@@ -282,9 +299,31 @@ def main() -> int:
         "--n-splits", type=int, default=DEFAULT_N_SPLITS,
         help="None / 未指定 → 跑全部可分 splits(避免大樣本只測前段)",
     )
-    ap.add_argument("--test-size", type=int, default=DEFAULT_TEST_SIZE)
-    ap.add_argument("--min-train-size", type=int, default=DEFAULT_MIN_TRAIN)
+    ap.add_argument(
+        "--test-size", type=int, default=None,
+        help="test fold 大小(row mode rows / date mode days);未指定走 split-by 對應 default",
+    )
+    ap.add_argument(
+        "--min-train-size", type=int, default=None,
+        help="第一個 train fold 大小(row mode rows / date mode days);未指定走 default",
+    )
+    ap.add_argument(
+        "--split-by",
+        choices=["row", "date"],
+        default="row",
+        help="row(舊,backward compat)/ date(2026-05-15 加,消 cross-sectional 虛高)",
+    )
     args = ap.parse_args()
+
+    # split_by date 時 test_size / min_train_size 預設改成日數
+    if args.test_size is None:
+        args.test_size = (
+            DEFAULT_TEST_SIZE_DAYS if args.split_by == "date" else DEFAULT_TEST_SIZE
+        )
+    if args.min_train_size is None:
+        args.min_train_size = (
+            DEFAULT_MIN_TRAIN_DAYS if args.split_by == "date" else DEFAULT_MIN_TRAIN
+        )
 
     db.init_db()
     counts = db.preload_snapshots()
@@ -302,6 +341,11 @@ def main() -> int:
         model_names = [m.strip() for m in args.models.split(",") if m.strip()]
 
     evaluated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    print(
+        f"[WF-EVAL] split_by={args.split_by} test_size={args.test_size} "
+        f"min_train={args.min_train_size} n_splits={args.n_splits}",
+        flush=True,
+    )
     summary_rows: list[dict] = []
     success = 0
 
@@ -337,6 +381,7 @@ def main() -> int:
                 n_splits=args.n_splits,
                 test_size=args.test_size,
                 min_train_size=args.min_train_size,
+                split_by=args.split_by,
             )
         except ValueError as e:
             print(f"[WF-EVAL] {name} walk-forward 失敗:{e}", flush=True)
@@ -349,7 +394,7 @@ def main() -> int:
 
         if results:
             success += 1
-            _write_results_to_db(name, results, evaluated_at)
+            _write_results_to_db(name, results, evaluated_at, split_method=args.split_by)
 
         summary_rows.append({
             "model": name,

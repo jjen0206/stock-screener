@@ -113,6 +113,7 @@ def walkforward_train_test(
     target_col: str = "y",
     feature_cols: Sequence[str] | None = None,
     rf_kwargs: dict | None = None,
+    split_by: str = "row",
 ) -> list[dict]:
     """expanding-window walk-forward CV。
 
@@ -121,9 +122,12 @@ def walkforward_train_test(
         (多 sid 同日各自一筆),會一起進對應 fold。
       n_splits:最多 split 數。實際可用 split 受 (len-min_train_size) // test_size 限制。
         傳 None → 直接用 max_possible(全部可分 splits 都跑),避免大樣本只測前段。
-      test_size:每個 test fold 大小(rows)。
-      min_train_size:第一個 train fold 至少要的 rows。
+      test_size:每個 test fold 大小。split_by="row" → rows;"date" → 日數。
+      min_train_size:第一個 train fold 至少要的大小(rows 或 days,同上)。
       feature_cols:None → 自動取所有非 date/target 欄。
+      split_by:"row"(default,行索引切)或 "date"(對 unique dates 切,
+        同日所有 sids 保證在同一 fold,消除 cross-sectional 虛高 — 主公拍板
+        2026-05-15)。
 
     Returns:
       list of dict,每個 split 一個:
@@ -136,8 +140,13 @@ def walkforward_train_test(
         }
 
     Raises:
-      ValueError:date_col / target_col 缺;min_train_size 太大導致 0 split。
+      ValueError:date_col / target_col 缺;min_train_size 太大導致 0 split;
+        split_by 不是 'row' / 'date'。
     """
+    if split_by not in ("row", "date"):
+        raise ValueError(
+            f"split_by 必須是 'row' 或 'date',got {split_by!r}"
+        )
     if date_col not in features_df.columns:
         raise ValueError(
             f"features_df 缺 date column '{date_col}' — walk-forward 必須有時間軸"
@@ -163,10 +172,22 @@ def walkforward_train_test(
     # 按時間排序(穩定:同 date 內 sid 的相對順序保留即可,不影響 split 結果)
     df = df.sort_values(date_col, kind="stable").reset_index(drop=True)
 
+    if split_by == "date":
+        return _walkforward_by_date(
+            df,
+            n_splits=n_splits,
+            test_size=test_size,
+            min_train_size=min_train_size,
+            date_col=date_col,
+            target_col=target_col,
+            feature_cols=list(feature_cols),
+            rf_kwargs=rf_kwargs,
+        )
+
     n = len(df)
     if min_train_size >= n:
         raise ValueError(
-            f"min_train_size={min_train_size} ≥ 樣本數 {n},無法 split"
+            f"min_train_size={min_train_size} >= 樣本數 {n},無法 split"
         )
 
     # 計算可用 splits:從 min_train_size 開始,每次往前推 test_size
@@ -212,6 +233,93 @@ def walkforward_train_test(
             "train_end": str(train_slice[date_col].iloc[-1]),
             "test_start": str(test_slice[date_col].iloc[0]),
             "test_end": str(test_slice[date_col].iloc[-1]),
+            **metrics,
+        })
+
+    return results
+
+
+def _walkforward_by_date(
+    df: pd.DataFrame,
+    *,
+    n_splits: int | None,
+    test_size: int,
+    min_train_size: int,
+    date_col: str,
+    target_col: str,
+    feature_cols: list[str],
+    rf_kwargs: dict | None,
+) -> list[dict]:
+    """split_by='date' 實作:對 unique dates 切,同日 sids 保留同 fold。
+
+    test_size / min_train_size 在此模式下單位為「日數」。每 split:
+      train = dates[0 : min_train_size + i*test_size]   的所有 rows
+      test  = dates[min_train_size + i*test_size : +test_size] 的所有 rows
+    """
+    unique_dates = sorted(df[date_col].unique().tolist())
+    n_dates = len(unique_dates)
+
+    if min_train_size >= n_dates:
+        raise ValueError(
+            f"min_train_size={min_train_size} >= unique dates {n_dates}(split_by=date),"
+            f"無法 split"
+        )
+
+    max_possible = (n_dates - min_train_size) // max(1, test_size)
+    if max_possible <= 0:
+        return []
+
+    actual_splits = max_possible if n_splits is None else min(n_splits, max_possible)
+
+    # 預先做 date → rows 的 group,避免每 split 都 isin 線性掃
+    # 注意:df 已經按 date 排序,所以 cum index 切片就夠
+    date_to_idx: dict = {}
+    for idx, d in enumerate(df[date_col].tolist()):
+        date_to_idx.setdefault(d, []).append(idx)
+
+    results: list[dict] = []
+    for i in range(actual_splits):
+        train_end_d = min_train_size + i * test_size
+        test_end_d = train_end_d + test_size
+        if test_end_d > n_dates:
+            break
+
+        train_dates = unique_dates[:train_end_d]
+        test_dates = unique_dates[train_end_d:test_end_d]
+
+        train_idxs: list[int] = []
+        for d in train_dates:
+            train_idxs.extend(date_to_idx[d])
+        test_idxs: list[int] = []
+        for d in test_dates:
+            test_idxs.extend(date_to_idx[d])
+
+        train_slice = df.iloc[train_idxs]
+        test_slice = df.iloc[test_idxs]
+
+        # 同日 sids 保留同 fold(invariant guard,單測會驗證)
+        # 不可能有 date 同時出現 train 跟 test — train/test_dates 不交集
+
+        X_train = train_slice[feature_cols]
+        y_train = train_slice[target_col].astype(int)
+        X_test = test_slice[feature_cols]
+        y_test = test_slice[target_col].astype(int)
+
+        if len(set(y_train.unique())) < 2:
+            continue
+        if len(test_slice) == 0:
+            continue
+
+        metrics = _train_one_split(
+            X_train, y_train, X_test, y_test, rf_kwargs=rf_kwargs,
+        )
+
+        results.append({
+            "split_idx": i,
+            "train_start": str(train_dates[0]),
+            "train_end": str(train_dates[-1]),
+            "test_start": str(test_dates[0]),
+            "test_end": str(test_dates[-1]),
             **metrics,
         })
 

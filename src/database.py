@@ -482,6 +482,7 @@ SCHEMA: list[str] = [
         log_loss      REAL,             -- test 端 log loss
         train_roc_auc REAL,             -- train 端 ROC AUC(overfit gap 參考)
         evaluated_at  TEXT NOT NULL,
+        split_method  TEXT NOT NULL DEFAULT 'row',  -- 'row'(舊)/ 'date'(消 cross-sectional 虛高)
         PRIMARY KEY (model_name, split_idx, evaluated_at)
     )
     """,
@@ -509,6 +510,26 @@ def init_db(db_path: str | Path | None = None) -> None:
         _migrate_daily_picks_add_ml_prob(conn)
         _migrate_paper_trades_add_trailing(conn)
         _migrate_analyst_targets_add_previous(conn)
+        _migrate_ml_walkforward_add_split_method(conn)
+
+
+def _migrate_ml_walkforward_add_split_method(conn) -> None:
+    """主公拍板「by-date split」(2026-05-15):加 split_method TEXT 欄到既有
+    ml_walkforward_results,標記 'row'(舊行為)或 'date'(新行為,消除
+    cross-sectional 虛高)。舊資料 default 'row' 維持向下相容。
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS。冪等。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(ml_walkforward_results)"
+        ).fetchall()
+    }
+    if "split_method" not in cols:
+        conn.execute(
+            "ALTER TABLE ml_walkforward_results "
+            "ADD COLUMN split_method TEXT NOT NULL DEFAULT 'row'"
+        )
 
 
 def _migrate_analyst_targets_add_previous(conn) -> None:
