@@ -55,6 +55,12 @@ _LAST_ANNOTATED_WARNINGS: list[dict] = []
 REGIME_GATING_ENABLED = True
 
 
+# 模組級 cache — 最後一次 _select_top_picks 算出的共識 map(sid → meta)
+# 給 format_top_picks_message / _format_short_picks_section 算 summary 用,
+# 不必再傳一輪參數。重跑 _select_top_picks 會覆寫,空 picks 也清成 {}。
+_LAST_CONSENSUS: dict[str, dict] = {}
+
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -266,12 +272,14 @@ def _compute_pick_score(
     matched_strategies: list[str] | None,
     analyst_target_mean: float | None = None,
     strategy_weights: dict[str, float] | None = None,
+    consensus_meta: dict | None = None,
 ) -> tuple[float, float, int, str]:
     """Pick 排序 key — 共用於 _select_top_picks 與 format_yesterday_recap。
 
     Tuple 字典序 ascending → 排前面的 picks 數值越小:
       - analyst_target_mean 有值 → -100(法人共識 picks 整體加分)
-      - ml_prob × avg(strategy_weights) desc(命中率高的策略上排)
+      - ml_prob × avg(strategy_weights) × consensus_multiplier desc
+        (命中率高 + 跨策略共識的 picks 上排)
       - 命中策略多 desc
       - sid asc(穩定 tiebreaker)
 
@@ -279,8 +287,13 @@ def _compute_pick_score(
     src.strategy_weighting.get_strategy_weights_30d 產;missing key 預設 1.0。
     None 或空 dict → 退回 phase 1 純 ml_prob 排序(legacy 行為)。
 
+    consensus_meta: src.consensus.compute_strategy_consensus 回傳的 per-sid
+    meta dict;None 或缺欄 → multiplier=1.0(legacy 行為)。kill switch off
+    時 consensus.consensus_multiplier 也回 1.0。
+
     讓 recap 算出來的 top picks 順序跟昨天實際推播的順序一致(M4/U1 known issue)。
     """
+    from src.consensus import consensus_multiplier
     matched = matched_strategies or []
     if strategy_weights and matched:
         avg_w = (
@@ -289,7 +302,8 @@ def _compute_pick_score(
         )
     else:
         avg_w = 1.0
-    weighted_ml = (ml_prob or 0.0) * avg_w
+    mult = consensus_multiplier(consensus_meta)
+    weighted_ml = (ml_prob or 0.0) * avg_w * mult
     return (
         -(100 if analyst_target_mean else 0),
         -weighted_ml,
@@ -340,13 +354,32 @@ def _select_top_picks(
     )
     from src.universe import pure_stock_universe
 
+    # 共識 cache(_LAST_CONSENSUS)— 跨 early-return / 正常 return 都要更新,
+    # 用 global 統一 entry。
+    global _LAST_CONSENSUS
+
     if universe is None:
         universe = pure_stock_universe(min_history=20)
     if not universe:
+        # 即使空也要清 cache,避免上一次 stale consensus 漏到下一輪 UI 摘要。
+        _LAST_CONSENSUS = {}
         return []
     agg = run_all_strategies(date, params=params, stock_ids=universe)
     if not agg:
+        # 與上方 universe 為空一致 — 清 cache。
+        _LAST_CONSENSUS = {}
         return []
+
+    # 跨策略共識 — 攤平 agg 成 {strategy → [sid]},算每 sid 命中策略 / 類別。
+    # consensus_map 留模組級 cache 給 _format_short_picks_section 算 summary
+    # 用,picks 內也注入 'consensus' 欄(下游 UI / format_pick_block 直接拿)。
+    from src.consensus import compute_strategy_consensus
+    strategy_to_sids: dict[str, list[str]] = {}
+    for sid_k, info in agg.items():
+        for strat_key in (info.get("details") or {}).keys():
+            strategy_to_sids.setdefault(strat_key, []).append(sid_k)
+    consensus_map = compute_strategy_consensus(strategy_to_sids)
+    _LAST_CONSENSUS = consensus_map
 
     # Per-pick ML routing(取最嚴格 threshold strategy 對應的 model)
     def _routing(matched: list[str]) -> str | None:
@@ -533,6 +566,7 @@ def _select_top_picks(
         holders_1000up_count = sc_row.get("holders_1000up_count")
         holders_delta_w = sc_row.get("holders_delta_w")
         holders_pct = sc_row.get("holders_pct")
+        consensus_meta = consensus_map.get(sid)
         return {
             "rank": 0,  # caller fills
             "sid": sid,
@@ -560,6 +594,9 @@ def _select_top_picks(
             "holders_delta_w": holders_delta_w,
             "holders_pct": holders_pct,
             "confidence_tier": confidence_tier,
+            # 跨策略共識(src.consensus.compute_strategy_consensus 算)
+            # — None 表示僅 1 策略命中 / 該 sid 不在 consensus_map(罕見)。
+            "consensus": consensus_meta,
         }
 
     # 大盤 regime gating — 算當前 regime 的 max_count + threshold_uplift。
@@ -664,6 +701,7 @@ def _select_top_picks(
         matched_strategies=p["matched_strategies"],
         analyst_target_mean=p.get("analyst_target_mean"),
         strategy_weights=strategy_weights,
+        consensus_meta=p.get("consensus"),
     ))
     # 大盤 regime gating truncation — bear 2 / range 5 / bull 10。
     # fallback path(降級弱訊號 Top 3)時 top_n 已被改成 3,gating 仍會生效
@@ -722,7 +760,13 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     industry = pick.get("industry")
     industry_heat = int(pick.get("industry_heat") or 0)
 
-    lines = [f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"]
+    # 共識 badge(若 ≥ 2 策略同時命中)— 接在股號 / 股名後面,讓主公一眼看見
+    from src.consensus import consensus_badge as _cs_badge
+    badge_str, _badge_tier = _cs_badge(pick.get("consensus"))
+    badge_suffix = f" {badge_str}" if badge_str else ""
+    lines = [
+        f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}{badge_suffix}"
+    ]
     # 收盤 + 漲跌
     if close is not None:
         if pct_change is not None:
@@ -1006,12 +1050,22 @@ def format_yesterday_recap(
         except Exception:  # noqa: BLE001
             recap_weights = {}
 
+    # Recap 也算 consensus,讓排序跟昨天實際推播一致(M4/U1)— 從同一份 agg
+    # 算,不用 _LAST_CONSENSUS 因為跨日 cache 已過期。
+    from src.consensus import compute_strategy_consensus as _cscons
+    _strategy_to_sids_recap: dict[str, list[str]] = {}
+    for _sid, _info in agg.items():
+        for _strat in (_info.get("details") or {}).keys():
+            _strategy_to_sids_recap.setdefault(_strat, []).append(_sid)
+    recap_consensus = _cscons(_strategy_to_sids_recap)
+
     qualified.sort(key=lambda x: _compute_pick_score(
         sid=x[0],
         ml_prob=x[1],
         matched_strategies=x[2],
         analyst_target_mean=(analyst_target_map.get(x[0]) or {}).get("target_mean"),
         strategy_weights=recap_weights,
+        consensus_meta=recap_consensus.get(x[0]),
     ))
     top_picks = qualified[:top_n]
 
@@ -1217,6 +1271,11 @@ def _format_short_picks_section(
         else f"短線精選(Top {n})"
     )
     section_lines: list[str] = [f"🎯 {b(title, channel)}"]
+    # 跨策略共識 summary(放標題下、fallback caption 上)— picks 內已 enrich
+    # consensus 欄(由 _select_top_picks 注入)。沒共識股 → graceful skip。
+    summary_line = _consensus_summary_line(picks, channel=channel)
+    if summary_line:
+        section_lines.append(summary_line)
     if is_fallback:
         section_lines.append(
             "⚠️ 今日無高信心 picks,降級顯示弱訊號 Top 3"
@@ -1240,6 +1299,34 @@ def _format_short_picks_section(
     section_lines.append("")
     section_lines.append(("\n" + ("─" * 8) + "\n").join(pick_blocks))
     return "\n".join(section_lines)
+
+
+def _consensus_summary_line(
+    picks: list[dict], channel: str,
+) -> str:
+    """組共識 summary 字串 — 「📊 共識統計: ⭐⭐⭐ 強共識 N 檔 / ⭐⭐ 共識 M 檔」
+
+    只統計被推播的 picks(top N)內的共識分佈,不計全市場。
+    無任何共識股 → 回空字串(caller graceful skip)。
+    """
+    from src.consensus import consensus_badge
+
+    tiers = {"cross_3": 0, "cross_2": 0, "same_cat": 0}
+    for p in picks:
+        _, tier = consensus_badge(p.get("consensus"))
+        if tier in tiers:
+            tiers[tier] += 1
+    if not any(tiers.values()):
+        return ""
+    b = _bold
+    parts: list[str] = []
+    if tiers["cross_3"]:
+        parts.append(f"⭐⭐⭐ 強共識 {tiers['cross_3']} 檔")
+    if tiers["cross_2"]:
+        parts.append(f"⭐⭐ 共識 {tiers['cross_2']} 檔")
+    if tiers["same_cat"]:
+        parts.append(f"⭐ 同類共識 {tiers['same_cat']} 檔")
+    return f"📊 {b('共識統計', channel)}: " + " / ".join(parts)
 
 
 def _format_footer_block(
