@@ -467,7 +467,8 @@ SCHEMA: list[str] = [
         period_end     TEXT NOT NULL,
         n_trades       INTEGER NOT NULL,
         total_return   REAL,             -- 百分比 e.g. 12.34 = 12.34%
-        sharpe         REAL,
+        sharpe         REAL,             -- DEPRECATED 2026-05-15:trade-level sqrt(N) 膨脹
+        sharpe_daily   REAL,             -- 2026-05-15 加:daily-aggregated annualized Sharpe(預設排序用)
         max_drawdown   REAL,             -- 百分比(正值 e.g. 8.12 = 8.12%)
         win_rate       REAL,             -- 百分比
         generated_at   TEXT NOT NULL,
@@ -525,6 +526,26 @@ def init_db(db_path: str | Path | None = None) -> None:
         _migrate_paper_trades_add_trailing(conn)
         _migrate_analyst_targets_add_previous(conn)
         _migrate_ml_walkforward_add_split_method(conn)
+        _migrate_vbt_grid_add_sharpe_daily(conn)
+
+
+def _migrate_vbt_grid_add_sharpe_daily(conn) -> None:
+    """主公拍板「修 vbt sharpe N 膨脹」(2026-05-15):加 sharpe_daily REAL 欄到
+    既有 vbt_grid_results,讓 grid result UPSERT 帶 daily-aggregated annualized
+    Sharpe(抗 sqrt(N) 膨脹,跨策略 / 不同 N 公平比較)。
+
+    舊 row 沒填 → NULL,UI / load helper 顯示「—」並 fallback 到舊 sharpe;新
+    跑出來的 row 自動帶值。
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS。冪等。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(vbt_grid_results)"
+        ).fetchall()
+    }
+    if "sharpe_daily" not in cols:
+        conn.execute("ALTER TABLE vbt_grid_results ADD COLUMN sharpe_daily REAL")
 
 
 def _migrate_ml_walkforward_add_split_method(conn) -> None:
@@ -2921,20 +2942,26 @@ def upsert_vbt_grid_results(
 
     rows 每筆需含:strategy, params_hash, params_json, period_start, period_end,
     n_trades, total_return, sharpe, max_drawdown, win_rate, generated_at。
-    回 row count。
+    sharpe_daily 為選填(2026-05-15 加,沒帶 → NULL)。回 row count。
     """
     if not rows:
         return 0
     init_db(db_path)
+    # 缺 sharpe_daily 的 row 補 None,UPSERT 才不會 KeyError
+    normalized = [
+        {**r, "sharpe_daily": r.get("sharpe_daily")} for r in rows
+    ]
     with get_conn(db_path) as conn:
         conn.executemany(
             """
             INSERT INTO vbt_grid_results (
                 strategy, params_hash, params_json, period_start, period_end,
-                n_trades, total_return, sharpe, max_drawdown, win_rate, generated_at
+                n_trades, total_return, sharpe, sharpe_daily, max_drawdown,
+                win_rate, generated_at
             ) VALUES (
                 :strategy, :params_hash, :params_json, :period_start, :period_end,
-                :n_trades, :total_return, :sharpe, :max_drawdown, :win_rate, :generated_at
+                :n_trades, :total_return, :sharpe, :sharpe_daily, :max_drawdown,
+                :win_rate, :generated_at
             )
             ON CONFLICT(strategy, params_hash) DO UPDATE SET
                 params_json=excluded.params_json,
@@ -2943,13 +2970,14 @@ def upsert_vbt_grid_results(
                 n_trades=excluded.n_trades,
                 total_return=excluded.total_return,
                 sharpe=excluded.sharpe,
+                sharpe_daily=excluded.sharpe_daily,
                 max_drawdown=excluded.max_drawdown,
                 win_rate=excluded.win_rate,
                 generated_at=excluded.generated_at
             """,
-            rows,
+            normalized,
         )
-    return len(rows)
+    return len(normalized)
 
 
 def load_vbt_grid_results(

@@ -6249,19 +6249,38 @@ _STRATEGY_DEFAULT_PARAMS: dict[str, dict] = {
 }
 
 
-def _vbt_default_strategy(grid_df: pd.DataFrame, strategies: list[str]) -> str:
-    """挑「樣本最多 + sharpe 最高」的策略當 selectbox 預設值。
+def _vbt_sort_key_col(grid_df: pd.DataFrame) -> str:
+    """挑排序欄:有 sharpe_daily 且至少一筆非 NaN → 用 sharpe_daily(新指標,
+    抗 N 膨脹);否則 fallback 到 sharpe(舊指標,trade-level)。
 
-    對每策略找該策略內 sharpe 最高 row,排序鍵 (n_trades DESC, sharpe DESC),
+    2026-05-15:trade-level sharpe = mean/std × sqrt(N),N=6000+ 時 sqrt(N)
+    把 Sharpe 放大近百倍,跨策略比較失真 → 新增 sharpe_daily(daily-aggregated
+    annualized)欄,UI 用此排序。
+    """
+    if "sharpe_daily" in grid_df.columns and grid_df["sharpe_daily"].notna().any():
+        return "sharpe_daily"
+    return "sharpe"
+
+
+def _vbt_default_strategy(grid_df: pd.DataFrame, strategies: list[str]) -> str:
+    """挑「樣本最多 + 排序指標最高」的策略當 selectbox 預設值。
+
+    對每策略找該策略內排序指標最高 row,排序鍵 (n_trades DESC, metric DESC),
     取頭一個。樣本越多代表 grid 收得越扎實。
     """
+    sort_col = _vbt_sort_key_col(grid_df)
     best_by_strat: list[tuple[str, int, float]] = []
     for s in strategies:
         sub = grid_df[grid_df["strategy"] == s]
         if sub.empty:
             continue
-        top = sub.loc[sub["sharpe"].idxmax()]
-        best_by_strat.append((s, int(top["n_trades"]), float(top["sharpe"])))
+        # NaN 用 -inf 排在最後,不會被 idxmax 選中
+        metric = sub[sort_col].fillna(float("-inf"))
+        top = sub.loc[metric.idxmax()]
+        top_metric = top[sort_col]
+        if pd.isna(top_metric):
+            top_metric = 0.0
+        best_by_strat.append((s, int(top["n_trades"]), float(top_metric)))
     if not best_by_strat:
         return strategies[0]
     best_by_strat.sort(key=lambda x: (x[1], x[2]), reverse=True)
@@ -6289,6 +6308,9 @@ def _render_vbt_grid_tab() -> None:
     st.caption(
         "**vectorbt 策略級 grid search** — 對每策略多組參數一次掃,找 Sharpe / 報酬最佳組合。"
         "結果**不自動覆蓋既有 production default**,僅供主公手動採用參考。"
+        "\n\n📐 排序指標 **Sharpe(日)** = daily-aggregated annualized Sharpe"
+        "(2026-05-15 修;trade-level Sharpe 在大樣本 sqrt(N) 膨脹,跨策略比較失真)。"
+        "舊 trade-level Sharpe 並列「Sharpe(trade,舊)」供對照。"
     )
 
     strategies = sorted(grid_df["strategy"].unique())
@@ -6296,17 +6318,21 @@ def _render_vbt_grid_tab() -> None:
         st.info("📭 grid 表內沒有任何策略 row")
         return
 
+    sort_col = _vbt_sort_key_col(grid_df)
     default_strat = _vbt_default_strategy(grid_df, strategies)
     option_labels = [f"{STRATEGY_LABELS.get(s, s)}（{s}）" for s in strategies]
     default_idx = strategies.index(default_strat)
     chosen_label = st.selectbox(
         "選策略", option_labels, index=default_idx,
         key="vbt_grid_strategy_selector",
-        help="預設為樣本最多 + Sharpe 最高的策略",
+        help="預設為樣本最多 + Sharpe(日)最高的策略",
     )
     strat = strategies[option_labels.index(chosen_label)]
-    sub = grid_df[grid_df["strategy"] == strat].sort_values(
-        "sharpe", ascending=False
+    sub = grid_df[grid_df["strategy"] == strat].copy()
+    # NaN 排到尾,排序穩定
+    sub["_sort_metric"] = sub[sort_col].fillna(float("-inf"))
+    sub = sub.sort_values("_sort_metric", ascending=False).drop(
+        columns=["_sort_metric"]
     ).reset_index(drop=True)
     if sub.empty:
         st.info("此策略無 grid 結果")
@@ -6321,9 +6347,15 @@ def _render_vbt_grid_tab() -> None:
     )
 
     best = sub.iloc[0]
+    sharpe_daily_val = best.get("sharpe_daily")
+    sharpe_daily_str = (
+        f"{float(sharpe_daily_val):.2f}"
+        if pd.notna(sharpe_daily_val) else "—(舊資料)"
+    )
     st.success(
         f"💡 **最佳組合**:`{best['params_json']}`　"
-        f"Sharpe **{float(best['sharpe']):.2f}**　"
+        f"Sharpe(日) **{sharpe_daily_str}**　"
+        f"Sharpe(trade,舊) {float(best['sharpe']):.2f}　"
         f"報酬 **{float(best['total_return']):+.2f}%**　"
         f"勝率 **{float(best['win_rate']):.1f}%**　"
         f"({int(best['n_trades'])} trades)　"
@@ -6331,6 +6363,9 @@ def _render_vbt_grid_tab() -> None:
     )
 
     # 軍師判讀:比對 production default 與 grid winner
+    def _fmt_sd(v) -> str:
+        return f"{float(v):.2f}" if pd.notna(v) else "—"
+
     default_params = _STRATEGY_DEFAULT_PARAMS.get(strat)
     if default_params:
         default_json = _json.dumps(default_params, sort_keys=True, default=str)
@@ -6340,7 +6375,7 @@ def _render_vbt_grid_tab() -> None:
             if dr["params_hash"] == best["params_hash"]:
                 st.info(
                     f"🎖️ 軍師判讀:現有 default 已是 grid 最佳組合,維持即可 "
-                    f"(sharpe {float(best['sharpe']):.2f}, "
+                    f"(Sharpe 日 {_fmt_sd(best.get('sharpe_daily'))}, "
                     f"{int(best['n_trades'])} trades)"
                 )
             else:
@@ -6353,7 +6388,8 @@ def _render_vbt_grid_tab() -> None:
                 st.info(
                     f"🎖️ 軍師判讀:建議 {diff_str}　"
                     f"(n_trades {int(dr['n_trades'])} → {int(best['n_trades'])}, "
-                    f"sharpe {float(dr['sharpe']):.2f} → {float(best['sharpe']):.2f})"
+                    f"Sharpe 日 {_fmt_sd(dr.get('sharpe_daily'))} → "
+                    f"{_fmt_sd(best.get('sharpe_daily'))})"
                 )
         else:
             st.info(
@@ -6365,7 +6401,12 @@ def _render_vbt_grid_tab() -> None:
     for _, r in sub.iterrows():
         rows_view.append({
             "參數": r["params_json"],
-            "Sharpe": f"{float(r['sharpe']):.3f}",
+            # 新指標放第一欄(預設排序鍵),舊 trade-level 放後面對照
+            "Sharpe(日)": (
+                f"{float(r['sharpe_daily']):.3f}"
+                if pd.notna(r.get("sharpe_daily")) else "—"
+            ),
+            "Sharpe(trade,舊)": f"{float(r['sharpe']):.3f}",
             "報酬 %": f"{float(r['total_return']):+.2f}",
             "MaxDD %": f"{float(r['max_drawdown']):.2f}",
             "勝率 %": f"{float(r['win_rate']):.1f}",
