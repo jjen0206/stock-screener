@@ -57,9 +57,11 @@ DEFAULT_PER_STRATEGY = [
     "gap_up",
 ]
 
-DEFAULT_N_SPLITS = 5
-DEFAULT_TEST_SIZE = 20
-DEFAULT_MIN_TRAIN = 100
+# 預設改 None / 50 / 300:依 docs/ml-overfit-root-cause.md
+# 原 5/20/100 對大樣本浪費 90%+ 資料 + test_size=20 統計雜訊極大
+DEFAULT_N_SPLITS: int | None = None
+DEFAULT_TEST_SIZE = 50
+DEFAULT_MIN_TRAIN = 300
 PER_STRATEGY_LOOKBACK = 200
 
 
@@ -258,7 +260,10 @@ def main() -> int:
         "--models", default="all",
         help="comma-separated model names,或 'all' / 'short_pick' / 'per_strategy'",
     )
-    ap.add_argument("--n-splits", type=int, default=DEFAULT_N_SPLITS)
+    ap.add_argument(
+        "--n-splits", type=int, default=DEFAULT_N_SPLITS,
+        help="None / 未指定 → 跑全部可分 splits(避免大樣本只測前段)",
+    )
     ap.add_argument("--test-size", type=int, default=DEFAULT_TEST_SIZE)
     ap.add_argument("--min-train-size", type=int, default=DEFAULT_MIN_TRAIN)
     args = ap.parse_args()

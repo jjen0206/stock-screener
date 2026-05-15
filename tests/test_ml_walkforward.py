@@ -103,3 +103,58 @@ def test_walkforward_all_nan_features_returns_empty_gracefully():
         df, n_splits=5, test_size=20, min_train_size=100,
     )
     assert results == []
+
+
+def test_walkforward_n_splits_none_uses_all_data():
+    """n_splits=None → 用 max_possible,不被 hard cap=5 限制。
+
+    Why:docs/ml-overfit-root-cause.md 找到原 cap=5 對大樣本(2685 rows)只測前
+    200 rows、浪費 93% 資料。修法後 n_splits=None 應跑滿 max_possible splits。
+
+    n=1000, min_train=100, test_size=50 → max_possible = (1000-100)//50 = 18
+    """
+    df = _make_synthetic_features(n_rows=1000)
+    results = wf.walkforward_train_test(
+        df, n_splits=None, test_size=50, min_train_size=100,
+    )
+    # max_possible = (1000 - 100) // 50 = 18
+    # 但部分 split 若 train 全同類會被 skip,所以放寬到 >= 15
+    assert len(results) >= 15, (
+        f"n_splits=None 應跑滿 max_possible≈18 splits,實際 {len(results)}"
+    )
+    # 最後一個 split 應覆蓋到接近資料尾端(證明真的用了所有資料)
+    last = results[-1]
+    assert last["test"]["n"] == 50
+    # 第一個 split test_size = 50
+    assert results[0]["test"]["n"] == 50
+    # train 是 expanding:最後一個 split 的 train_n 應比第一個大很多
+    assert results[-1]["train"]["n"] > results[0]["train"]["n"]
+
+
+def test_walkforward_test_size_50_default_in_eval():
+    """scripts/eval_walkforward.py 預設 test_size=50, min_train=300, n_splits=None。
+
+    Why:docs/ml-overfit-root-cause.md 報告 test_size=20 統計雜訊太大、
+    min_train=100 對 short_pick/taiex_alpha 太小。修法後預設應為 50/300/None。
+    """
+    import importlib.util
+    from pathlib import Path
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "eval_walkforward.py"
+    spec = importlib.util.spec_from_file_location("eval_walkforward_default_check", script_path)
+    module = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules["eval_walkforward_default_check"] = module
+    spec.loader.exec_module(module)
+
+    assert module.DEFAULT_TEST_SIZE == 50, (
+        f"eval_walkforward 預設 test_size 應為 50(原 20 統計雜訊太大),"
+        f"實際 {module.DEFAULT_TEST_SIZE}"
+    )
+    assert module.DEFAULT_MIN_TRAIN == 300, (
+        f"eval_walkforward 預設 min_train 應為 300(原 100 對大樣本太小),"
+        f"實際 {module.DEFAULT_MIN_TRAIN}"
+    )
+    assert module.DEFAULT_N_SPLITS is None, (
+        f"eval_walkforward 預設 n_splits 應為 None(讓 max_possible 主導),"
+        f"實際 {module.DEFAULT_N_SPLITS}"
+    )

@@ -32,6 +32,9 @@ import pandas as pd
 DEFAULT_N_SPLITS = 5
 DEFAULT_TEST_SIZE = 20
 DEFAULT_MIN_TRAIN_SIZE = 100
+# sentinel:n_splits=None → 用 max_possible(全部可分 splits)
+# 修法依據:docs/ml-overfit-root-cause.md(W1 報告)— 原 hard cap=5 對大樣本
+# (taiex_alpha 2248 / bias_convergence 2685)只測前 200 rows、浪費 90%+ 資料
 
 # RandomForest hyperparams 對齊 production train_short_pick_model
 _RF_KWARGS = dict(
@@ -95,7 +98,7 @@ def _train_one_split(
 def walkforward_train_test(
     features_df: pd.DataFrame,
     *,
-    n_splits: int = DEFAULT_N_SPLITS,
+    n_splits: int | None = DEFAULT_N_SPLITS,
     test_size: int = DEFAULT_TEST_SIZE,
     min_train_size: int = DEFAULT_MIN_TRAIN_SIZE,
     date_col: str = "date",
@@ -108,6 +111,7 @@ def walkforward_train_test(
       features_df:必含 date_col + target_col + feature columns。多筆同 date OK
         (多 sid 同日各自一筆),會一起進對應 fold。
       n_splits:最多 split 數。實際可用 split 受 (len-min_train_size) // test_size 限制。
+        傳 None → 直接用 max_possible(全部可分 splits 都跑),避免大樣本只測前段。
       test_size:每個 test fold 大小(rows)。
       min_train_size:第一個 train fold 至少要的 rows。
       feature_cols:None → 自動取所有非 date/target 欄。
@@ -165,7 +169,8 @@ def walkforward_train_test(
         # 印 warning 跳下一個 model 即可)
         return []
 
-    actual_splits = min(n_splits, max_possible)
+    # n_splits=None → 全部可分 splits(避免 cap=5 對大樣本只測前 200 rows)
+    actual_splits = max_possible if n_splits is None else min(n_splits, max_possible)
 
     results: list[dict] = []
     for i in range(actual_splits):
