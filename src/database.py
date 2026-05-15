@@ -462,6 +462,31 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_vbt_grid_strategy "
     "ON vbt_grid_results(strategy, sharpe DESC)",
+    # ml_walkforward_results:walk-forward CV 評估結果(M2 後續,2026-05-15 加)。
+    # 取代 random 80/20 split 評估,對時間序列做 expanding-window CV,輸出每
+    # split 的 train/test ROC AUC + PR AUC + log loss 給時序 OOS 觀察。
+    # 同 (model_name, split_idx, evaluated_at) UPSERT,scripts/eval_walkforward.py
+    # 重跑會覆蓋。供週重訓 A/B gate 用(walk-forward ROC < 舊 - 0.02 → rollback)。
+    """
+    CREATE TABLE IF NOT EXISTS ml_walkforward_results (
+        model_name    TEXT NOT NULL,    -- 'short_pick' / per_strategy 名(e.g. 'gap_up')
+        split_idx     INTEGER NOT NULL, -- 0-based,expanding window 第幾 split
+        train_start   TEXT,             -- 'YYYY-MM-DD'
+        train_end     TEXT,
+        test_start    TEXT,
+        test_end      TEXT,
+        train_n       INTEGER,
+        test_n        INTEGER,
+        roc_auc       REAL,             -- test 端 ROC AUC
+        pr_auc        REAL,             -- test 端 PR AUC
+        log_loss      REAL,             -- test 端 log loss
+        train_roc_auc REAL,             -- train 端 ROC AUC(overfit gap 參考)
+        evaluated_at  TEXT NOT NULL,
+        PRIMARY KEY (model_name, split_idx, evaluated_at)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ml_walkforward_model "
+    "ON ml_walkforward_results(model_name, evaluated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
     "CREATE INDEX IF NOT EXISTS idx_institutional_date ON institutional(date)",
     # 加速 screener_long 的 WHERE stock_id=? AND period_type=? ORDER BY period DESC
