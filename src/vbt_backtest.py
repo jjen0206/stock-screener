@@ -40,6 +40,14 @@ DEFAULT_SLIPPAGE = 0.001
 DEFAULT_INIT_CASH = 1_000_000.0  # 100 萬本金
 DEFAULT_HOLD_DAYS = 5
 
+# Daily-aggregated Sharpe defaults(2026-05-15 加,修 trade-level Sharpe sqrt(N) 膨脹):
+# - 年化 252 交易日(台股 / 美股共識)
+# - rf=0(短期影響小,台股無爭議無風險基準)
+# - aggregate='sum':同一日多筆 trade returns 加總,貼近實際資金曲線
+DAILY_SHARPE_PERIODS_PER_YEAR = 252
+DAILY_SHARPE_RISK_FREE = 0.0
+DAILY_SHARPE_AGGREGATE = "sum"
+
 
 def _hash_params(params: dict[str, Any]) -> str:
     """sha1(json.dumps(params, sort_keys=True))[:12] — 給 vbt_grid_results PK。"""
@@ -77,6 +85,104 @@ def expand_params_grid(grid: dict[str, Iterable]) -> list[dict[str, Any]]:
         dict(zip(keys, combo, strict=False))
         for combo in itertools.product(*values)
     ]
+
+
+def _compute_daily_sharpe(
+    trades_records: pd.DataFrame | None,
+    trading_index: pd.DatetimeIndex | pd.Index | None,
+    *,
+    aggregate: str = DAILY_SHARPE_AGGREGATE,
+    risk_free_rate: float = DAILY_SHARPE_RISK_FREE,
+    periods_per_year: int = DAILY_SHARPE_PERIODS_PER_YEAR,
+) -> float:
+    """把 trade-level returns 歸成 daily-aggregated return 後算 annualized Sharpe。
+
+    解決 trade-level Sharpe = mean/std × sqrt(N) 在 N >> 1 時 sqrt(N) 膨脹的問題
+    (6000 筆 trade → 放大 ~77.5×,跨策略 / 不同 N 比較完全失真)。
+
+    算法:
+    1. 取 records_readable 的 Exit Timestamp + Return,把 return 歸到 exit 當天
+    2. 同一天多筆 → sum(預設,等同當日總部位 PnL,貼近實際資金曲線)
+       或 mean(平均 trade 表現)
+    3. reindex 到完整交易日序列(trading_index,通常 = close.index),
+       沒交易那日 → 0 報酬(等同當日無部位變動)
+    4. annualized Sharpe = (daily_mean - rf/252) / daily_std × sqrt(252)
+
+    Args:
+        trades_records: vbt `pf.trades.records_readable`(含 Exit Timestamp + Return)。
+            空 / None → 回 0.0
+        trading_index: 全部有效交易日(從 close.index 來),用來 reindex 補 0 報酬。
+            少於 2 點 → 回 0.0
+        aggregate: 同日多筆 → "sum"(預設,貼近實際 PnL)或 "mean"(平均單筆表現)
+        risk_free_rate: 年化無風險利率(預設 0,台股短期影響小,無爭議基準)
+        periods_per_year: annualize 倍率(預設 252 交易日)
+
+    Returns:
+        annualized daily Sharpe(無交易 / 樣本不足 / std≤0 → 0.0)
+    """
+    if trades_records is None or len(trades_records) == 0:
+        return 0.0
+    if trading_index is None or len(trading_index) < 2:
+        return 0.0
+
+    # 找 Exit Timestamp 欄(vbt 1.x records_readable 用 "Exit Timestamp";
+    # 對舊版 fallback 一些其他常見命名)
+    exit_col = None
+    for c in ("Exit Timestamp", "Exit Time", "Exit Date", "exit_time", "exit_idx"):
+        if c in trades_records.columns:
+            exit_col = c
+            break
+    if exit_col is None:
+        return 0.0
+
+    # 找 Return 欄(同 _portfolio_stats 的容錯邏輯)
+    ret_col = None
+    for c in ("Return", "Return [%]", "return", "PnL", "Profit"):
+        if c in trades_records.columns:
+            ret_col = c
+            break
+    if ret_col is None:
+        return 0.0
+
+    returns = pd.to_numeric(trades_records[ret_col], errors="coerce")
+    # 統一成 fraction(0.05 = +5%):"Return" / "return" 在 vbt 1.0 已是 fraction;
+    # "Return [%]" 已 *100 → 除回 100。PnL / Profit 是金額不是 % — 不在 trade-level
+    # Sharpe 比較範疇(留給 0.0 fallback)
+    if ret_col == "Return [%]":
+        returns = returns / 100.0
+    elif ret_col in ("PnL", "Profit"):
+        # 金額不是 return rate,沒法直接算 Sharpe — 退回 0.0
+        return 0.0
+
+    exits = pd.to_datetime(trades_records[exit_col], errors="coerce")
+    df = pd.DataFrame({"exit_date": exits, "ret": returns}).dropna()
+    if df.empty:
+        return 0.0
+    # 歸到當天(去掉時間部分)— 同日多筆 entry/exit 都歸到 exit 當天
+    df["exit_date"] = df["exit_date"].dt.normalize()
+
+    if aggregate == "mean":
+        daily = df.groupby("exit_date")["ret"].mean()
+    else:
+        # 預設 sum:同日多筆 = 當日總部位 PnL,貼近實際資金曲線
+        daily = df.groupby("exit_date")["ret"].sum()
+
+    # reindex 到完整交易日:沒交易那日 = 0(等同當日無部位變動)
+    full_index = pd.DatetimeIndex(trading_index).normalize().unique().sort_values()
+    daily_full = daily.reindex(full_index, fill_value=0.0)
+    if len(daily_full) < 2:
+        return 0.0
+
+    daily_rf = risk_free_rate / periods_per_year
+    excess = daily_full - daily_rf
+    std = float(excess.std(ddof=1))
+    if not np.isfinite(std) or std <= 0:
+        return 0.0
+    mean = float(excess.mean())
+    sharpe = mean / std * np.sqrt(periods_per_year)
+    if not np.isfinite(sharpe):
+        return 0.0
+    return float(sharpe)
 
 
 def _clean_close_matrix(close: pd.DataFrame) -> pd.DataFrame:
@@ -234,12 +340,15 @@ def _portfolio_stats(
     # sharpe_ratio() 對沒 trades 的 column 是 NaN,mean 把全集稀釋掉。改用 trade-level
     # PnL pct 計算策略整體指標:
     #   - total_return = mean of trade returns × 100(每筆獨立部位的平均報酬 %)
-    #   - sharpe       = mean / std × sqrt(N)(annualized over the trade sample)
+    #   - sharpe       = trade-level mean / std × sqrt(N)
+    #                    (DEPRECATED 2026-05-15;N 大時 sqrt(N) 膨脹,保留做歷史對照)
+    #   - sharpe_daily = daily-aggregated annualized Sharpe(預設用此排序 / 比較)
     #   - max_drawdown = trade-level worst loss(% 正值)
     #   - win_rate     = # winning trades / N × 100
     n_trades = 0
     total_return = 0.0
     sharpe = 0.0
+    sharpe_daily = 0.0
     max_dd = 0.0
     win_rate = 0.0
     try:
@@ -271,12 +380,15 @@ def _portfolio_stats(
                         )
                     if np.isnan(sharpe) or np.isinf(sharpe):
                         sharpe = 0.0
+            # daily-aggregated Sharpe — 抗 N 膨脹,跨策略可公平比較
+            sharpe_daily = _compute_daily_sharpe(records, close.index)
     except Exception as e:  # noqa: BLE001
         logger.debug("[VBT] portfolio stats compute failed: %s", e)
 
     return {
         "total_return": total_return,
         "sharpe": sharpe,
+        "sharpe_daily": sharpe_daily,
         "max_drawdown": max_dd,
         "win_rate": win_rate,
         "n_trades": n_trades,
@@ -340,6 +452,7 @@ def backtest_strategy_with_params(
                 "n_trades": 0,
                 "total_return": 0.0,
                 "sharpe": 0.0,
+                "sharpe_daily": 0.0,
                 "max_drawdown": 0.0,
                 "win_rate": 0.0,
             })
@@ -361,7 +474,10 @@ def backtest_strategy_with_params(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    return df.sort_values("sharpe", ascending=False).reset_index(drop=True)
+    # 排序鍵改用 sharpe_daily(2026-05-15;trade-level sharpe sqrt(N) 膨脹,跨組
+    # 比較失真)。fallback 到 sharpe 是給沒填的歷史 row 用。
+    sort_key = "sharpe_daily" if "sharpe_daily" in df.columns else "sharpe"
+    return df.sort_values(sort_key, ascending=False).reset_index(drop=True)
 
 
 def persist_grid_results(
@@ -380,7 +496,13 @@ def persist_grid_results(
 
     now = datetime.now(timezone.utc).isoformat()
     rows: list[dict] = []
+    has_sharpe_daily = "sharpe_daily" in results_df.columns
     for _, r in results_df.iterrows():
+        sharpe_daily_val = (
+            float(r["sharpe_daily"])
+            if has_sharpe_daily and pd.notna(r.get("sharpe_daily"))
+            else None
+        )
         rows.append({
             "strategy": str(r["strategy"]),
             "params_hash": str(r["params_hash"]),
@@ -390,6 +512,7 @@ def persist_grid_results(
             "n_trades": int(r["n_trades"]),
             "total_return": float(r["total_return"]),
             "sharpe": float(r["sharpe"]),
+            "sharpe_daily": sharpe_daily_val,
             "max_drawdown": float(r["max_drawdown"]),
             "win_rate": float(r["win_rate"]),
             "generated_at": now,
@@ -402,7 +525,11 @@ __all__ = [
     "DEFAULT_SLIPPAGE",
     "DEFAULT_INIT_CASH",
     "DEFAULT_HOLD_DAYS",
+    "DAILY_SHARPE_PERIODS_PER_YEAR",
+    "DAILY_SHARPE_RISK_FREE",
+    "DAILY_SHARPE_AGGREGATE",
     "_clean_close_matrix",
+    "_compute_daily_sharpe",
     "expand_params_grid",
     "backtest_strategy_with_params",
     "persist_grid_results",
