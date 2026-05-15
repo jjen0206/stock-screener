@@ -33,6 +33,8 @@ data/*.sqlite
 
 # ML 模型備份(M2 v1 -> v3 retrain 留下的本地 safety net,不入 repo)
 models/**/*.v1.bak
+models/**/*.v2.bak
+models/**/*.pre_retrain.bak
 models/**/*.v3.candidate
 models/baseline_v1.json
 models/new_v3.json

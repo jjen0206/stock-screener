@@ -58,6 +58,29 @@ STOP_PCT = 0.03
 HOLD_DAYS = 5
 MODEL_DIR = _ROOT / "models" / "per_strategy"
 
+# RandomForest 預設 hyperparams(其餘 strategy 用)
+DEFAULT_RF_PARAMS = {
+    "n_estimators": 200,
+    "max_depth": 10,
+    "min_samples_leaf": 5,
+}
+
+# Per-strategy 覆寫(只對 overfit 風險高的 strategy 加強 regularization)
+# gap_up: POST WF ROC 0.4875 < random — 收斂 depth + 提高 leaf min_samples
+# 抑制 overfit(2026-05-15 主公拍板)
+STRATEGY_RF_PARAMS: dict[str, dict] = {
+    "gap_up": {
+        "n_estimators": 200,
+        "max_depth": 5,
+        "min_samples_leaf": 10,
+    },
+}
+
+
+def _rf_params_for(strategy_name: str) -> dict:
+    """回某 strategy 的 RandomForest hyperparams(missing → DEFAULT)。"""
+    return STRATEGY_RF_PARAMS.get(strategy_name, DEFAULT_RF_PARAMS)
+
 
 def gather_training_set(
     strategy_name: str,
@@ -216,10 +239,11 @@ def train_one(
     X = train_df[ml_predictor.FEATURE_NAMES].copy()
     y = train_df["label"].astype(int)
 
+    rf_params = _rf_params_for(strategy_name)
     model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_leaf=5,
+        n_estimators=rf_params["n_estimators"],
+        max_depth=rf_params["max_depth"],
+        min_samples_leaf=rf_params["min_samples_leaf"],
         class_weight="balanced",
         oob_score=True,
         bootstrap=True,
@@ -254,8 +278,9 @@ def train_one(
         "stop_pct": STOP_PCT,
         "hold_days": HOLD_DAYS,
         "model_type": "RandomForestClassifier",
-        "n_estimators": 200,
-        "max_depth": 10,
+        "n_estimators": rf_params["n_estimators"],
+        "max_depth": rf_params["max_depth"],
+        "min_samples_leaf": rf_params["min_samples_leaf"],
     }
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",

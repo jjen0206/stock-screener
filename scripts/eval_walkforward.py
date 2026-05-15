@@ -167,6 +167,23 @@ def _write_results_to_db(
         conn.commit()
 
 
+def _rf_kwargs_for_model(model_name: str) -> dict | None:
+    """per_strategy 用 STRATEGY_RF_PARAMS 覆寫,short_pick 走 None 用 WF default。
+
+    對齊原則:WF eval 該模型的 RF hyperparams 應跟 production 訓練口徑一致,
+    否則 retrain 時改 hyperparam 對 WF ROC 沒影響(架構不對)。
+    """
+    if model_name == "short_pick":
+        return None  # 用 ml_walkforward._RF_KWARGS default(對齊 ml_predictor)
+    override = _tps.STRATEGY_RF_PARAMS.get(model_name)
+    if not override:
+        return None
+    # 只傳 RF 認得的欄;n_estimators/max_depth/min_samples_leaf 是 default kwargs
+    return {k: v for k, v in override.items() if k in (
+        "n_estimators", "max_depth", "min_samples_leaf",
+    )}
+
+
 def evaluate_model(
     model_name: str,
     df: pd.DataFrame,
@@ -187,6 +204,7 @@ def evaluate_model(
         test_size=test_size,
         min_train_size=min_train_size,
         feature_cols=feature_cols,
+        rf_kwargs=_rf_kwargs_for_model(model_name),
     )
     return results, wf.walkforward_summary(results)
 

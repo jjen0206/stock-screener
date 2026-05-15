@@ -52,14 +52,22 @@ def _train_one_split(
     y_train: pd.Series,
     X_test: pd.DataFrame,
     y_test: pd.Series,
+    rf_kwargs: dict | None = None,
 ) -> dict:
-    """一個 split 內訓 + 評(train + test 各算 ROC / PR / log loss)。"""
+    """一個 split 內訓 + 評(train + test 各算 ROC / PR / log loss)。
+
+    rf_kwargs:覆寫 default _RF_KWARGS(供 per-strategy 客製 hyperparams,
+    e.g. gap_up 用 max_depth=5 / min_samples_leaf=10 抑制 overfit)。
+    """
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import (
         average_precision_score, log_loss, roc_auc_score,
     )
 
-    model = RandomForestClassifier(**_RF_KWARGS)
+    kwargs = dict(_RF_KWARGS)
+    if rf_kwargs:
+        kwargs.update(rf_kwargs)
+    model = RandomForestClassifier(**kwargs)
     model.fit(X_train, y_train)
 
     def _eval(X, y):
@@ -104,6 +112,7 @@ def walkforward_train_test(
     date_col: str = "date",
     target_col: str = "y",
     feature_cols: Sequence[str] | None = None,
+    rf_kwargs: dict | None = None,
 ) -> list[dict]:
     """expanding-window walk-forward CV。
 
@@ -193,7 +202,9 @@ def walkforward_train_test(
             # train 全同類 — 這個 split 沒意義,跳過(不算進 results)
             continue
 
-        metrics = _train_one_split(X_train, y_train, X_test, y_test)
+        metrics = _train_one_split(
+            X_train, y_train, X_test, y_test, rf_kwargs=rf_kwargs,
+        )
 
         results.append({
             "split_idx": i,

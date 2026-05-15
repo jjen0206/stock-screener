@@ -1,55 +1,75 @@
 {
   "strategy": "gap_up",
-  "trained_at": "2026-05-10T15:25:00+00:00",
-  "samples": 467,
-  "wins": 208,
-  "win_rate": 0.44539614561027835,
+  "trained_at": "2026-05-15T02:58:50+00:00",
+  "samples": 774,
+  "wins": 347,
+  "win_rate": 0.4483204134366925,
   "status": "trained",
-  "oob_score": 0.5588865096359743,
+  "oob_score": 0.5297157622739018,
   "feature_importances": [
     {
-      "name": "bias_pct",
-      "importance": 0.1566136332719547
+      "name": "macd_dif",
+      "importance": 0.16442548375761523
     },
     {
       "name": "macd_osc",
-      "importance": 0.14918715388651335
+      "importance": 0.14962409868973875
     },
     {
       "name": "kd_d",
-      "importance": 0.14333884480964793
-    },
-    {
-      "name": "macd_dif",
-      "importance": 0.1402242733259896
-    },
-    {
-      "name": "kd_k",
-      "importance": 0.12896239048195252
-    },
-    {
-      "name": "vol_ratio",
-      "importance": 0.1277950153599814
+      "importance": 0.13709653829487525
     },
     {
       "name": "atr_normalized",
-      "importance": 0.10788851437640863
+      "importance": 0.11699213452053901
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.11342612768563186
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.11226274691137825
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.10900145580990485
     },
     {
       "name": "bb_position",
-      "importance": 0.040970520661303966
+      "importance": 0.06007625504441616
     },
     {
-      "name": "ma_alignment",
-      "importance": 0.0028738785623274488
+      "name": "holders_pct_change_4w",
+      "importance": 0.010108336233186922
     },
     {
-      "name": "inst_5d",
-      "importance": 0.0013041848796164388
+      "name": "holders_delta_w_zscore",
+      "importance": 0.009682046333799963
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.00611118017564498
     },
     {
       "name": "inst_10d",
-      "importance": 0.000841590384303937
+      "importance": 0.005004632636059146
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0045275203248178976
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.0016614435823917146
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.0
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0
     }
   ],
   "feature_names": [
@@ -63,7 +83,12 @@
     "bias_pct",
     "atr_normalized",
     "inst_5d",
-    "inst_10d"
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
   ],
   "min_train_samples": 100,
   "lookback_days": 200,
@@ -72,5 +97,6 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 5,
+  "min_samples_leaf": 10
 }
