@@ -49,6 +49,11 @@ STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
 # 警示股」— 文案是提示而非「已濾掉」(主公規矩:不替他做隱藏決定)。
 _LAST_ANNOTATED_WARNINGS: list[dict] = []
 
+# 大盤 regime gating — 開 True 讓 _select_top_picks 根據 TAIEX regime 動態縮
+# 推薦量 + 拉 ML threshold uplift。env REGIME_GATING_ENABLED=false 時 src.
+# regime_gating.is_enabled() 回 False,gating 退回 bull params(等同關掉)。
+REGIME_GATING_ENABLED = True
+
 
 logger = logging.getLogger(__name__)
 
@@ -557,14 +562,44 @@ def _select_top_picks(
             "confidence_tier": confidence_tier,
         }
 
+    # 大盤 regime gating — 算當前 regime 的 max_count + threshold_uplift。
+    # bear 時拉 ML threshold uplift,本來只該過 base threshold 的 picks 必須
+    # 過 (base + uplift) 才入選;否則篩掉。max_count 在排序後截斷(下方)。
+    # 失敗(env / DB 異常)→ 退回 bull params(等同關 gating)。
+    regime_gating: dict = {}
+    threshold_uplift = 0.0
+    if REGIME_GATING_ENABLED:
+        try:
+            from src.regime_gating import get_regime_gating_params
+            with db.get_conn() as conn:
+                regime_gating = dict(get_regime_gating_params(conn))
+            threshold_uplift = float(
+                regime_gating.get("confidence_threshold_uplift") or 0.0
+            )
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("[NOTIFIER] regime gating 失敗,退回不縮:%s", ex)
+            regime_gating = {}
+            threshold_uplift = 0.0
+
     qualified: list[dict] = []
     for sid, info in agg.items():
         cand = _build_candidate(
             sid=sid, info=info, min_confluence=confluence_n,
             apply_ml_thr=True, confidence_tier="high",
         )
-        if cand is not None:
-            qualified.append(cand)
+        if cand is None:
+            continue
+        # regime gating threshold uplift — 空頭時拉 (base + uplift)
+        # 只在 ml_prob / threshold 都有值時做(避免 None 比較)
+        if threshold_uplift > 0:
+            prob_local = cand.get("ml_prob")
+            thr_local = _strict_thr(cand.get("matched_strategies") or [])
+            if (
+                thr_local is not None and prob_local is not None
+                and prob_local < thr_local + threshold_uplift
+            ):
+                continue
+        qualified.append(cand)
 
     # Fallback(主公 2026-05-15 拍板):若 confluence + threshold 過濾後 = 0
     # 但 daily_picks 仍有命中 → 降級回 Top 3 弱訊號(只看 confluence ≥ 1,
@@ -630,7 +665,15 @@ def _select_top_picks(
         analyst_target_mean=p.get("analyst_target_mean"),
         strategy_weights=strategy_weights,
     ))
-    out = qualified[:top_n]
+    # 大盤 regime gating truncation — bear 2 / range 5 / bull 10。
+    # fallback path(降級弱訊號 Top 3)時 top_n 已被改成 3,gating 仍會生效
+    # (gating cap 通常比 fallback 3 寬,但 bear 時 cap=2 會把弱訊號也壓到 2)。
+    effective_top_n = top_n
+    if regime_gating:
+        cap = int(regime_gating.get("short_pick_max_count") or top_n)
+        if cap < effective_top_n:
+            effective_top_n = cap
+    out = qualified[:effective_top_n]
     for i, p in enumerate(out, start=1):
         p["rank"] = i
     if fallback_used:
@@ -639,6 +682,12 @@ def _select_top_picks(
         # picks[0].get('confidence_tier') == 'weak' 也能判斷,所以 flag 為輔助。
         for p in out:
             p["confidence_tier"] = "weak"
+    # regime_gating metadata 寫進每筆 pick — format_top_picks_message 從
+    # picks[0]["regime_gating"] 取 caption 注入訊息開頭。picks 為空時走另一條
+    # 路(下方 caller 用 fallback fetch)。
+    if regime_gating and out:
+        for p in out:
+            p["regime_gating"] = regime_gating
 
     # U3 進場區間建議:對 top N picks 算 (entry_low, entry_high)
     # 只算 out 內的 picks(top N,通常 ≤ 10),省 DB query。
@@ -1033,6 +1082,31 @@ def format_yesterday_recap(
     return "\n".join(lines)
 
 
+def _regime_gating_caption(picks: list[dict]) -> str:
+    """從 picks[0]["regime_gating"] 取 caption(注入訊息開頭)。
+
+    picks 為空 / regime gating 失敗 → 直接撈一次當前 regime,讓「全市場 0 picks」
+    死寂日子也顯。任何例外 → 回空字串(整段 graceful skip,不擋推播)。
+    """
+    if not REGIME_GATING_ENABLED:
+        return ""
+    # 1) picks 有 regime_gating metadata 直接用
+    if picks:
+        rg = picks[0].get("regime_gating") or {}
+        cap = rg.get("caption")
+        if cap:
+            return str(cap)
+    # 2) picks 空 / 沒 metadata — 直接撈一次
+    try:
+        from src.regime_gating import get_regime_gating_params
+        with db.get_conn() as conn:
+            rg = get_regime_gating_params(conn)
+        return str(rg.get("caption") or "")
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] regime gating caption fetch 失敗,略過")
+        return ""
+
+
 def format_top_picks_message(
     picks: list[dict], date: str, channel: str = "telegram",
     premium_picks: list[dict] | None = None,
@@ -1102,10 +1176,15 @@ def format_top_picks_message(
         big_holder_movers or [], channel=channel,
     )
 
-    # === 組訊息:header + 各 section(空 skip)+ footer ===
+    # === 組訊息:header + regime caption + 各 section(空 skip)+ footer ===
     parts: list[str] = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
     ]
+    # regime gating caption — picks 有值時從 picks[0]["regime_gating"] 拿;
+    # picks 空時嘗試直接撈一次(讓「全市場 0 picks」的死寂日子也顯 regime)
+    gating_caption = _regime_gating_caption(picks)
+    if gating_caption:
+        parts.append(gating_caption)
     for block in (recap_block, short_picks_block, premium_block, movers_block):
         if block:
             parts.append(block)

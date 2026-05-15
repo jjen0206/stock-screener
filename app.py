@@ -995,6 +995,70 @@ def main() -> None:
                     st.write(f"`{k}`: {v*1000:.1f}ms")
 
 
+# === 大盤 regime gating badge(短線 / 長線 / 系統結論共用)===
+
+# regime → badge 顏色(綠 / 黃 / 紅 — mobile-first 顯眼可見)
+# 主公拍板 2026-05-15:bear 用紅 / range 用黃 / bull 用綠 / 失敗 fallback 灰
+_REGIME_BADGE_COLORS: dict[str, str] = {
+    "bull":  "#2ecc71",  # 綠
+    "range": "#f1c40f",  # 黃
+    "bear":  "#e74c3c",  # 紅
+}
+
+
+def _render_regime_gating_badge(location: str = "page") -> None:
+    """渲染 regime gating badge — 短線 / 長線 / 系統結論頁標題下方共用。
+
+    location:
+      - "page": 頁面內顯示成 caption + 大色塊 badge(綠/黃/紅,顯眼)
+                點 expander 展開「目前推薦最多 N 檔 / 信心 ≥ X」說明
+
+    任何例外(DB / regime_gating import 失敗)→ silent skip,不擋頁面渲染。
+    """
+    try:
+        from src import regime_gating as _rg
+        from src import database as _db
+        with _db.get_conn() as conn:
+            params = _rg.get_regime_gating_params(conn)
+    except Exception:  # noqa: BLE001
+        return  # 失敗 → silent skip
+
+    regime = params.get("regime", "range")
+    caption = params.get("caption", "")
+    short_max = params.get("short_pick_max_count", 0)
+    long_max = params.get("long_pick_max_count", 0)
+    uplift = params.get("confidence_threshold_uplift", 0.0)
+    color = _REGIME_BADGE_COLORS.get(regime, "#95a5a6")
+
+    # caption 第一行 (e.g. "📈 大盤多頭") 拿來當 badge 主文字;
+    # 後續行(空頭警語)用 st.warning render 凸顯
+    cap_lines = (caption or "").split("\n")
+    badge_text = cap_lines[0] if cap_lines else regime
+    extra_warning = "\n".join(cap_lines[1:]).strip()
+
+    # 大色塊 badge — st.markdown + inline style(mobile-first 大字 + 對比色)
+    st.markdown(
+        f'<div style="display:inline-block;padding:6px 14px;'
+        f'border-radius:6px;background-color:{color};color:white;'
+        f'font-weight:600;font-size:0.95rem;margin:4px 0;">'
+        f'{badge_text}</div>',
+        unsafe_allow_html=True,
+    )
+    if extra_warning:
+        st.warning(extra_warning)
+
+    with st.expander("ℹ️ 大盤 gating 說明", expanded=False):
+        st.markdown(
+            f"""
+- **當前 regime**:`{regime}`
+- **短線推薦上限**:{short_max} 檔
+- **長線推薦上限**:{long_max} 檔
+- **ML 信心門檻 uplift**:+{uplift:.2f}(空頭加嚴,只放最有信心)
+- **kill-switch**:env `REGIME_GATING_ENABLED=false` 關掉 gating
+            """
+        )
+
+
 # === 首頁 Dashboard ===
 
 def _page_dashboard() -> None:
@@ -1399,6 +1463,9 @@ def _reset_short_params() -> None:
 
 def _page_short() -> None:
     st.header("🔥 短線推薦")
+
+    # 大盤 regime gating badge — 標題下方顯示綠/黃/紅 badge + 警語(空頭時凸顯)
+    _render_regime_gating_badge(location="page")
 
     # 大盤環境感知:讀 TAIEX MA20/MA60 算 regime → 預設只開該 regime 適合的策略類別
     from src.market_regime import compute_regime, filter_strategies_by_regime
@@ -2044,6 +2111,9 @@ def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
 
 def _page_long() -> None:
     st.header("💎 長線口袋名單")
+
+    # 大盤 regime gating badge — 長線同短線都顯,讓主公決策前先看大盤
+    _render_regime_gating_badge(location="page")
 
     st.info(
         "📊 用台灣證交所(TWSE)官方免費資料 + FinMind 免費配息歷史,"
@@ -6596,6 +6666,9 @@ def _page_system_brief() -> None:
         "軍師統整 DB + 策略歷史 + ML 校準 + 市場狀態,基於規則主動下結論。"
         "**不會 fetch 任何 API**,純讀 SQLite。"
     )
+
+    # 大盤 regime gating badge — 系統結論頁標題下方,讓主公一眼看到當前 gating 狀態
+    _render_regime_gating_badge(location="page")
 
     db.init_db()
     with db.get_conn() as conn:
