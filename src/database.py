@@ -366,6 +366,20 @@ SCHEMA: list[str] = [
         PRIMARY KEY (sid, alert_date, direction)
     )
     """,
+    # alert_dedup:盤中觸發告警去重(同 sid 同 alert_type 同日只推一次)
+    # 由 scripts/intraday_alerts.py 寫入,30 分鐘 cron 反覆掃描時用來避免反覆轟炸。
+    # alert_type:'stop_loss' / 'entry_zone' / 'breakout'。
+    """
+    CREATE TABLE IF NOT EXISTS alert_dedup (
+        sid          TEXT NOT NULL,
+        alert_type   TEXT NOT NULL,
+        alert_date   TEXT NOT NULL,
+        sent_at      TEXT NOT NULL,
+        ref_price    REAL,
+        threshold    REAL,
+        PRIMARY KEY (sid, alert_type, alert_date)
+    )
+    """,
     # target_hit_log:現價達法人共識目標價推播,7 日冷卻防重推
     """
     CREATE TABLE IF NOT EXISTS target_hit_log (

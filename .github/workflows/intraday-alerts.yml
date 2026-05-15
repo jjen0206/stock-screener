@@ -1,0 +1,66 @@
+name: Intraday Trigger Alerts (30-min)
+
+# 每 30 分鐘掃 active paper_trades,觸發停損 / 進場 / 突破壓力 → Telegram + Discord。
+# 同 sid 同 alert_type 同日 dedup(alert_dedup 表)避免反覆推。
+#
+# Cron 排期:*/30 * * * 1-5(週一至週五每 30 分鐘掃)
+#   GitHub Actions cron 用 UTC,涵蓋台股盤中(01:00-05:30 UTC = 09:00-13:30 TPE)
+#   盤外時段 active paper_trades 也可能因 yfinance pre-market 觸發 — dedup
+#   會擋反覆推。無 active trade 時 script 早退 0 成本。
+#
+# scripts/intraday_alerts.py 內部會 preload_snapshots 撐 SQLite 看到 paper_trades
+
+on:
+  schedule:
+    # 週一至週五每 30 分鐘
+    - cron: "*/30 * * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送)"
+        type: boolean
+        default: false
+      no_intraday:
+        description: "不打 yfinance,用 daily_prices 最新 close 當現價(debug 用)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: intraday-alerts
+  cancel-in-progress: false
+
+jobs:
+  scan-and-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run intraday alerts scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.no_intraday }}" = "true" ]; then
+            ARGS="$ARGS --no-intraday"
+          fi
+          echo "Running: python scripts/intraday_alerts.py $ARGS"
+          python scripts/intraday_alerts.py $ARGS
