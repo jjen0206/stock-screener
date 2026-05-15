@@ -318,7 +318,8 @@ def _select_top_picks(
     from collections import defaultdict
     from src import config
     from src.ml_predictor import (
-        load_model, load_strategy_model, predict_for_strategy,
+        load_model, load_short_pick_calibrator, load_strategy_calibrator,
+        load_strategy_model, predict_for_strategy,
     )
     from src.strategies import (
         STRATEGY_LABELS, STRATEGY_ML_THRESHOLDS, run_all_strategies,
@@ -352,6 +353,7 @@ def _select_top_picks(
 
     general_path = config.PROJECT_ROOT / "models" / "short_pick.pkl"
     general_model = load_model(general_path) if general_path.exists() else None
+    general_calibrator = load_short_pick_calibrator()
     sid_to_chosen: dict[str, str | None] = {}
     for sid, info in agg.items():
         sid_to_chosen[sid] = _routing(
@@ -361,17 +363,23 @@ def _select_top_picks(
     for sid, chosen in sid_to_chosen.items():
         groups[chosen].append(sid)
     strategy_models: dict[str, object] = {}
+    strategy_calibrators: dict[str, object] = {}
     ml_probs: dict[str, float | None] = {}
     for chosen, sids in groups.items():
         sm = None
+        sc = None
         if chosen:
             if chosen not in strategy_models:
                 strategy_models[chosen] = load_strategy_model(chosen)
+                strategy_calibrators[chosen] = load_strategy_calibrator(chosen)
             sm = strategy_models[chosen]
+            sc = strategy_calibrators[chosen]
         try:
             probs = predict_for_strategy(
                 strategy_name=chosen, stock_ids=sids, target_date=date,
                 fallback_model=general_model, strategy_model=sm,
+                strategy_calibrator=sc,
+                fallback_calibrator=general_calibrator,
             )
             ml_probs.update(probs)
         except Exception:  # noqa: BLE001

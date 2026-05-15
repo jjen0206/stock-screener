@@ -886,12 +886,13 @@ def test_select_top_picks_fallback_when_no_high_confidence(monkeypatch, tmp_path
         "src.strategies.run_all_strategies",
         lambda d, params=None, stock_ids=None: fake_agg,
     )
-    # ML probs 全部 < threshold 0.65(過不了)
+    # ML probs 全部 < threshold 0.65(過不了);calibrator kwargs 接但無視
     fake_probs = {"2330": 0.40, "2317": 0.45, "2454": 0.30}
     monkeypatch.setattr(
         "src.ml_predictor.predict_for_strategy",
         lambda strategy_name, stock_ids, target_date,
-               fallback_model, strategy_model: fake_probs,
+               fallback_model, strategy_model,
+               strategy_calibrator=None, fallback_calibrator=None: fake_probs,
     )
     # Confluence=2 → 全部過不了(只命中 1 策略)+ ML 也過不了 → 應 fallback
 
@@ -951,11 +952,12 @@ def test_select_top_picks_high_confidence_skips_fallback(monkeypatch, tmp_path):
         "src.strategies.run_all_strategies",
         lambda d, params=None, stock_ids=None: fake_agg,
     )
-    # ML prob 高過 threshold 0.65
+    # ML prob 高過 threshold 0.65;新 calibrator kwargs(2026-05-15)無視
     monkeypatch.setattr(
         "src.ml_predictor.predict_for_strategy",
         lambda strategy_name, stock_ids, target_date,
-               fallback_model, strategy_model: {"2330": 0.80},
+               fallback_model, strategy_model,
+               strategy_calibrator=None, fallback_calibrator=None: {"2330": 0.80},
     )
     picks = notifier._select_top_picks(
         date="2026-05-15", top_n=5, confluence_n=2,

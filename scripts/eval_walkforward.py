@@ -227,29 +227,34 @@ def evaluate_model(
 
 
 def _print_summary_table(rows: list[dict]) -> None:
-    """印對照表 — model / n_splits / mean ROC / std / min / max。"""
+    """印對照表 — model / n_splits / mean ROC / std / min / max + Brier raw→cal。"""
     if not rows:
         print("[WF-EVAL] (no results)", flush=True)
         return
     print("", flush=True)
     print(
         f"{'Model':<24s} {'n':>4s} {'WF ROC mean':>12s} {'std':>7s} "
-        f"{'min':>7s} {'max':>7s} {'Train ROC':>10s} {'Random ROC':>12s}",
+        f"{'min':>7s} {'max':>7s} {'Train ROC':>10s} {'Brier raw→cal':>16s}",
         flush=True,
     )
-    print("-" * 96, flush=True)
+    print("-" * 100, flush=True)
     for r in rows:
         s = r["summary"]
-        rand = r.get("random_split_roc")
-        rand_str = f"{rand:>11.4f}" if rand is not None else "         n/a"
         if s["n_splits"] == 0:
             print(
                 f"{r['model']:<24s} {s['n_splits']:>4d} "
                 f"{'n/a':>12s} {'n/a':>7s} {'n/a':>7s} {'n/a':>7s} "
-                f"{'n/a':>10s} {rand_str:>12s}",
+                f"{'n/a':>10s} {'n/a':>16s}",
                 flush=True,
             )
             continue
+        # brier raw → calibrated 對照(舊 split 沒這欄 → NaN → "n/a")
+        raw_b = s.get("test_brier_raw", {}).get("mean", float("nan"))
+        cal_b = s.get("test_brier_calibrated", {}).get("mean", float("nan"))
+        if not (raw_b != raw_b):  # not NaN
+            brier_str = f"{raw_b:.3f}→{cal_b:.3f}" if not (cal_b != cal_b) else f"{raw_b:.3f}→n/a"
+        else:
+            brier_str = "n/a"
         print(
             f"{r['model']:<24s} {s['n_splits']:>4d} "
             f"{s['test_roc_auc']['mean']:>12.4f} "
@@ -257,10 +262,14 @@ def _print_summary_table(rows: list[dict]) -> None:
             f"{s['test_roc_auc']['min']:>7.4f} "
             f"{s['test_roc_auc']['max']:>7.4f} "
             f"{s['train_roc_auc_mean']:>10.4f} "
-            f"{rand_str:>12s}",
+            f"{brier_str:>16s}",
             flush=True,
         )
     print("", flush=True)
+    print(
+        "[WF-EVAL] Brier score 越低越好 (perfect=0, random≈0.25, >0.3 偏離校準)",
+        flush=True,
+    )
 
 
 def _load_random_split_roc(model_name: str) -> float | None:

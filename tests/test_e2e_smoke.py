@@ -2444,7 +2444,7 @@ def test_enrich_df_with_ml_prob_adds_column(isolated_db, monkeypatch):
     from src import ml_predictor
     monkeypatch.setattr(
         ml_predictor, "predict_batch",
-        lambda model, sids, target_date, db_path=None: {
+        lambda model, sids, target_date, db_path=None, calibrator=None: {
             "2330": 0.72, "2317": 0.45,
         },
     )
@@ -2833,7 +2833,8 @@ def test_enrich_df_with_ml_prob_per_strategy_routes_to_strategy_model(
     captured: list[dict] = []
 
     def _fake_predict(strategy_name, stock_ids, target_date,
-                      fallback_model=None, db_path=None, strategy_model=None):
+                      fallback_model=None, db_path=None, strategy_model=None,
+                      strategy_calibrator=None, fallback_calibrator=None):
         captured.append({
             "strategy_name": strategy_name,
             "stock_ids": list(stock_ids),
@@ -2880,7 +2881,8 @@ def test_enrich_df_with_ml_prob_per_strategy_falls_back_to_general(
     captured: list[dict] = []
 
     def _fake_predict(strategy_name, stock_ids, target_date,
-                      fallback_model=None, db_path=None, strategy_model=None):
+                      fallback_model=None, db_path=None, strategy_model=None,
+                      strategy_calibrator=None, fallback_calibrator=None):
         captured.append({
             "strategy_name": strategy_name,
             "fallback_type": type(fallback_model).__name__ if fallback_model else None,
@@ -2926,7 +2928,8 @@ def test_enrich_df_with_ml_prob_per_strategy_groupby_batches(
     call_log: list[tuple[str | None, list[str]]] = []
 
     def _fake_predict(strategy_name, stock_ids, target_date,
-                      fallback_model=None, db_path=None, strategy_model=None):
+                      fallback_model=None, db_path=None, strategy_model=None,
+                      strategy_calibrator=None, fallback_calibrator=None):
         call_log.append((strategy_name, list(stock_ids)))
         return {sid: 0.5 for sid in stock_ids}
 
@@ -2967,7 +2970,9 @@ def test_enrich_df_with_ml_prob_no_agg_uses_general_model(
     from src import ml_predictor
     monkeypatch.setattr(
         ml_predictor, "predict_batch",
-        lambda model, sids, target_date, db_path=None: {sid: 0.6 for sid in sids},
+        lambda model, sids, target_date, db_path=None, calibrator=None: {
+            sid: 0.6 for sid in sids
+        },
     )
 
     # predict_for_strategy 不該被叫到
@@ -3122,7 +3127,7 @@ def test_backtest_strategy_with_ml_filter(tmp_path, monkeypatch):
     from src import ml_predictor
     monkeypatch.setattr(
         ml_predictor, "predict_batch",
-        lambda model, sids, date, db_path=None: {
+        lambda model, sids, date, db_path=None, calibrator=None: {
             sid: 0.8 if sid == "2330" else 0.4 for sid in sids
         },
     )
@@ -3965,7 +3970,7 @@ def test_format_pick_summary_includes_ai_part_when_model_loaded(
     from src import ml_predictor
     monkeypatch.setattr(
         ml_predictor, "predict_short_pick_winrate",
-        lambda model, sid, target_date, db_path=None: 0.70,
+        lambda model, sid, target_date, db_path=None, calibrator=None: 0.70,
     )
 
     # 同時要灌一個 latest_trading_date 否則 _ai_winrate_part 走 None fallback
