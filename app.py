@@ -4674,6 +4674,60 @@ def _page_big_buyer() -> None:
             )
 
 
+def _render_theme_heat_section() -> None:
+    """渲染「📡 題材熱度排行」section — 9 大題材近 5 日 heat_score + multiplier badge。
+
+    Mobile-first:純 dataframe 單欄,不用 st.columns 分區塊。給「📋 系統結論」
+    頁 + 「📊 強者跟蹤」高信心精選 tab 共用,點兩處進來看到一樣。
+
+    Kill-switch:env THEME_HEAT_ENABLED=false → caption 提示已關閉。
+    DB / yaml 任何例外 → graceful info,不擋整頁渲染。
+    """
+    from src import theme_heat as _th
+
+    st.markdown("### 📡 題材熱度排行(近 5 日)")
+    if not _th._is_enabled():
+        st.info(
+            "🚫 題材熱度動態權重已關閉 "
+            "(環境變數 THEME_HEAT_ENABLED=false)。"
+        )
+        return
+
+    db.init_db()
+    try:
+        with db.get_conn() as conn:
+            heat = _th.compute_theme_heat(conn)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"題材熱度計算失敗:{type(e).__name__}: {e}")
+        return
+
+    if not heat:
+        st.info("📭 無題材設定檔(data/themes/*.yaml)或全題材無 daily_prices")
+        return
+
+    rows = []
+    for theme_key, info in heat.items():
+        rows.append({
+            "題材": info.get("display_name") or theme_key,
+            "成分股": f"{info.get('n_valid', 0)} / {info.get('n_total', 0)}",
+            "5日均漲幅": f"{info.get('avg_return', 0.0):+.2f}%",
+            "勝率": f"{info.get('win_rate', 0.0) * 100:.0f}%",
+            "熱度分": f"{info.get('heat_score', 0.0):+.2f}",
+            "權重": f"×{info.get('multiplier', 1.0):.2f}",
+            "判定": info.get("badge", "➖"),
+        })
+    rows.sort(
+        key=lambda r: -float(r["熱度分"].replace("+", "").rstrip()),
+    )
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(
+        "🔥 熱題材(權重 ×1.3)= 5 日均漲 > 3% 且勝率 > 50%  · "
+        "🧊 冷題材(×0.7)= 均漲 < -2% 或勝率 < 30%  · "
+        "➖ 中性(×1.0)。multiplier 套到 daily-notify 推播排序的 ml_prob 上。"
+    )
+
+
 # === 📊 強者跟蹤頁(報告 docs/dage-feature-scope.md 方案 D)===
 
 def _page_strong_follower() -> None:
@@ -4967,6 +5021,11 @@ def _page_strong_follower() -> None:
             )
 
     with tab_premium:
+        # 題材熱度排行(主公 2026-05-15 加)— 高信心精選 tab 上方先看題材輪動,
+        # 再看精選個股是否屬熱題材。
+        _render_theme_heat_section()
+        st.markdown("---")
+
         st.caption(
             "✨ **三維交集精選**:法人連買 ≥ 3 天 + 千張戶週增 + ML 高信心。"
             "綜合分 = 法人 0.4 + 千張 0.4 + ML 0.2 rank-normalize 加權。"
@@ -6522,6 +6581,9 @@ def _page_system_brief() -> None:
             "權重 = clip(WR / 0.5, 0.5, 1.5),套到 daily-notify 推播排序的 ml_prob 上。"
             "當前生效中,可在 `src/notifier.py` 改 `STRATEGY_DYNAMIC_WEIGHT_ENABLED = False` 關掉。"
         )
+
+    # === 題材熱度排行(主公 2026-05-15 加,動態權重的題材維度) ===
+    _render_theme_heat_section()
 
     # === ML 表現 ===
     st.markdown("### 🤖 ML 模型表現")

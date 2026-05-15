@@ -40,6 +40,12 @@ _RETRY_DELAY_SECS = 1.0
 # 改 False 退回 phase 1 純 ml_prob 排序(出事時 kill-switch)。
 STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
 
+# 題材熱度動態權重 — 開 True 讓 _select_top_picks 撈 theme heat 後對 ml_prob
+# 排序乘 multiplier(熱題材 ×1.3、冷題材 ×0.7)。kill-switch 走 env
+# THEME_HEAT_ENABLED=false。caption 會在 format_top_picks_message 加上熱/冷
+# 題材摘要(基於 _LAST_THEME_HEAT cache)。
+_LAST_THEME_HEAT: dict[str, dict] = {}
+
 
 logger = logging.getLogger(__name__)
 
@@ -252,18 +258,22 @@ def _compute_pick_score(
     matched_strategies: list[str] | None,
     analyst_target_mean: float | None = None,
     strategy_weights: dict[str, float] | None = None,
+    theme_multiplier: float = 1.0,
 ) -> tuple[float, float, int, str]:
     """Pick 排序 key — 共用於 _select_top_picks 與 format_yesterday_recap。
 
     Tuple 字典序 ascending → 排前面的 picks 數值越小:
       - analyst_target_mean 有值 → -100(法人共識 picks 整體加分)
-      - ml_prob × avg(strategy_weights) desc(命中率高的策略上排)
+      - ml_prob × avg(strategy_weights) × theme_multiplier desc
       - 命中策略多 desc
       - sid asc(穩定 tiebreaker)
 
     strategy_weights: dict[strategy_key, weight] — 由
     src.strategy_weighting.get_strategy_weights_30d 產;missing key 預設 1.0。
     None 或空 dict → 退回 phase 1 純 ml_prob 排序(legacy 行為)。
+
+    theme_multiplier: 由 src.theme_heat.get_pick_theme_multiplier 產 — 熱題材
+    ×1.3 / 冷題材 ×0.7 / 中性 ×1.0。預設 1.0 不影響 legacy 排序。
 
     讓 recap 算出來的 top picks 順序跟昨天實際推播的順序一致(M4/U1 known issue)。
     """
@@ -275,7 +285,7 @@ def _compute_pick_score(
         )
     else:
         avg_w = 1.0
-    weighted_ml = (ml_prob or 0.0) * avg_w
+    weighted_ml = (ml_prob or 0.0) * avg_w * float(theme_multiplier)
     return (
         -(100 if analyst_target_mean else 0),
         -weighted_ml,
@@ -430,6 +440,34 @@ def _select_top_picks(
             logger.warning("[NOTIFIER] 撈動態策略權重失敗,退回純 ml_prob: %s", ex)
             strategy_weights = {}
 
+    # 題材熱度動態權重 — 撈 9 大題材近 5 日表現,熱題材 sids ×1.3 / 冷題材 ×0.7。
+    # env THEME_HEAT_ENABLED=false → kill-switch,multiplier 全部 1.0。
+    # _LAST_THEME_HEAT 模組級 cache 給 caption / UI 重用(避免 _select_top_picks
+    # 跑完之後 caller 再算一次)。任何例外 silent skip,不擋主推播。
+    theme_heat_map: dict[str, dict] = {}
+    pick_theme_mult: dict[str, float] = {}
+    try:
+        from src import theme_heat as _th
+        if _th._is_enabled():
+            with db.get_conn() as conn:
+                theme_heat_map = _th.compute_theme_heat(conn, as_of=date)
+            # 對 qualified sids 預先算 multiplier(避免排序 lambda 內重打 DB)
+            sid_to_themes: dict[str, list[float]] = {}
+            for info in theme_heat_map.values():
+                m = info.get("multiplier", 1.0)
+                for s in info.get("sids", []):
+                    sid_to_themes.setdefault(s, []).append(m)
+            for sid in agg.keys():
+                ms = sid_to_themes.get(sid)
+                pick_theme_mult[sid] = max(ms) if ms else 1.0
+        global _LAST_THEME_HEAT
+        _LAST_THEME_HEAT = theme_heat_map
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("[NOTIFIER] 撈 theme heat 失敗,退回 multiplier=1.0: %s", ex)
+        theme_heat_map = {}
+        pick_theme_mult = {}
+        _LAST_THEME_HEAT = {}
+
     # 撈 analyst_targets(法人目標價共識)— 平日 watchlist+picks / 週日全市場
     # fetch 進 SQLite。bulk lookup 一次,enrich 進 pick dict 後排序加分。
     from src.analyst_targets import get_analyst_targets_for_sids
@@ -567,8 +605,13 @@ def _select_top_picks(
         fallback_used = True
         top_n = fallback_top_n  # downgrade output 上限到 3
 
+    # 把 theme_multiplier 寫進 pick dict 給排序 + caption / UI 顯示用
+    for p in qualified:
+        p["theme_multiplier"] = pick_theme_mult.get(p["sid"], 1.0)
+
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
-    # → ml_prob desc → 命中策略多 desc → sid asc
+    # → ml_prob × strategy_weight × theme_multiplier desc
+    # → 命中策略多 desc → sid asc
     # scoring 抽到 _compute_pick_score 共用,讓 format_yesterday_recap 算 top
     # picks 的順序跟實際推播一致(M4/U1 known issue)。
     qualified.sort(key=lambda p: _compute_pick_score(
@@ -577,6 +620,7 @@ def _select_top_picks(
         matched_strategies=p["matched_strategies"],
         analyst_target_mean=p.get("analyst_target_mean"),
         strategy_weights=strategy_weights,
+        theme_multiplier=p.get("theme_multiplier", 1.0),
     ))
     out = qualified[:top_n]
     for i, p in enumerate(out, start=1):
@@ -620,8 +664,23 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     rr = pick.get("risk_reward")
     industry = pick.get("industry")
     industry_heat = int(pick.get("industry_heat") or 0)
+    theme_mult = pick.get("theme_multiplier")
 
-    lines = [f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"]
+    # 題材熱度 badge:>1 → 🔥 / <1 → 🧊 / =1 不顯。append 到 #rank 行末讓主公一眼掃。
+    theme_badge = ""
+    if theme_mult is not None:
+        try:
+            tm = float(theme_mult)
+            if tm > 1.0:
+                theme_badge = f"  🔥題材×{tm:.1f}"
+            elif tm < 1.0:
+                theme_badge = f"  🧊題材×{tm:.1f}"
+        except (TypeError, ValueError):
+            theme_badge = ""
+
+    lines = [
+        f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}{theme_badge}"
+    ]
     # 收盤 + 漲跌
     if close is not None:
         if pct_change is not None:
@@ -905,12 +964,34 @@ def format_yesterday_recap(
         except Exception:  # noqa: BLE001
             recap_weights = {}
 
+    # 跟 _select_top_picks 一致:套同一份 theme_multiplier 才能保 recap 順序與
+    # 實際推播一致(避免主公看到「昨日複盤 A 排第 1,但實際推播是 B 排第 1」)。
+    recap_theme_mult: dict[str, float] = {}
+    try:
+        from src import theme_heat as _th_recap
+        if _th_recap._is_enabled():
+            with db.get_conn() as conn:
+                heat_for_recap = _th_recap.compute_theme_heat(
+                    conn, as_of=pick_date,
+                )
+            sid_to_themes_recap: dict[str, list[float]] = {}
+            for info in heat_for_recap.values():
+                m = info.get("multiplier", 1.0)
+                for s in info.get("sids", []):
+                    sid_to_themes_recap.setdefault(s, []).append(m)
+            for sid, _, _matched in qualified:
+                ms = sid_to_themes_recap.get(sid)
+                recap_theme_mult[sid] = max(ms) if ms else 1.0
+    except Exception:  # noqa: BLE001
+        recap_theme_mult = {}
+
     qualified.sort(key=lambda x: _compute_pick_score(
         sid=x[0],
         ml_prob=x[1],
         matched_strategies=x[2],
         analyst_target_mean=(analyst_target_map.get(x[0]) or {}).get("target_mean"),
         strategy_weights=recap_weights,
+        theme_multiplier=recap_theme_mult.get(x[0], 1.0),
     ))
     top_picks = qualified[:top_n]
 
@@ -1050,11 +1131,29 @@ def format_top_picks_message(
         big_holder_movers or [], channel=channel,
     )
 
+    # 5. 題材熱度 caption(熱題材 / 冷題材 摘要)— 撈 _LAST_THEME_HEAT cache
+    # (由 _select_top_picks 填),沒填過 → 嘗試現算 fallback。任何例外 silent skip。
+    theme_block = ""
+    try:
+        from src import theme_heat as _th_caption
+        heat_cache = _LAST_THEME_HEAT
+        if not heat_cache and _th_caption._is_enabled():
+            # caller 沒先跑 _select_top_picks(e.g. 直接 format)→ 現算
+            with db.get_conn() as conn:
+                heat_cache = _th_caption.compute_theme_heat(conn, as_of=date)
+        if heat_cache:
+            theme_block = _th_caption.format_theme_heat_caption(heat_cache)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] 題材熱度 caption 失敗,略過該 section")
+        theme_block = ""
+
     # === 組訊息:header + 各 section(空 skip)+ footer ===
     parts: list[str] = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
     ]
-    for block in (recap_block, short_picks_block, premium_block, movers_block):
+    for block in (
+        recap_block, theme_block, short_picks_block, premium_block, movers_block,
+    ):
         if block:
             parts.append(block)
 
