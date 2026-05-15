@@ -58,15 +58,21 @@ def test_eval_walkforward_module_imports_and_exposes_callables():
     assert callable(m.evaluate_model)
 
 
-def test_eval_walkforward_default_models_cover_short_pick_and_8_per_strategy():
+def test_eval_walkforward_default_models_cover_short_pick_and_7_per_strategy():
+    """2026-05-15:gap_up 從 DEFAULT 拿掉(已下架 ML 過濾,見
+    docs/gap-up-decision-2026-05-15.md);7 個剩下的 per_strategy 仍要在內。
+    """
     m = _load_eval_module()
     expected = {
         "ma_alignment", "bias_convergence", "macd_golden", "bb_lower_rebound",
-        "volume_breakout", "taiex_alpha", "big_holder_inflow", "gap_up",
+        "volume_breakout", "taiex_alpha", "big_holder_inflow",
     }
     assert set(m.DEFAULT_PER_STRATEGY) == expected, (
-        f"DEFAULT_PER_STRATEGY 應為 8 個 trained per_strategy,"
+        f"DEFAULT_PER_STRATEGY 應為 7 個 trained per_strategy(gap_up 已下架),"
         f"實際 {set(m.DEFAULT_PER_STRATEGY)}"
+    )
+    assert "gap_up" not in set(m.DEFAULT_PER_STRATEGY), (
+        "gap_up 應從 DEFAULT_PER_STRATEGY 移除(已下架 ML 過濾)"
     )
 
 

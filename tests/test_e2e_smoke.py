@@ -2768,7 +2768,11 @@ def test_per_strategy_threshold_for_pick_helper(isolated_db):
 
 
 def test_strategy_ml_thresholds_contains_calibrated_keys():
-    """STRATEGY_ML_THRESHOLDS dict 必含 Stage 2B 校準後的 6 個 thresholds。"""
+    """STRATEGY_ML_THRESHOLDS dict 必含 Stage 2B 校準後的 thresholds。
+
+    2026-05-15:gap_up 從 dict 拿掉(下架 ML 過濾,改走 rule-based);
+    詳見 docs/gap-up-decision-2026-05-15.md。
+    """
     from src.strategies import STRATEGY_ML_THRESHOLDS
     expected = {
         "ma_alignment": 0.55,
@@ -2776,17 +2780,16 @@ def test_strategy_ml_thresholds_contains_calibrated_keys():
         "macd_golden": 0.60,
         "bb_lower_rebound": 0.50,
         "volume_breakout": 0.65,
-        "gap_up": 0.60,
     }
     for k, v in expected.items():
         assert STRATEGY_ML_THRESHOLDS.get(k) == v, (
             f"{k} threshold 應為 {v},實際 {STRATEGY_ML_THRESHOLDS.get(k)}"
         )
-    # 沒過 winner / 沒跑的策略不該有 threshold
+    # 沒過 winner / 沒跑 / 已下架的策略不該有 threshold
     for s in ("rsi_recovery", "volume_kd", "ma_squeeze_breakout",
-              "inst_consensus", "inst_silent_accum"):
+              "inst_consensus", "inst_silent_accum", "gap_up"):
         assert STRATEGY_ML_THRESHOLDS.get(s) is None, (
-            f"{s} 不該有 threshold(沒過 winner / sample 太小)"
+            f"{s} 不該有 threshold(沒過 winner / sample 太小 / 已下架)"
         )
 
 

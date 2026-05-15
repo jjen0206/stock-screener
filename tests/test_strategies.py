@@ -836,6 +836,72 @@ def test_gap_up_red_k_but_no_gap_fails(tmp_db):
     assert df.empty
 
 
+def test_gap_up_extreme_volume_filtered_out(tmp_db):
+    """2026-05-15 sweet-spot 過濾:量比 >= 3.0 視為主力出貨,過濾掉。
+
+    Diagnose(scripts/diagnose_gap_up.py)顯示 vol_ratio > 3x 那群 WR 44.8%,
+    比 baseline 40.7% 只 +4pp;1.5-3x sweet spot WR 50.3%。
+    """
+    db.upsert_stocks([{
+        "stock_id": "OVERVOL", "name": "爆量主力出貨", "market": "TW",
+    }])
+    rows = []
+    for i in range(6):
+        rows.append({
+            "stock_id": "OVERVOL", "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # gap +2%, 紅 K, 但量比 = 5x(>= 3.0 上限) → 不入選
+    rows.append({
+        "stock_id": "OVERVOL", "date": _DATES[6],
+        "open": 102.0, "high": 105.0, "low": 102.0, "close": 104.0,
+        "volume": 5000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    df = strat.screen_gap_up(_DATES[6], stock_ids=["OVERVOL"])
+    assert df.empty, (
+        f"vol_ratio 5x 應被 gap_vol_ratio_max=3.0 過濾,實際 df={df}"
+    )
+
+
+def test_gap_up_vol_max_override_via_params(tmp_db):
+    """gap_vol_ratio_max 可被 params 覆寫(設 None / inf → 關閉上限)。"""
+    db.upsert_stocks([{
+        "stock_id": "OVERVOL2", "name": "爆量但允許", "market": "TW",
+    }])
+    rows = []
+    for i in range(6):
+        rows.append({
+            "stock_id": "OVERVOL2", "date": _DATES[i],
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    # gap +2%, 紅 K, 量比 5x — 預設過濾,但 params 關上限 → 入選
+    rows.append({
+        "stock_id": "OVERVOL2", "date": _DATES[6],
+        "open": 102.0, "high": 105.0, "low": 102.0, "close": 104.0,
+        "volume": 5000,
+        "trading_money": None, "trading_turnover": None, "spread": None,
+    })
+    db.upsert_daily_prices(rows)
+    df = strat.screen_gap_up(
+        _DATES[6], stock_ids=["OVERVOL2"],
+        params={"gap_vol_ratio_max": None},
+    )
+    assert len(df) == 1, (
+        f"params={{gap_vol_ratio_max: None}} 應放行 5x 量,實際 df={df}"
+    )
+
+
+def test_gap_up_default_params_include_vol_max_3():
+    """DEFAULT_GAP_UP_PARAMS 必含 gap_vol_ratio_max=3.0(sweet spot 上限)。"""
+    assert strat.DEFAULT_GAP_UP_PARAMS.get("gap_vol_ratio_max") == 3.0
+
+
 # === 策略 12:eps_acceleration(Phase 1) ===
 
 def _seed_quarterly_eps(stock_id: str, eps_list: list[float]) -> None:
