@@ -4707,13 +4707,19 @@ def _render_theme_heat_section() -> None:
 
     rows = []
     for theme_key, info in heat.items():
+        m = info.get("multiplier")
+        # None = cold = hard exclude;UI 顯示「🚫 擋」取代「×0.7」
+        if m is None:
+            weight_str = "🚫 擋"
+        else:
+            weight_str = f"×{float(m):.2f}"
         rows.append({
             "題材": info.get("display_name") or theme_key,
             "成分股": f"{info.get('n_valid', 0)} / {info.get('n_total', 0)}",
             "5日均漲幅": f"{info.get('avg_return', 0.0):+.2f}%",
             "勝率": f"{info.get('win_rate', 0.0) * 100:.0f}%",
             "熱度分": f"{info.get('heat_score', 0.0):+.2f}",
-            "權重": f"×{info.get('multiplier', 1.0):.2f}",
+            "權重": weight_str,
             "判定": info.get("badge", "➖"),
         })
     rows.sort(
@@ -4722,9 +4728,11 @@ def _render_theme_heat_section() -> None:
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.caption(
-        "🔥 熱題材(權重 ×1.3)= 5 日均漲 > 3% 且勝率 > 50%  · "
-        "🧊 冷題材(×0.7)= 均漲 < -2% 或勝率 < 30%  · "
-        "➖ 中性(×1.0)。multiplier 套到 daily-notify 推播排序的 ml_prob 上。"
+        "🔥 熱題材(權重 ×1.3 加分)= 5 日均漲 > 3% 且勝率 > 50%  · "
+        "🚫 冷題材(整題材成分股不推播)= 均漲 < -2% 或勝率 < 30%  · "
+        "➖ 中性(×1.0 照常)。"
+        "跨題材 sid 取最熱(熱不被冷稀釋);只在冷題材的 sid 才會被擋。"
+        "不在任何題材的 sid 照常推薦(沒題材 ≠ 冷)。"
     )
 
 

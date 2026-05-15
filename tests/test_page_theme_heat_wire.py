@@ -38,12 +38,21 @@ def test_helper_calls_compute_theme_heat():
 
 
 def test_helper_shows_label_and_badges():
-    """source 內含 label + multiplier badge 字眼。"""
+    """source 內含 label + multiplier badge 字眼(冷改 🚫,2026-05-15 v2)。"""
     src = inspect.getsource(app._render_theme_heat_section)
     assert "題材熱度" in src
-    # heat / cold / neutral 三種 badge
-    assert "🔥" in src or "🧊" in src or "➖" in src, (
+    # 熱 🔥 / 冷 🚫 / 中性 ➖ 三種 badge
+    assert "🔥" in src or "🚫" in src or "➖" in src, (
         "_render_theme_heat_section 沒加 multiplier badge 顯示"
+    )
+
+
+def test_helper_handles_cold_excluded_in_ui():
+    """source 必須 handle multiplier=None case(顯示「擋」/「🚫」),
+    別讓 None 走進 f"×{None:.2f}" 炸。"""
+    src = inspect.getsource(app._render_theme_heat_section)
+    assert "is None" in src, (
+        "_render_theme_heat_section 沒處理 multiplier=None case"
     )
 
 

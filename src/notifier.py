@@ -40,11 +40,14 @@ _RETRY_DELAY_SECS = 1.0
 # 改 False 退回 phase 1 純 ml_prob 排序(出事時 kill-switch)。
 STRATEGY_DYNAMIC_WEIGHT_ENABLED = True
 
-# 題材熱度動態權重 — 開 True 讓 _select_top_picks 撈 theme heat 後對 ml_prob
-# 排序乘 multiplier(熱題材 ×1.3、冷題材 ×0.7)。kill-switch 走 env
-# THEME_HEAT_ENABLED=false。caption 會在 format_top_picks_message 加上熱/冷
-# 題材摘要(基於 _LAST_THEME_HEAT cache)。
+# 題材熱度動態權重 — 熱題材 ×1.3 加分推薦 / 冷題材 hard exclude(2026-05-15
+# 主公二次拍板,從 ×0.7 改 hard exclude)/ 中性 ×1.0 / 不在任何題材 ×1.0。
+# kill-switch 走 env THEME_HEAT_ENABLED=false。caption 會在
+# format_top_picks_message 加上熱題材加分 + 冷題材已擋摘要。
 _LAST_THEME_HEAT: dict[str, dict] = {}
+# theme_display_name → list[sid] — 被冷題材擋掉的 picks。caption 用來算
+# 「冷題材已擋: N 檔 (國防 X / 重電 Y)」。每次 _select_top_picks 重置。
+_LAST_THEME_EXCLUDED: dict[str, list[str]] = {}
 
 
 logger = logging.getLogger(__name__)
@@ -440,33 +443,54 @@ def _select_top_picks(
             logger.warning("[NOTIFIER] 撈動態策略權重失敗,退回純 ml_prob: %s", ex)
             strategy_weights = {}
 
-    # 題材熱度動態權重 — 撈 9 大題材近 5 日表現,熱題材 sids ×1.3 / 冷題材 ×0.7。
-    # env THEME_HEAT_ENABLED=false → kill-switch,multiplier 全部 1.0。
-    # _LAST_THEME_HEAT 模組級 cache 給 caption / UI 重用(避免 _select_top_picks
-    # 跑完之後 caller 再算一次)。任何例外 silent skip,不擋主推播。
+    # 題材熱度動態權重(2026-05-15 二次修正:冷改 hard exclude):
+    #   熱題材 → multiplier=1.3(加分)
+    #   冷題材 → multiplier=None(該 sid 從 picks 移除,不推播)
+    #   中性 / 不在任何題材 → 1.0(照常)
+    #   跨多題材取最熱:有熱 → 熱;沒熱有中性 → 中性(中性壓過冷,不被擋);
+    #                  全冷 → None(擋)
+    # env THEME_HEAT_ENABLED=false → kill-switch,multiplier 全 1.0,不擋任何 sid。
+    # _LAST_THEME_HEAT 給 caption / UI 重用;_LAST_THEME_EXCLUDED 給 caption 算
+    # 「冷題材已擋 N 檔 (國防 X / 重電 Y)」。任何例外 silent skip,不擋主推播。
     theme_heat_map: dict[str, dict] = {}
-    pick_theme_mult: dict[str, float] = {}
+    pick_theme_mult: dict[str, float | None] = {}  # None = 該 sid 應 exclude
+    excluded_per_theme: dict[str, list[str]] = {}  # display_name → sids 被擋
+    global _LAST_THEME_HEAT, _LAST_THEME_EXCLUDED
     try:
         from src import theme_heat as _th
         if _th._is_enabled():
             with db.get_conn() as conn:
                 theme_heat_map = _th.compute_theme_heat(conn, as_of=date)
-            # 對 qualified sids 預先算 multiplier(避免排序 lambda 內重打 DB)
-            sid_to_themes: dict[str, list[float]] = {}
+            # 收集 sid 在哪些題材內 → list of (theme_display, multiplier)
+            sid_to_themes: dict[str, list[tuple[str, float | None]]] = {}
             for info in theme_heat_map.values():
-                m = info.get("multiplier", 1.0)
+                disp = info.get("display_name") or ""
+                m = info.get("multiplier")  # 可能 None
                 for s in info.get("sids", []):
-                    sid_to_themes.setdefault(s, []).append(m)
+                    sid_to_themes.setdefault(s, []).append((disp, m))
             for sid in agg.keys():
-                ms = sid_to_themes.get(sid)
-                pick_theme_mult[sid] = max(ms) if ms else 1.0
-        global _LAST_THEME_HEAT
+                ts = sid_to_themes.get(sid)
+                if not ts:
+                    pick_theme_mult[sid] = 1.0  # 不在任何題材 → 照常
+                    continue
+                valid = [m for _, m in ts if m is not None]
+                if valid:
+                    pick_theme_mult[sid] = max(valid)  # 取最熱(中性壓過冷)
+                else:
+                    # 只在冷題材中 → 擋掉,並記入 excluded_per_theme
+                    pick_theme_mult[sid] = None
+                    for disp, m in ts:
+                        if m is None and disp:
+                            excluded_per_theme.setdefault(disp, []).append(sid)
         _LAST_THEME_HEAT = theme_heat_map
+        _LAST_THEME_EXCLUDED = excluded_per_theme
     except Exception as ex:  # noqa: BLE001
         logger.warning("[NOTIFIER] 撈 theme heat 失敗,退回 multiplier=1.0: %s", ex)
         theme_heat_map = {}
         pick_theme_mult = {}
+        excluded_per_theme = {}
         _LAST_THEME_HEAT = {}
+        _LAST_THEME_EXCLUDED = {}
 
     # 撈 analyst_targets(法人目標價共識)— 平日 watchlist+picks / 週日全市場
     # fetch 進 SQLite。bulk lookup 一次,enrich 進 pick dict 後排序加分。
@@ -584,8 +608,13 @@ def _select_top_picks(
             sid=sid, info=info, min_confluence=confluence_n,
             apply_ml_thr=True, confidence_tier="high",
         )
-        if cand is not None:
-            qualified.append(cand)
+        if cand is None:
+            continue
+        # 題材熱度 hard exclude:multiplier=None → 整個 sid 不推
+        # (e.g. 國防 / 重電 / 低軌衛星 修正期間,即便過 ML threshold 也不出現)
+        if pick_theme_mult.get(sid, 1.0) is None:
+            continue
+        qualified.append(cand)
 
     # Fallback(主公 2026-05-15 拍板):若 confluence + threshold 過濾後 = 0
     # 但 daily_picks 仍有命中 → 降級回 Top 3 弱訊號(只看 confluence ≥ 1,
@@ -600,14 +629,20 @@ def _select_top_picks(
                 sid=sid, info=info, min_confluence=fallback_min_confluence,
                 apply_ml_thr=False, confidence_tier="weak",
             )
-            if cand is not None:
-                qualified.append(cand)
+            if cand is None:
+                continue
+            # fallback path 一樣套 hard exclude — 避免「降級弱訊號 Top 3」
+            # 全部都是被冷題材擋的 sid(主公看到會困惑)。
+            if pick_theme_mult.get(sid, 1.0) is None:
+                continue
+            qualified.append(cand)
         fallback_used = True
         top_n = fallback_top_n  # downgrade output 上限到 3
 
     # 把 theme_multiplier 寫進 pick dict 給排序 + caption / UI 顯示用
+    # (走到這裡的 sid 都已過 hard-exclude,multiplier 必為 float)
     for p in qualified:
-        p["theme_multiplier"] = pick_theme_mult.get(p["sid"], 1.0)
+        p["theme_multiplier"] = pick_theme_mult.get(p["sid"], 1.0) or 1.0
 
     # 排序:有 analyst_target 的優先(+100 分讓共識票排前面)
     # → ml_prob × strategy_weight × theme_multiplier desc
@@ -666,15 +701,15 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     industry_heat = int(pick.get("industry_heat") or 0)
     theme_mult = pick.get("theme_multiplier")
 
-    # 題材熱度 badge:>1 → 🔥 / <1 → 🧊 / =1 不顯。append 到 #rank 行末讓主公一眼掃。
+    # 題材熱度 badge:>1 → 🔥題材×1.3(熱)。冷題材 sids 已在 _select_top_picks
+    # hard-exclude,不會走到 format_pick_block;中性 1.0 不顯。append 到 #rank
+    # 行末讓主公一眼掃。
     theme_badge = ""
     if theme_mult is not None:
         try:
             tm = float(theme_mult)
             if tm > 1.0:
                 theme_badge = f"  🔥題材×{tm:.1f}"
-            elif tm < 1.0:
-                theme_badge = f"  🧊題材×{tm:.1f}"
         except (TypeError, ValueError):
             theme_badge = ""
 
@@ -964,9 +999,11 @@ def format_yesterday_recap(
         except Exception:  # noqa: BLE001
             recap_weights = {}
 
-    # 跟 _select_top_picks 一致:套同一份 theme_multiplier 才能保 recap 順序與
-    # 實際推播一致(避免主公看到「昨日複盤 A 排第 1,但實際推播是 B 排第 1」)。
-    recap_theme_mult: dict[str, float] = {}
+    # 跟 _select_top_picks 一致:套同一份 theme_multiplier + hard exclude
+    # 才能保 recap 順序與實際推播一致(避免主公看到「昨日複盤 A 排第 1,
+    # 但實際推播是 B 排第 1」或「昨日複盤有 A 但實際根本沒推 A」)。
+    # heat 用 as_of=pick_date(昨天)算,跟昨天實際推播時用的同源。
+    recap_theme_mult: dict[str, float | None] = {}
     try:
         from src import theme_heat as _th_recap
         if _th_recap._is_enabled():
@@ -974,16 +1011,27 @@ def format_yesterday_recap(
                 heat_for_recap = _th_recap.compute_theme_heat(
                     conn, as_of=pick_date,
                 )
-            sid_to_themes_recap: dict[str, list[float]] = {}
+            sid_to_themes_recap: dict[str, list[float | None]] = {}
             for info in heat_for_recap.values():
-                m = info.get("multiplier", 1.0)
+                m = info.get("multiplier")  # 可能 None
                 for s in info.get("sids", []):
                     sid_to_themes_recap.setdefault(s, []).append(m)
             for sid, _, _matched in qualified:
                 ms = sid_to_themes_recap.get(sid)
-                recap_theme_mult[sid] = max(ms) if ms else 1.0
+                if not ms:
+                    recap_theme_mult[sid] = 1.0
+                    continue
+                valid = [m for m in ms if m is not None]
+                recap_theme_mult[sid] = max(valid) if valid else None
     except Exception:  # noqa: BLE001
         recap_theme_mult = {}
+
+    # Hard exclude:擋掉只在冷題材的 sids(跟 _select_top_picks 同源)
+    qualified = [
+        x for x in qualified if recap_theme_mult.get(x[0], 1.0) is not None
+    ]
+    if not qualified:
+        return ""
 
     qualified.sort(key=lambda x: _compute_pick_score(
         sid=x[0],
@@ -991,7 +1039,7 @@ def format_yesterday_recap(
         matched_strategies=x[2],
         analyst_target_mean=(analyst_target_map.get(x[0]) or {}).get("target_mean"),
         strategy_weights=recap_weights,
-        theme_multiplier=recap_theme_mult.get(x[0], 1.0),
+        theme_multiplier=recap_theme_mult.get(x[0]) or 1.0,
     ))
     top_picks = qualified[:top_n]
 
@@ -1131,18 +1179,23 @@ def format_top_picks_message(
         big_holder_movers or [], channel=channel,
     )
 
-    # 5. 題材熱度 caption(熱題材 / 冷題材 摘要)— 撈 _LAST_THEME_HEAT cache
-    # (由 _select_top_picks 填),沒填過 → 嘗試現算 fallback。任何例外 silent skip。
+    # 5. 題材熱度 caption(🔥 熱題材加分 / 🚫 冷題材已擋)— 讀
+    # _LAST_THEME_HEAT + _LAST_THEME_EXCLUDED cache(由 _select_top_picks 填)。
+    # 沒填過 → 嘗試現算 heat 但 excluded 維持空(degenerate caller path)。
+    # 任何例外 silent skip 不擋主推播。
     theme_block = ""
     try:
         from src import theme_heat as _th_caption
         heat_cache = _LAST_THEME_HEAT
+        excluded_cache = _LAST_THEME_EXCLUDED
         if not heat_cache and _th_caption._is_enabled():
-            # caller 沒先跑 _select_top_picks(e.g. 直接 format)→ 現算
             with db.get_conn() as conn:
                 heat_cache = _th_caption.compute_theme_heat(conn, as_of=date)
+            excluded_cache = {}  # 沒跑 _select_top_picks → 沒 exclude 紀錄
         if heat_cache:
-            theme_block = _th_caption.format_theme_heat_caption(heat_cache)
+            theme_block = _th_caption.format_theme_heat_caption(
+                heat_cache, excluded=excluded_cache,
+            )
     except Exception:  # noqa: BLE001
         logger.exception("[NOTIFIER] 題材熱度 caption 失敗,略過該 section")
         theme_block = ""

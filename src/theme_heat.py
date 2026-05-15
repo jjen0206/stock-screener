@@ -1,8 +1,8 @@
-"""題材熱度動態權重 — 根據近 N 日題材表現自動加減 score。
+"""題材熱度動態權重 — 根據近 N 日題材表現自動加減 score 或擋掉冷題材。
 
-設計初衷(主公 2026-05-15 拍板):
+設計初衷(主公 2026-05-15 拍板,二次修正):
   熱題材(HBM / 矽光子 / CoWoS)在噴 → 自動加分
-  冷題材(國防 / 重電 / 低軌衛星)在修正 → 自動降權
+  冷題材(國防 / 重電 / 低軌衛星)在修正 → **直接擋掉,不推播**
   輪動到時不用手動改,系統每天自己重算。
 
 公式:
@@ -12,14 +12,18 @@
       heat_score  = avg_return × 0.6 + win_rate × 0.4
         (avg_return 為 percent 例 8.86;win_rate 為 fraction 例 0.7;
          result 約等於 avg_return 數量級,可跟 % 閥值比)
-  - multiplier 規則(主公拍板):
-      heat_score > 3.0  AND win_rate > 0.5  → ×1.3 (🔥 熱)
-      heat_score < -2.0 OR  win_rate < 0.3  → ×0.7 (🧊 冷)
-      其他                                  → ×1.0 (➖ 中性)
-  - sid 屬多題材 → 取**最高**multiplier(避免熱題材被冷題材稀釋)
+  - multiplier 規則(主公拍板,2026-05-15 二次修正:冷題材改 hard exclude):
+      heat_score > 3.0  AND win_rate > 0.5  → 1.3 (🔥 熱,加分推薦)
+      heat_score < -2.0 OR  win_rate < 0.3  → None (🚫 冷,擋掉不推)
+      其他                                  → 1.0 (➖ 中性,照常)
+  - sid 跨多題材規則:
+      * 至少一個熱題材 → 取最熱 multiplier(熱不被冷稀釋)
+      * 至少一個中性題材(沒熱)→ 取中性 1.0(中性壓過冷,不被擋)
+      * 只在冷題材中 → None(擋掉)
+      * 不在任何題材 → 1.0(照常,沒題材 ≠ 冷)
 
 Kill-switch:env `THEME_HEAT_ENABLED=true`(預設 on)。off 時 notifier
-應走 multiplier=1.0 path,等同行為被關掉。
+應走 multiplier=1.0 path 且不擋任何 sid,等同行為被關掉。
 """
 from __future__ import annotations
 
@@ -44,9 +48,16 @@ HOT_WIN_RATE_THR = 0.5     # win_rate 超過 50% 才算熱(雙條件)
 COLD_HEAT_THR = -2.0       # heat_score 低於 -2% 視為冷
 COLD_WIN_RATE_THR = 0.3    # 或 win_rate 低於 30% 也算冷
 
-HOT_MULTIPLIER = 1.3
-COLD_MULTIPLIER = 0.7
-NEUTRAL_MULTIPLIER = 1.0
+# 樣本不足保守用基準(對齊 strategy_weighting.MIN_N=30 的精神):
+# 一個題材若 daily_prices 有效成分股 < 此值 → 不分類,直接視為中性(1.0)。
+# 避免「空 cache.db / 部分 sids 沒抓到」狀況下整題材被誤擋。
+MIN_VALID_FOR_CLASSIFY = 2
+
+HOT_MULTIPLIER: float = 1.3
+NEUTRAL_MULTIPLIER: float = 1.0
+# Cold 從 ×0.7 soft-降權改成 hard exclude(2026-05-15 主公二次修正)。
+# 任何讀 multiplier 的 caller 看到 None 應視為「該 sid 被擋,不推播」。
+COLD_EXCLUDE: None = None
 
 
 THEMES_DIR = config.PROJECT_ROOT / "data" / "themes"
@@ -157,17 +168,17 @@ def _sid_window_return_pct(
     return (float(latest) - float(oldest)) / float(oldest) * 100.0
 
 
-def _classify_multiplier(heat_score: float, win_rate: float) -> float:
-    """主公拍板規則:熱 ×1.3 / 冷 ×0.7 / 中性 ×1.0。
+def _classify_multiplier(heat_score: float, win_rate: float) -> Optional[float]:
+    """主公拍板規則:熱 1.3 / 冷 None(擋) / 中性 1.0。
 
-    熱:heat_score > 3% AND win_rate > 50%
-    冷:heat_score < -2% OR  win_rate < 30%
+    熱:heat_score > 3% AND win_rate > 50%  → 1.3
+    冷:heat_score < -2% OR  win_rate < 30%  → None(擋掉,caller 應 exclude)
     其他:1.0(中性)
     """
     if heat_score > HOT_HEAT_THR and win_rate > HOT_WIN_RATE_THR:
         return HOT_MULTIPLIER
     if heat_score < COLD_HEAT_THR or win_rate < COLD_WIN_RATE_THR:
-        return COLD_MULTIPLIER
+        return COLD_EXCLUDE  # None
     return NEUTRAL_MULTIPLIER
 
 
@@ -203,9 +214,11 @@ def compute_theme_heat(
         avg_return, win_rate, heat_score, multiplier, badge,
     }]
 
-    沒成分股有效 close 的題材 → avg_return / win_rate / heat_score=0.0 →
-    multiplier=COLD_MULTIPLIER(0.7,因為 win_rate=0 < 0.3)。caller 對
-    這種 degenerate case 要心理準備(空題材檔表 / 全 SID 都沒 daily_prices)。
+    multiplier 為 float | None — None 代表「冷題材,該題材內 sids 應被擋掉」。
+
+    n_valid < MIN_VALID_FOR_CLASSIFY(預設 2)→ 退保守,multiplier=1.0
+    (中性照常),避免「DB 資料缺口」被誤判成「冷」整題材被擋。對齊
+    strategy_weighting.MIN_N=30 的精神。
 
     Cache:同 (as_of, window_days) 重算 → 直接回 cache(避免單次推播流程內多次
     計算)。reset_cache() 可清。
@@ -235,13 +248,19 @@ def compute_theme_heat(
             n_up = sum(1 for r in rets if r > 0)
             win_rate = n_up / n_valid
         heat_score = avg_return * RETURN_WEIGHT + win_rate * WIN_RATE_WEIGHT
-        multiplier = _classify_multiplier(heat_score, win_rate)
-        if multiplier > 1.0:
-            badge = "🔥"
-        elif multiplier < 1.0:
-            badge = "🧊"
-        else:
+        # n_valid 太少(< MIN_VALID_FOR_CLASSIFY)→ 退保守,當中性 1.0
+        # (避免「資料缺口」被誤判成「冷」造成不必要 hard exclude)
+        if n_valid < MIN_VALID_FOR_CLASSIFY:
+            multiplier: Optional[float] = NEUTRAL_MULTIPLIER
             badge = "➖"
+        else:
+            multiplier = _classify_multiplier(heat_score, win_rate)
+            if multiplier is None:
+                badge = "🚫"   # 冷題材 hard exclude
+            elif multiplier > 1.0:
+                badge = "🔥"   # 熱題材 ×1.3
+            else:
+                badge = "➖"   # 中性 ×1.0
         out[theme_key] = {
             "display_name": meta["display_name"],
             "sids": sids,
@@ -251,7 +270,7 @@ def compute_theme_heat(
             "avg_return": float(avg_return),
             "win_rate": float(win_rate),
             "heat_score": float(heat_score),
-            "multiplier": float(multiplier),
+            "multiplier": (float(multiplier) if multiplier is not None else None),
             "badge": badge,
         }
 
@@ -265,37 +284,55 @@ def get_pick_theme_multiplier(
     sid: str,
     as_of: str | None = None,
     window_days: int = WINDOW_DAYS_DEFAULT,
-) -> float:
-    """sid 屬於哪些題材 → 取最高 multiplier。
+) -> Optional[float]:
+    """sid 應套的題材權重 — 回 float 或 None(擋掉)。
 
-    不屬任何題材 → 1.0(中性,不影響排序)。
+    決策(主公 2026-05-15 二次拍板):
+      * 至少一個熱題材 → 取最熱 multiplier(熱不被冷稀釋)
+      * 至少一個中性題材(沒熱)→ 取中性 1.0(中性壓過冷,不被擋)
+      * 只在冷題材中 → None(caller 應 exclude)
+      * 不屬任何題材 → 1.0(沒題材 ≠ 冷,正常推薦)
 
-    取最高(而非平均)是主公拍板:避免熱題材股(e.g. 2330 同屬 CoWoS 熱 +
-    tsmc_supply 中性)被冷題材稀釋掉應有的加分。
+    Kill-switch THEME_HEAT_ENABLED=false → 一律回 NEUTRAL_MULTIPLIER(1.0),
+    不擋任何 sid。
     """
     if not _is_enabled():
         return NEUTRAL_MULTIPLIER
     heat = compute_theme_heat(
         conn, as_of=as_of, window_days=window_days,
     )
-    multipliers: list[float] = []
+    # 收集 sid 在哪些題材內的 multiplier(可能 None)
+    found = False
+    valid_mults: list[float] = []
     for info in heat.values():
-        if sid in info["sids"]:
-            multipliers.append(info["multiplier"])
-    if not multipliers:
-        return NEUTRAL_MULTIPLIER
-    return max(multipliers)
+        if sid in info.get("sids", []):
+            found = True
+            m = info.get("multiplier")
+            if m is not None:
+                valid_mults.append(float(m))
+    if not found:
+        return NEUTRAL_MULTIPLIER  # 不在任何題材 → 照常
+    if not valid_mults:
+        return COLD_EXCLUDE  # 全部都在冷題材內 → 擋掉
+    return max(valid_mults)  # 至少一個非冷 → 取最熱(中性 1.0 會壓過冷的 None)
 
 
 # === 推播 caption ===
 
-def format_theme_heat_caption(heat: dict[str, dict]) -> str:
-    """組推播訊息用的單塊 caption(熱題材 / 冷題材 名單)。
+def format_theme_heat_caption(
+    heat: dict[str, dict],
+    excluded: dict[str, list[str]] | None = None,
+) -> str:
+    """組推播訊息用的單塊 caption(熱題材加分 / 冷題材已擋)。
 
-    格式:
-        📡 題材熱度（近 N 日）
-        🔥 熱題材: HBM / 矽光子 / CoWoS — 自動加分
-        🧊 冷題材: 國防 / 重電 / 低軌衛星 — 自動降權
+    格式(2026-05-15 主公二次拍板,冷改 hard exclude):
+        📡 題材熱度(近 N 日)
+        🔥 熱題材加分: HBM / 矽光子 / CoWoS
+        🚫 冷題材已擋: N 檔 (國防 X / 重電 Y / 低軌衛星 Z)
+
+    excluded:dict[theme_display_name → list[sid]] — 由 _select_top_picks
+    在套 hard exclude 時填,用來算 N 檔 + 各題材幾檔被擋。傳 None / 空 dict
+    → caption 只列冷題材名稱不列數字(降級顯示)。
 
     沒任何熱 / 冷題材 → 回空 string,caller graceful skip 不顯該 section。
     name 顯示用 yaml 第一行 comment 的 display_name 第一段(空白 split[0])
@@ -304,25 +341,45 @@ def format_theme_heat_caption(heat: dict[str, dict]) -> str:
     if not heat:
         return ""
     hot: list[str] = []
-    cold: list[str] = []
+    cold: list[str] = []  # display_name 第一個 token,給「冷題材已擋」名單
+    cold_full_names: list[str] = []  # display_name 完整,給 excluded count lookup
     for info in heat.values():
-        # 推播省字數:取 display_name 第一個 token(e.g. "HBM 高頻寬..." → "HBM")
-        short = (info.get("display_name") or "").split()[0:1]
+        full_name = (info.get("display_name") or "").strip()
+        short = full_name.split()[0:1]
         label = short[0] if short else ""
         if not label:
             continue
-        m = info.get("multiplier", 1.0)
-        if m > 1.0:
-            hot.append(label)
-        elif m < 1.0:
+        m = info.get("multiplier")
+        if m is None:
             cold.append(label)
+            cold_full_names.append(full_name)
+        elif m > 1.0:
+            hot.append(label)
     if not hot and not cold:
         return ""
     lines: list[str] = ["📡 題材熱度(近 5 日)"]
     if hot:
-        lines.append(f"🔥 熱題材: {' / '.join(hot)} — 自動加分")
+        lines.append(f"🔥 熱題材加分: {' / '.join(hot)}")
     if cold:
-        lines.append(f"🧊 冷題材: {' / '.join(cold)} — 自動降權")
+        ex_map = excluded or {}
+        # excluded key 是 display_name(完整),反查 short label
+        per_theme_parts: list[str] = []
+        total_excluded: set[str] = set()
+        for short_label, full_name in zip(cold, cold_full_names):
+            sids_blocked = ex_map.get(full_name) or []
+            total_excluded.update(sids_blocked)
+            if sids_blocked:
+                per_theme_parts.append(f"{short_label} {len(sids_blocked)}")
+            else:
+                per_theme_parts.append(short_label)
+        if total_excluded:
+            lines.append(
+                f"🚫 冷題材已擋: {len(total_excluded)} 檔 "
+                f"({' / '.join(per_theme_parts)})"
+            )
+        else:
+            # 沒提供 excluded(legacy caller)→ 只列題材名,不顯數字
+            lines.append(f"🚫 冷題材已擋: {' / '.join(cold)}")
     return "\n".join(lines)
 
 
@@ -330,8 +387,8 @@ __all__ = [
     "THEME_HEAT_ENABLED",
     "WINDOW_DAYS_DEFAULT",
     "HOT_MULTIPLIER",
-    "COLD_MULTIPLIER",
     "NEUTRAL_MULTIPLIER",
+    "COLD_EXCLUDE",
     "compute_theme_heat",
     "get_pick_theme_multiplier",
     "format_theme_heat_caption",
