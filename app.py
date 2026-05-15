@@ -1914,7 +1914,7 @@ def _page_short() -> None:
 
     if selection and selection.selection.rows:
         sel_sids = [df.iloc[i]["stock_id"] for i in selection.selection.rows]
-        bcols = st.columns([1, 1, 3])
+        bcols = st.columns([1, 1, 1, 2])
         if bcols[0].button(
             f"⭐ 批量加入關注 ({len(sel_sids)} 檔)",
             key="short_bulk_star", use_container_width=True,
@@ -1932,6 +1932,13 @@ def _page_short() -> None:
             st.info(
                 f"已選 **{sel_sids[0]}**,請點 sidebar 切到「🔍 個股」頁。"
             )
+        if len(sel_sids) == 1 and bcols[2].button(
+            "📊 看細節", key="short_detail_one", use_container_width=True,
+            help="跳到「📊 個股深度」頁看 K 線 + 籌碼 + ML + 新聞",
+        ):
+            st.session_state["detail_sid"] = sel_sids[0]
+            st.session_state["pending_nav"] = "📊 個股深度"
+            st.rerun()
 
 
 def _resolve_universe(choice: str) -> list[tuple[str, str]] | None:
@@ -4150,6 +4157,15 @@ def _render_table_with_inline_detail(
             args=(state_prefix,),
         )
         sid = detail_sid
+        # 📊 跳到「個股深度」頁(reuse pending_nav pattern;sid 已選好直接帶入)
+        if st.button(
+            "📊 看完整深度頁",
+            key=f"{state_prefix}_jump_detail_{sid}",
+            help="跳到「📊 個股深度」頁看 K 線 + 籌碼 + ML + 新聞",
+        ):
+            st.session_state["detail_sid"] = sid
+            st.session_state["pending_nav"] = "📊 個股深度"
+            st.rerun()
         # 從 df 拿該 row 算 close + change_pct(reuse 已 build 好的資料避免重複 SQL)
         row = df[df[sid_column].astype(str) == sid].iloc[0]
         close = row.get("目前股價")
@@ -6199,6 +6215,24 @@ def _page_strategy_history() -> None:
                 pd.DataFrame(rows_view),
                 use_container_width=True, hide_index=True,
             )
+
+            # 跳「📊 個股深度」頁 — 從本頁的 raw 結算明細選一檔 sid 直接看 K/籌碼/ML
+            sid_options = sorted({r["sid"] for r in raw})
+            jump_cols = st.columns([2, 1])
+            chosen_jump = jump_cols[0].selectbox(
+                "從結算明細選股號",
+                options=sid_options,
+                key="strategy_history_jump_sid",
+                index=0,
+            )
+            if jump_cols[1].button(
+                "📊 看細節", key="strategy_history_jump_btn",
+                use_container_width=True,
+                help="跳到「📊 個股深度」頁",
+            ):
+                st.session_state["detail_sid"] = chosen_jump
+                st.session_state["pending_nav"] = "📊 個股深度"
+                st.rerun()
 
     # === Tab 4: vectorbt grid search 結果 ===
     with tab_vbt:
