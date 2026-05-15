@@ -3170,6 +3170,211 @@ def dump_shareholder_concentration_csv(
     return len(df)
 
 
+# === 個股深度頁 helpers(2026-05-15 加) ===
+#
+# 「📊 個股深度」聚合頁(C 計畫最後一件)— 從任何 page 點 sid → 跳到該頁
+# 看 K 線 + 籌碼 + ML 解釋 + 新聞。下列 6 個 helper 全部 sid-scoped,
+# 給 _page_stock_detail() 在 app.py 內 4 個 tab 使用。
+#
+# 設計取捨:
+# - K 線 helper 連同 MA20/60 + BB(20,2) 一起算 — 用 local import indicators
+#   避免 database 模組永久依賴 indicators(只在這個函式內生效)。
+# - 各 helper 都 init_db()(跟 file 內其他 read helper 一致)— 雲端首次 boot
+#   tmp DB 也能呼叫不炸。
+# - 找不到資料一律回空 list / 空 DataFrame,讓 page 端 fallback render
+#   「無資料」訊息,而不是 raise(個股深度頁本質就是「能看多少看多少」)。
+
+
+def get_stock_kline_with_indicators(
+    sid: str,
+    days: int = 60,
+    db_path: str | Path | None = None,
+):
+    """近 N 天 OHLCV + MA20/MA60 + BB(20,2)。回 pandas DataFrame。
+
+    SQL 多撈 80 天歷史讓 MA60 / BB(20) 在最後 N 天都有滿值(rolling 邊界補滿),
+    然後 tail(days) 切出對齊。沒資料回空 DataFrame(0 row, columns 不保證)。
+
+    Returns columns: date, open, high, low, close, volume, ma20, ma60,
+                     bb_upper, bb_mid, bb_lower
+    """
+    import pandas as pd
+    from src import indicators as ind
+
+    init_db(db_path)
+    fetch_days = days + 80
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT date, open, high, low, close, volume "
+            "FROM daily_prices WHERE stock_id=? "
+            "ORDER BY date DESC LIMIT ?",
+            (sid, fetch_days),
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=[
+            "date", "open", "high", "low", "close", "volume",
+            "ma20", "ma60", "bb_upper", "bb_mid", "bb_lower",
+        ])
+    df = pd.DataFrame([dict(r) for r in rows])
+    df = df.sort_values("date").reset_index(drop=True)
+    df["ma20"] = ind.sma(df, 20)
+    df["ma60"] = ind.sma(df, 60)
+    bb = ind.bollinger(df, period=20, num_std=2.0)
+    df["bb_upper"] = bb["upper"]
+    df["bb_mid"] = bb["mid"]
+    df["bb_lower"] = bb["lower"]
+    # tail(days) — MA60/BB20 在首段是 NaN(歷史不足),保留讓 plotly 自動斷線
+    return df.tail(days).reset_index(drop=True)
+
+
+def get_inst_history(
+    sid: str,
+    days: int = 7,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """近 N 日三大法人買賣超(外資/投信/自營商,單位:股,UI 自行 / 1000 轉張)。
+
+    Sort DESC by date,空 list 表示該 sid 在覆蓋範圍外(法人覆蓋率有限,
+    主要是高市值 / 關注清單個股)。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT date, foreign_buy_sell, trust_buy_sell, "
+                "dealer_buy_sell FROM institutional "
+                "WHERE stock_id=? ORDER BY date DESC LIMIT ?",
+                (sid, days),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    return [dict(r) for r in rows]
+
+
+def get_shareholder_history(
+    sid: str,
+    weeks: int = 12,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """近 N 週千張戶人數歷史。TDCC 週快照,週六凌晨抓上週五公布資料。
+
+    Sort ASC by week_end(讓 UI 直接畫 bar 不用再 reverse),空 list 表示
+    該 sid 不在 TDCC 覆蓋(通常是上櫃小型股或新上市)。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT week_end, holders_1000up_count, total_holders, "
+                "holders_pct, holders_delta_w FROM shareholder_concentration "
+                "WHERE sid=? ORDER BY week_end DESC LIMIT ?",
+                (sid, weeks),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    # DESC 撈完反轉成 ASC,UI 畫圖時間軸由左到右
+    return [dict(r) for r in reversed(rows)]
+
+
+def get_news_for_sid(
+    sid: str,
+    days: int = 7,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """近 N 日該 sid 重大訊息(TWSE t187ap04_L)。
+
+    Sort DESC(最新先),只回 UI 渲染需要的欄位。沒資料回空 list。
+    """
+    from datetime import date, timedelta
+
+    init_db(db_path)
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT publish_date, publish_time, subject, article_no, "
+                "description, fact_date FROM news "
+                "WHERE sid=? AND publish_date >= ? "
+                "ORDER BY publish_date DESC, publish_time DESC",
+                (sid, cutoff),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    return [dict(r) for r in rows]
+
+
+def get_pick_history_for_sid(
+    sid: str,
+    limit: int = 30,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """該 sid 過去命中過的策略 + 後續 d5 報酬。daily_picks LEFT JOIN pick_outcomes。
+
+    LEFT JOIN — 還沒 evaluate 到的最新 pick(d5 未到)會以 None 出現,
+    UI 可顯示「待結算」。Sort DESC by pick_date,限 limit 筆避免列表爆炸。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT p.trade_date AS pick_date, p.strategy, p.score,
+                       p.ml_prob,
+                       o.entry_close, o.return_d1, o.return_d5, o.return_d10,
+                       o.hit_target, o.stopped_out
+                FROM daily_picks p
+                LEFT JOIN pick_outcomes o
+                  ON p.trade_date = o.pick_date
+                 AND p.sid = o.sid
+                 AND p.strategy = o.strategy
+                WHERE p.sid = ?
+                ORDER BY p.trade_date DESC, p.strategy ASC
+                LIMIT ?
+                """,
+                (sid, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    return [dict(r) for r in rows]
+
+
+def get_shap_for_sid_latest(
+    sid: str,
+    db_path: str | Path | None = None,
+) -> dict | None:
+    """該 sid 最新一筆 SHAP 解釋(任何 pick_date / strategy 取最新)。
+
+    回 dict {pick_date, strategy, top_features: list[dict]} 或 None
+    (該 sid 從未進過 daily_picks → 沒 SHAP)。
+    top_features 已 json.loads 解開。
+    """
+    import json
+
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        try:
+            row = conn.execute(
+                "SELECT pick_date, strategy, top_features "
+                "FROM pick_shap_explanations "
+                "WHERE sid=? "
+                "ORDER BY pick_date DESC, generated_at DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    if not row:
+        return None
+    try:
+        top = json.loads(row["top_features"])
+    except (json.JSONDecodeError, TypeError):
+        top = []
+    return {
+        "pick_date": row["pick_date"],
+        "strategy": row["strategy"],
+        "top_features": top,
+    }
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -3213,5 +3418,11 @@ __all__ = [
     "load_strategy_backtest_for_period",
     "save_shap_explanation",
     "get_shap_explanation",
+    "get_stock_kline_with_indicators",
+    "get_inst_history",
+    "get_shareholder_history",
+    "get_news_for_sid",
+    "get_pick_history_for_sid",
+    "get_shap_for_sid_latest",
     "SCHEMA",
 ]
