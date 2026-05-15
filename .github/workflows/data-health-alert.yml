@@ -1,0 +1,59 @@
+name: Data Health Alert (daily 09:00 TW)
+
+# 每天早上 09:00 TW(01:00 UTC)掃 5 個關鍵表新鮮度,stale → push Telegram + Discord。
+# 無 stale → silent(不推「全好」訊息避免噪音)。
+#
+# 排查的表:
+#   - daily_prices             > 1 交易日 stale
+#   - institutional            > 1 交易日 stale
+#   - shareholder_concentration> 8 天 stale
+#   - pick_outcomes            > 1 交易日 stale
+#   - daily_picks              > 1 交易日 stale
+
+on:
+  schedule:
+    # 01:00 UTC = 09:00 Asia/Taipei
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: data-health-alert
+  cancel-in-progress: false
+
+jobs:
+  audit-and-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run data health audit
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "Running: python scripts/data_health_alert.py $ARGS"
+          python scripts/data_health_alert.py $ARGS
