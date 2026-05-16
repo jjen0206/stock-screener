@@ -24,12 +24,35 @@ from datetime import date as _date
 from typing import Optional
 from urllib.parse import quote_plus
 
-import pandas as pd
 import requests
 
 from src import config, database as db
-from src.screener_short import screen_short
 from src.universe import TW_TOP_50
+
+# pandas / screen_short cold-import 重(~0.7s),延後到首次存取才載入。
+# 走 PEP 562 module-level __getattr__ — 既保留 `notifier.screen_short` 屬性
+# 介面(現有 monkeypatch 測試 / caller 不用改),又避免 import 時付代價。
+# 型別註解透過 `from __future__ import annotations` 全部變字串,不需 runtime pd。
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import pandas as pd  # noqa: F401  # only for type checking
+
+
+def __getattr__(name: str):
+    """Lazy-load 重量級符號(pandas / screener_short)。
+
+    第一次存取會 import 並 cache 進 module globals,後續直接 hit module dict。
+    monkeypatch 仍可正常設,因為他們會 setattr 到 module(覆寫 cache)。
+    """
+    if name == "screen_short":
+        from src.screener_short import screen_short as _ss
+        globals()["screen_short"] = _ss
+        return _ss
+    if name == "pd":
+        import pandas as _pd
+        globals()["pd"] = _pd
+        return _pd
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # 推播失敗 retry 設定:總共最多 3 次嘗試,失敗等 1s 再重試
@@ -211,6 +234,8 @@ def compute_entry_range(
         return None
 
     # 反序成 ascending,indicators 需時序由舊到新
+    # pd 走 PEP 562 lazy load — 首次 call 觸發 __getattr__ 並 cache 進 globals
+    pd = __getattr__("pd")
     df = pd.DataFrame(
         [
             {"high": r["high"], "low": r["low"], "close": r["close"]}

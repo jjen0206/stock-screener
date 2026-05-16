@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 
@@ -26,9 +27,13 @@ load_dotenv(_ENV_PATH)
 def _from_secrets(name: str) -> str | None:
     """嘗試從 st.secrets 讀取;雲端有值則回字串,否則回 None。
 
-    本機沒有 .streamlit/secrets.toml 時 st.secrets 訪問會 raise,我們吃掉。
-    pytest / 純 Python 腳本(非 Streamlit context)也會走 except 分支。
+    Cold-start 優化:只有當 streamlit 已經被父程序載入(亦即真的跑在
+    Streamlit runtime 裡)才會去讀 st.secrets。pytest / CLI 腳本(notifier、
+    intraday_alerts、data_health_alert 等)沒有 streamlit context,跳過後省下
+    ~0.5s 的 streamlit cold import。
     """
+    if "streamlit" not in sys.modules:
+        return None
     try:
         import streamlit as st
         v = st.secrets.get(name)
