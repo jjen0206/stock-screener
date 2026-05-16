@@ -446,7 +446,7 @@ def test_parse_tpex_skips_rows_with_missing_required_fields():
 # ============================================================================
 
 def _twse_only_overrides() -> dict[str, str]:
-    """只給 TWSE fixture,TPEx 餵空 list 隔離(免打真實 API)。"""
+    """只給 TWSE fixture,TPEx + MOPS 餵空隔離(免打真實 API)。"""
     return {
         fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
         fetcher.URL_NOTICE: _TWSE_NOTICE_JSON,
@@ -455,6 +455,7 @@ def _twse_only_overrides() -> dict[str, str]:
         fetcher.TPEX_URL_ATTENTION: "[]",
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
     }
 
 
@@ -499,6 +500,8 @@ def test_run_writes_twse_and_tpex_together(tmp_db):
         fetcher.TPEX_URL_ATTENTION: _TPEX_ATTENTION_JSON,
         fetcher.TPEX_URL_DISPOSITION: _TPEX_DISPOSITION_JSON,
         fetcher.TPEX_URL_CMODE: _TPEX_CMODE_JSON,
+        # MOPS 違約交割(餵空,免打真實 API)
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
     }
     summary = fetcher.run(html_overrides=overrides)
     # TWSE 7 + TPEx attention 1 + disposition 2 + cmode 3(7777 跳過) = 13
@@ -524,6 +527,7 @@ def test_baseline_raises_when_punish_and_twt85u_both_empty(tmp_db):
         fetcher.TPEX_URL_ATTENTION: "[]",
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
     }
     with pytest.raises(RuntimeError, match="baseline"):
         fetcher.run(html_overrides=overrides)
@@ -539,6 +543,7 @@ def test_baseline_passes_when_only_one_zero(tmp_db):
         fetcher.TPEX_URL_ATTENTION: "[]",
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
     }
     summary = fetcher.run(html_overrides=overrides)
     assert summary["rows_parsed"] == 2  # 來自 TWT85U
@@ -618,3 +623,151 @@ def test_sources_all_use_openapi():
             f"{market} {label} URL 非 OpenAPI:{url} — "
             "bs4 HTML 已禁用(silent 0 rows 教訓)"
         )
+
+
+# ============================================================================
+# MOPS 違約交割 RSS — parser + 整合 (2026-05-16 加入)
+# ============================================================================
+
+# RSS XML fixture(模擬 mopsrss201001.xml 的最小子集)。
+# 真實 RSS encoding='big5',測試用 fixture 解碼後字串(Python str)即可。
+_MOPS_RSS_HAS_DEFAULT_SETTLEMENT = """<?xml version='1.0' encoding='big5'?>
+<rss version='2.0'>
+<channel>
+<title>公開資訊觀測站重大訊息</title>
+<item>
+    <title>(1234)違約股-重大訊息</title>
+    <link> <![CDATA[https://mopsov.twse.com.tw/mops/web/t05st02?co_id=1234&seq=1]]></link>
+    <description> <![CDATA[公告本公司股票於民國115年5月15日發生違約交割事件詳如說明]]></description>
+    <pubDate>Fri, 15 May 2026 14:30:00 +0800</pubDate>
+</item>
+<item>
+    <title>(2330)台積電-重大訊息</title>
+    <link> <![CDATA[https://mopsov.twse.com.tw/mops/web/t05st02?co_id=2330&seq=1]]></link>
+    <description> <![CDATA[公告本公司董事會決議發放現金股利]]></description>
+    <pubDate>Fri, 15 May 2026 10:00:00 +0800</pubDate>
+</item>
+<item>
+    <title>(5678)違約測試二-重大訊息</title>
+    <link> <![CDATA[https://mopsov.twse.com.tw/mops/web/t05st02?co_id=5678&seq=1]]></link>
+    <description> <![CDATA[本公司澄清近期市場關於違約交割之相關報導]]></description>
+    <pubDate>Thu, 14 May 2026 09:15:00 +0800</pubDate>
+</item>
+</channel>
+</rss>"""
+
+
+def test_parse_mops_default_settlement_filters_by_keyword():
+    """只抓含「違約」關鍵字的 item,其他重大訊息 skip。"""
+    rows = fetcher.parse_mops_default_settlement_rss(
+        _MOPS_RSS_HAS_DEFAULT_SETTLEMENT,
+        source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+    )
+    assert len(rows) == 2
+    sids = {r["stock_id"] for r in rows}
+    assert sids == {"1234", "5678"}
+    # 2330 不含違約關鍵字 → skip
+    assert "2330" not in sids
+
+
+def test_parse_mops_default_settlement_extracts_metadata():
+    """檢查 warning_type / dates / source_url 都正確填入。"""
+    rows = fetcher.parse_mops_default_settlement_rss(
+        _MOPS_RSS_HAS_DEFAULT_SETTLEMENT,
+        source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+    )
+    by_sid = {r["stock_id"]: r for r in rows}
+    r = by_sid["1234"]
+    assert r["warning_type"] == "default_settlement"
+    # pubDate "Fri, 15 May 2026 14:30:00 +0800" → date 2026-05-15
+    assert r["announced_date"] == "2026-05-15"
+    assert r["effective_from"] == "2026-05-15"
+    assert r["effective_to"] is None
+    assert "違約" in r["reason"]
+    # source_url 應為 item 的 <link>(指向 MOPS 詳情頁)
+    assert "co_id=1234" in r["source_url"]
+
+
+def test_parse_mops_default_settlement_empty_xml_returns_empty():
+    """空字串 / 無 item → 回 [](MOPS RSS 偶爾 502 / 空頁,不該 raise)。"""
+    assert fetcher.parse_mops_default_settlement_rss(
+        "", source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+    ) == []
+    assert fetcher.parse_mops_default_settlement_rss(
+        "<rss><channel></channel></rss>",
+        source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+    ) == []
+
+
+def test_parse_mops_default_settlement_skips_no_keyword():
+    """item 無「違約」關鍵字 → skip,不誤抓其他重大訊息。"""
+    xml = """<rss><channel>
+    <item>
+        <title>(1101)台泥-重大訊息</title>
+        <link><![CDATA[https://example.com/x]]></link>
+        <description><![CDATA[公告本公司115年第1季合併財務報告]]></description>
+        <pubDate>Fri, 15 May 2026 10:00:00 +0800</pubDate>
+    </item>
+    </channel></rss>"""
+    assert fetcher.parse_mops_default_settlement_rss(
+        xml, source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+    ) == []
+
+
+def test_parse_mops_default_settlement_fallback_date_when_pubdate_missing():
+    """item 無 pubDate → 用 fallback_date(預設今天 UTC)。"""
+    xml = """<rss><channel>
+    <item>
+        <title>(9999)違約測試-重大訊息</title>
+        <link><![CDATA[https://example.com/x]]></link>
+        <description><![CDATA[公告違約交割情事]]></description>
+    </item>
+    </channel></rss>"""
+    rows = fetcher.parse_mops_default_settlement_rss(
+        xml, source_url=fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS,
+        fallback_date="2026-05-16",
+    )
+    assert len(rows) == 1
+    assert rows[0]["announced_date"] == "2026-05-16"
+
+
+def test_run_writes_mops_default_settlement_rows(tmp_db):
+    """整合測試:MOPS RSS fixture 進 stock_warnings 表,warning_type='default_settlement'。"""
+    overrides = {
+        # TWSE baseline 給最小資料避免 baseline raise
+        fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
+        fetcher.URL_NOTICE: "[]",
+        fetcher.URL_NOTETRANS: "[]",
+        fetcher.URL_METHOD_CHANGED: _TWSE_TWT85U_JSON,
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
+        # MOPS — 含 2 筆違約 + 1 筆 unrelated
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: _MOPS_RSS_HAS_DEFAULT_SETTLEMENT,
+    }
+    summary = fetcher.run(html_overrides=overrides)
+    assert summary["by_type"].get("default_settlement") == 2
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id FROM stock_warnings "
+            "WHERE warning_type='default_settlement' ORDER BY stock_id"
+        ).fetchall()
+    assert [r["stock_id"] for r in rows] == ["1234", "5678"]
+
+
+def test_mops_baseline_zero_does_not_raise(tmp_db):
+    """MOPS 0 rows 屬正常(違約事件年數筆),不該觸發 baseline raise。"""
+    overrides = {
+        fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
+        fetcher.URL_NOTICE: "[]",
+        fetcher.URL_NOTETRANS: "[]",
+        fetcher.URL_METHOD_CHANGED: _TWSE_TWT85U_JSON,
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",  # 0 rows
+    }
+    # 不該 raise(MOPS 不在 _BASELINE_URLS 內)
+    summary = fetcher.run(html_overrides=overrides)
+    assert summary["by_type"].get("default_settlement", 0) == 0

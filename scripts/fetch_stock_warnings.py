@@ -1,9 +1,10 @@
 """TWSE / TPEx 警示股紀錄抓取 CLI(2026-05-15 主公拍板加入,違約交割教訓)。
 
 抓取的警示分類(寫入 stock_warnings.warning_type):
-  - default_settlement (違約交割) — **TWSE/TPEx OpenAPI 皆無對應 endpoint**
-                                     (兩家都是 SPA 表單頁,需 browser 自動化)
-                                     run() 會 log warning 提醒主公,別 silent skip
+  - default_settlement (違約交割) — **MOPS 公開資訊觀測站重大訊息 RSS** 過濾「違約」
+                                     關鍵字(2026-05-16 加入)。涵蓋全市場(TWSE+TPEx
+                                     +興櫃+公開發行)。違約事件年數筆,日常多 0 rows
+                                     屬正常,不觸發 baseline raise。
   - attention         (注意股)   — TWSE /announcement/notice + /announcement/notetrans
                                   + TPEx tpex_trading_warning_information
   - disposition       (處置股)   — TWSE /announcement/punish
@@ -23,15 +24,16 @@
     - 變更交易 https://openapi.twse.com.tw/v1/exchangeReport/TWT85U
                 (僅含 Code/Name/PeriodicCallAuctionTrading,無 Date/Reason/迄日;
                  全標 method_changed)
-    - 違約交割 :TWSE OpenAPI v1 swagger 143 paths 無對應 endpoint(2026-05 確認);
-                只有 SPA 表單頁 /zh/announcement/bfigtu.html,需 browser
-                automation,違反專案禁止 selenium 原則 → 暫不抓,run() log
-                warning 提醒。see docs/twse-warnings-still-broken.md
+  違約交割(全市場):
+    - MOPS 重大訊息 RSS
+      https://mopsov.twse.com.tw/nas/rss/mopsrss201001.xml
+      編碼 cp950,滾動最近 100 筆重大訊息;parser 過濾標題/內文含「違約」
+      關鍵字 → warning_type='default_settlement'。涵蓋 TWSE+TPEx+興櫃+公開發行
+      全市場。違約事件年數筆,日常多 0 rows,不在 baseline 偵測內。
   TPEx (上櫃):
     - 注意股   https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information
     - 處置股   https://www.tpex.org.tw/openapi/v1/tpex_disposal_information
     - 變更交易方法 https://www.tpex.org.tw/openapi/v1/tpex_cmode
-    - 違約交割 :TPEx OpenAPI v1 也無對應 endpoint(同 TWSE 困境)
 
 設計原則:
   - 全 source 走 JSON(TWSE / TPEx OpenAPI v1),不再用 bs4 解 HTML
@@ -93,8 +95,14 @@ URL_NOTICE = "https://openapi.twse.com.tw/v1/announcement/notice"
 URL_NOTETRANS = "https://openapi.twse.com.tw/v1/announcement/notetrans"
 URL_METHOD_CHANGED = "https://openapi.twse.com.tw/v1/exchangeReport/TWT85U"
 
+# === MOPS 公開資訊觀測站 重大訊息 RSS(2026-05-16 加入)===
+# 滾動最近 100 筆重大訊息;parser 過濾「違約」關鍵字 → default_settlement。
+# 編碼 cp950(XML 宣告 encoding='big5',實際 big5/cp950 通用)。
+URL_MOPS_DEFAULT_SETTLEMENT_RSS = (
+    "https://mopsov.twse.com.tw/nas/rss/mopsrss201001.xml"
+)
+
 # TPEx (上櫃) — 走官方 OpenAPI v1 JSON,結構穩定。
-# 違約交割 endpoint 不存在 OpenAPI(只有 SPA 表單頁),先不抓,run() 會 log warning。
 TPEX_URL_DISPOSITION = (
     "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
 )
@@ -562,6 +570,122 @@ def parse_tpex_cmode_json(raw_text: str, source_url: str) -> list[dict]:
     return out
 
 
+# === MOPS 重大訊息 RSS(違約交割專用)===
+
+# MOPS RSS title 格式:"(NNNN)NAME-重大訊息" — 抽 4-6 碼數字代號。
+_MOPS_TITLE_SID_RE = re.compile(r"\((\d{4,6})\)")
+
+# RSS item tag splitter — 用正則切而不用 ET.parse,因為 cp950 解碼後內含
+# CDATA 與 big5 控制字元,xml parser 容易 choke。
+_MOPS_ITEM_RE = re.compile(r"<item>(.*?)</item>", re.DOTALL)
+_MOPS_TITLE_RE = re.compile(
+    r"<title>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</title>", re.DOTALL,
+)
+_MOPS_DESC_RE = re.compile(
+    r"<description>\s*<!\[CDATA\[(.*?)\]\]>\s*</description>", re.DOTALL,
+)
+_MOPS_PUBDATE_RE = re.compile(r"<pubDate>(.*?)</pubDate>")
+_MOPS_LINK_RE = re.compile(
+    r"<link>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</link>", re.DOTALL,
+)
+
+# 違約交割關鍵字:標題或內文任一含「違約」即標記。
+# 「違約交割」是最直接的關鍵字;「違約」單詞也包含「違約金」等假陽性,
+# 但 MOPS 重大訊息中「違約」單詞出現頻率本就極低(年數筆),且寧抓多
+# 不漏掉(主公曾踩過違約股 → 偽陽性可接受,silent miss 不可接受)。
+_MOPS_DEFAULT_KEYWORDS = ("違約交割", "違約")
+
+
+def _fetch_mops_rss_text(url: str = URL_MOPS_DEFAULT_SETTLEMENT_RSS) -> str:
+    """打 MOPS RSS 拿原始 cp950 解碼文字。
+
+    跟 _http_get 分開因為 MOPS RSS 是 cp950 編碼,requests.text 用 charset
+    猜測常猜錯(會回 latin-1 / replacement chars)。改成讀 .content bytes
+    再 cp950 解碼。SSL verify=False / UA / retry 規則跟其他 source 一致。
+    """
+    import urllib3
+    import requests
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _once() -> str:
+        resp = requests.get(
+            url, timeout=_HTTP_TIMEOUT, verify=_VERIFY_SSL,
+            headers=_HTTP_HEADERS,
+        )
+        resp.raise_for_status()
+        # XML 宣告 encoding='big5',但實際內容有 big5 / cp950 通用區段,
+        # cp950 是 big5 的超集,errors='replace' 防個別控制字元 choke。
+        return resp.content.decode("cp950", errors="replace")
+
+    return with_retry(_once, max_attempts=3, base_delay=1.0, label="MOPS RSS")
+
+
+def parse_mops_default_settlement_rss(
+    xml_text: str,
+    source_url: str,
+    fallback_date: str | None = None,
+) -> list[dict]:
+    """MOPS 重大訊息 RSS → list[default_settlement rows]。
+
+    過濾規則:item 的 title 或 description 含「違約」關鍵字 → 抓進來。
+    title 格式 "(NNNN)NAME-重大訊息" 用正則抽 4-6 碼證券代號。
+
+    pubDate 是 RFC 822 格式 "Sat, 16 May 2026 13:09:59 +0800",
+    parse 失敗 → fallback_date(預設今天 UTC)。
+
+    reason 組合 title + description,截 500 字。
+    source_url 用 item 的 <link>(指向 MOPS 該則公告詳情),
+    fallback 用 RSS feed URL。
+
+    空 / malformed XML → 回 [](不 raise,因為 RSS 偶爾會回 502 / 空頁;
+    上層 _fetch_mops_rss_text 已 retry 3 次,真壞了應該 raise 在那邊)。
+    """
+    if fallback_date is None:
+        fallback_date = datetime.now(timezone.utc).date().isoformat()
+
+    items = _MOPS_ITEM_RE.findall(xml_text or "")
+    out: list[dict] = []
+    for raw in items:
+        title_m = _MOPS_TITLE_RE.search(raw)
+        desc_m = _MOPS_DESC_RE.search(raw)
+        title = (title_m.group(1) if title_m else "").strip()
+        desc = (desc_m.group(1) if desc_m else "").strip()
+        haystack = title + "\n" + desc
+        if not any(kw in haystack for kw in _MOPS_DEFAULT_KEYWORDS):
+            continue
+
+        sid_m = _MOPS_TITLE_SID_RE.search(title)
+        if not sid_m:
+            continue
+        sid = sid_m.group(1)
+
+        announced = fallback_date
+        pubdate_m = _MOPS_PUBDATE_RE.search(raw)
+        if pubdate_m:
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(pubdate_m.group(1).strip())
+                if dt is not None:
+                    announced = dt.date().isoformat()
+            except Exception:
+                pass
+
+        link_m = _MOPS_LINK_RE.search(raw)
+        item_link = (link_m.group(1) if link_m else "").strip()
+
+        reason_full = f"{title} | {desc}".strip(" |")
+        out.append({
+            "stock_id": sid,
+            "warning_type": "default_settlement",
+            "announced_date": announced,
+            "effective_from": announced,
+            "effective_to": None,
+            "reason": reason_full[:500] or "MOPS 重大訊息含『違約』關鍵字",
+            "source_url": item_link or source_url,
+        })
+    return out
+
+
 # === Source orchestration ===
 
 # Source 表:每筆 (warning_type_label, url, parser, market)
@@ -611,17 +735,12 @@ def fetch_and_parse_all(
     Baseline 防呆:跑完後若 TWSE punish + TWT85U 兩條源都 0 rows → raise
     (這兩條歷史上一定有資料,同時 0 表示 endpoint 整體壞掉)。
 
-    額外行為:TWSE / TPEx 違約交割無 OpenAPI v1 endpoint(2026-05 確認),每跑一次
-    log warning,讓主公知道這條線目前還沒覆蓋(別 silent miss)。
+    MOPS 違約交割 RSS(2026-05-16 加入):全市場違約交割專用,單獨流程
+    (cp950 編碼);違約事件年數筆,0 rows 屬正常,不在 baseline 偵測內。
     """
     html_overrides = html_overrides or {}
     all_rows: list[dict] = []
     per_source: dict[str, int] = {}
-
-    logger.warning(
-        "[WARNINGS] default_settlement(違約交割):TWSE/TPEx OpenAPI v1 皆無對應 "
-        "endpoint,本次 run 不抓;見 docs/twse-warnings-still-broken.md"
-    )
 
     for label, url, parser, market in _SOURCES:
         if url in html_overrides:
@@ -655,6 +774,39 @@ def fetch_and_parse_all(
             "OpenAPI 整體壞掉?請檢查 endpoint URL/schema 是否變更。"
             f"baseline_zero={baseline_zero}"
         )
+
+    # === MOPS 違約交割 RSS(獨立 flow:cp950 編碼)===
+    # 違約事件年數筆,0 rows 屬正常,不在 baseline 偵測內。
+    mops_url = URL_MOPS_DEFAULT_SETTLEMENT_RSS
+    if mops_url in html_overrides:
+        mops_text = html_overrides[mops_url]
+    else:
+        try:
+            mops_text = _fetch_mops_rss_text(mops_url)
+        except Exception as ex:
+            # MOPS 偶爾 502,違約交割本身年數筆事件,fetch fail → log 不 raise
+            # (不能 silent miss 但也不該 block 其他警示寫入)。
+            logger.warning(
+                "[WARNINGS] MOPS 違約交割 RSS fetch 失敗:%s: %s — 本次 run 跳過",
+                type(ex).__name__, ex,
+            )
+            mops_text = ""
+
+    try:
+        mops_rows = parse_mops_default_settlement_rss(mops_text, mops_url)
+    except Exception as ex:
+        raise RuntimeError(
+            f"[WARNINGS] parse MOPS default_settlement 失敗:"
+            f"{type(ex).__name__}: {ex}"
+        ) from ex
+
+    per_source[mops_url] = len(mops_rows)
+    print(
+        f"[WARNINGS] [MOPS] default_settlement_rss     "
+        f"{len(mops_rows):>4d} rows",
+        flush=True,
+    )
+    all_rows.extend(mops_rows)
 
     return all_rows, per_source
 

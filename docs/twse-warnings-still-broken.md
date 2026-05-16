@@ -1,39 +1,51 @@
-# TWSE / TPEx 警示股 — 違約交割尚未覆蓋(silent miss 警告)
+# TWSE / TPEx 警示股 — 違約交割已透過 MOPS RSS 覆蓋(2026-05-16 update)
 
-**狀態**:2026-05-16 主公拍板 fix(bs4 → OpenAPI JSON)後仍存在的覆蓋缺口。
-**影響等級**:中(picks pipeline 依舊抓不到「違約交割」公告 → 主公曾踩過的違約股
-還是不會被 stock_warnings.default_settlement 擋住)。
+**狀態**:2026-05-16 加入 MOPS 重大訊息 RSS 過濾「違約」關鍵字後,違約交割
+silent miss 缺口**已關閉**。本文件改成記錄整體現況 + 剩餘限制。
 
-## 背景
+## 警示分類覆蓋現況
 
-2026-05-15 健診四件套發現:`scripts/fetch_stock_warnings.py` 的 TWSE 4 條 bs4 HTML
-parser 全部抓到 0 rows(原 punish.html / notice.html / disposition.html /
-method.html 都是 jQuery SPA,bs4 看不到 row)。違約股 silent miss 是 hard risk
-(違約交割教訓 root cause)。
-
-2026-05-16 修復:把 TWSE 4 條源從 bs4 全部換成 OpenAPI v1 JSON:
-
-| 警示分類 | TWSE OpenAPI endpoint | 狀態 |
+| 警示分類 | 主要來源 | 狀態 |
 |---|---|---|
-| 處置股 (disposition) | `/v1/announcement/punish` | ✅ 已替換,29 rows 進來 |
-| 注意股 (attention) | `/v1/announcement/notice` | ✅ 已替換(假日會 0 rows,合理) |
-| 注意股累計次數 | `/v1/announcement/notetrans` | ✅ 已替換(補充來源) |
-| 變更交易方法 (method_changed) | `/v1/exchangeReport/TWT85U` | ⚠️ 已替換,但欄位陽春 |
-| **違約交割 (default_settlement)** | **無對應 endpoint** | ❌ **未覆蓋** |
+| 處置股 (disposition) | TWSE `/v1/announcement/punish` + TPEx `tpex_disposal_information` | ✅ 已覆蓋 |
+| 注意股 (attention) | TWSE `/v1/announcement/notice` + `notetrans` + TPEx `tpex_trading_warning_information` | ✅ 已覆蓋 |
+| 變更交易方法 (method_changed) | TWSE `/v1/exchangeReport/TWT85U` + TPEx `tpex_cmode.AlteredTrading=Ｙ` | ⚠️ 已覆蓋,TWSE 欄位陽春(見下) |
+| 全額交割 (full_cash) | TPEx `tpex_cmode.ManagedStock=Ｙ` / `SuspensionOfTrading=Ｙ` | ⚠️ 僅 TPEx 上櫃,TWSE 上市股無法區分 |
+| **違約交割 (default_settlement)** | **MOPS 重大訊息 RSS `mopsrss201001.xml`** | ✅ **2026-05-16 加入** |
 
-## 違約交割無 OpenAPI endpoint 確認
+## 違約交割覆蓋方案(2026-05-16 加入)
 
-2026-05-16 抓 `https://openapi.twse.com.tw/v1/swagger.json` 全 143 paths
-grep keywords(`punish`, `default`, `settlement`, `違約`, `bfigtu`, `處分`),
-**無任何 endpoint 命中違約交割**。
+**Endpoint**:`https://mopsov.twse.com.tw/nas/rss/mopsrss201001.xml`
 
-TWSE 違約公告專區 HTML 頁:`https://www.twse.com.tw/zh/announcement/bfigtu.html`
-(SPA,需 browser automation;違反專案禁用 selenium 原則)。
+- MOPS 公開資訊觀測站重大訊息 RSS,滾動最近 100 筆。
+- 編碼 cp950(XML 宣告 big5,實際內容有 big5 / cp950 通用區段)。
+- Parser 過濾標題或描述含「違約」關鍵字(`違約交割` / `違約`)。
+- 涵蓋全市場:TWSE 上市 + TPEx 上櫃 + 興櫃 + 公開發行公司。
+- 違約事件年數筆,日常多 0 rows 屬正常,**不在 baseline raise 偵測內**。
+- 提取 `(NNNN)` 4-6 碼證券代號自 RSS item title。
+- `pubDate` (RFC 822) → `announced_date` (ISO date)。
+- `source_url` 用 item `<link>`(指向 MOPS 該則公告詳情頁)。
 
-TPEx 同樣狀況:OpenAPI v1 無對應 endpoint,只有 SPA 頁
-`https://www.tpex.org.tw/web/bulletin/announcement/default.php`。
+### 為什麼選 MOPS RSS,不選其他方案
 
-## TWT85U(變更交易)欄位限制
+- ❌ TWSE OpenAPI v1 swagger 143 paths 無對應違約 endpoint。
+- ❌ TWSE 違約公告專區 `https://www.twse.com.tw/zh/announcement/bfigtu.html`
+  是 SPA,需 selenium(違反專案規則)。
+- ❌ TPEx OpenAPI v1 也無對應 endpoint。
+- ✅ MOPS RSS 是純 XML,無需 browser automation,跟現有 fetcher 框架一致
+  (HTTP GET + parse)。
+
+### 偽陽性風險
+
+「違約」單詞也可能命中:
+- 公司澄清違約傳聞(實際無違約)
+- 違約金 / 違約條款相關公告(無關投資人交割)
+
+評估:MOPS 重大訊息中「違約」單詞出現頻率本就極低(年數筆),且寧抓多
+不漏掉(主公曾踩過違約股 → silent miss 不可接受,偽陽性可接受;真不確定
+可看 `reason` 欄位的全文判讀)。
+
+## TWT85U(TWSE 變更交易)欄位限制(仍存在)
 
 `/v1/exchangeReport/TWT85U` schema 只有 3 欄:
 - `Code`(證券代號)
@@ -50,52 +62,17 @@ TPEx 同樣狀況:OpenAPI v1 無對應 endpoint,只有 SPA 頁
 只會被歸到 `method_changed`(soft 降權)。TPEx `tpex_cmode` 還是會正確判斷
 `ManagedStock=Ｙ` → `full_cash`,上櫃覆蓋正常。
 
-## 影響評估
+## 防呆:baseline 偵測
 
-### 對 picks 的影響
-- **disposition / attention / method_changed**:這次修復前 silent miss、現在會擋,大進步。
-- **default_settlement(違約交割)**:本次修復前**也是 silent miss**(原 bs4 把 punish.html
-  錯標為 default_settlement 卻 0 rows),修復後**狀態相同**,只是現在誠實 log warning。
-- **full_cash(全額交割)**:TWSE 上市股這條也沒覆蓋(同上 TWT85U 欄位限制),
-  TPEx 上櫃正常。
-
-### 主公的違約股事件
-那檔股票若是 TWSE 上市違約交割,picks 依舊不會擋,需主公人工 watchlist。
-
-## 後續可選方案(留 TODO)
-
-優先級由高到低:
-
-### 方案 A:抓 TWSE 公文公告 RSS / JSON list(待研究)
-TWSE `/zh/announcement/announcement/list.html` 是公文公告總表,**有可能**有 RSS
-或 JSON list endpoint。值得花 30 分鐘 web search + 抓 swagger 確認。
-
-### 方案 B:解析公開資訊觀測站(mops)違約交割重大訊息
-mops.twse.com.tw 有重大訊息分類 RSS,違約交割屬重大訊息範疇,搜「違約交割」
-關鍵字過濾。
-
-### 方案 C:每週手動同步主公 watchlist(現況)
-最低成本,但仰賴主公自己盯著新聞。違約事件不頻繁(年數筆),不算太糟。
-
-### 方案 D:跑 selenium 抓 SPA(不推)
-違反專案禁用 selenium 規則,CI 也跑不起來,不建議。
-
-## 怎麼通知主公
-
-`scripts/fetch_stock_warnings.py` 每次跑都會 log warning:
-
-```
-[WARNINGS] default_settlement(違約交割):TWSE/TPEx OpenAPI v1 皆無對應
-endpoint,本次 run 不抓;見 docs/twse-warnings-still-broken.md
-```
-
-CI workflow `stock-warnings.yml` 跑 fetcher 時這條會出現在 GitHub Actions log
-最上面。主公巡 daily-fetch / weekly summary 時可看見。
-
-## 修復後 baseline 偵測
-
-`fetch_and_parse_all()` 結尾新增防呆:若 TWSE punish + TWT85U **兩條基線同時 0 rows**
+`fetch_and_parse_all()` 結尾防呆:若 TWSE punish + TWT85U **兩條基線同時 0 rows**
 → raise。這兩條源歷史上一定有資料,同時 0 表示 OpenAPI 整體壞掉(URL/schema 變、
 被擋等),會觸發 CI exit 1 警報主公。
 
-(notice / notetrans / TPEx 三條允許 0 rows = 假日沒事件,不在 baseline 內)
+(notice / notetrans / TPEx 三條 + MOPS 違約允許 0 rows = 假日沒事件,不在 baseline 內)
+
+## MOPS RSS fetch 失敗策略
+
+MOPS 偶爾 502 / 空頁。`_fetch_mops_rss_text` 走 retry 3 次(指數退避),
+連 3 次都失敗 → fetcher 在 MOPS 區段**只 log warning,不 raise**(讓 TWSE/TPEx
+其他警示仍寫入)。日後改用 GitHub Actions cron + 監控 by_type 出現 0 即可
+人工檢查。
