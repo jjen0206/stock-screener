@@ -253,6 +253,16 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_daily_picks_lookup "
     "ON daily_picks(trade_date, universe, params_hash)",
+    # 加速 sid-scoped 查詢:
+    #   1. get_top_inst_consensus / get_top_shareholder_movers /
+    #      get_top_shareholder_concentration / get_strong_follower_composite
+    #      皆有 (SELECT MAX(ml_prob) FROM daily_picks WHERE sid=? AND ml_prob
+    #      IS NOT NULL) 相關子查詢,沒這個 idx 走 full scan(8k+ rows × 30 outer)
+    #      實測 movers/concentration 從 163ms / 257ms → 4.8ms(34×~53× 提升)
+    #   2. get_pick_history_for_sid: WHERE p.sid=? 也吃這個 idx
+    # 詳見 docs/slow-query-audit-2026-05-16.md
+    "CREATE INDEX IF NOT EXISTS idx_daily_picks_sid "
+    "ON daily_picks(sid)",
     # strategy_backtest:每週一 nightly 跑 N=126 日歷史回測,對每個 strategy
     # 統計命中數 / 勝率 / 平均報酬。App 端用 load_latest_strategy_backtest
     # 拿 {strategy: win_rate},算每張 pick 命中策略的算術平均 → 卡片勝率欄。
@@ -453,6 +463,11 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_pick_shap_explanations_date "
     "ON pick_shap_explanations(pick_date DESC)",
+    # 加速 get_shap_for_sid_latest:WHERE sid=? ORDER BY pick_date DESC LIMIT 1
+    # 表目前 0 rows(2026-05-17 backfill 補完後會有 ~30 天 × ~50 picks/天 × 平均
+    # 2 strategies/pick ≈ 3000 rows),先補 idx 免 backfill 後又得加。
+    "CREATE INDEX IF NOT EXISTS idx_pick_shap_explanations_sid "
+    "ON pick_shap_explanations(sid, pick_date DESC)",
     # vbt_grid_results:vectorbt 策略 grid search 結果(2026-05-14 加)。
     # 每組 (strategy, params_hash) 唯一,UPSERT 允許重跑覆蓋。params_json 存原始
     # 參數 dict(讓 UI 顯示「最佳組合」),metrics 來自 vbt.Portfolio.stats():
