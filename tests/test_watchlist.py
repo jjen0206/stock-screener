@@ -402,6 +402,171 @@ def test_backfill_watchlist_history_skips_full_cache(monkeypatch, tmp_path):
     assert fetch_calls == []
 
 
+# === Regression guard e2e:守住 2026-05-16 「19 檔變 4 檔」bug ===
+
+
+def test_boot_fallback_dump_push_blocked_by_regression_guard(
+    tmp_db, monkeypatch, tmp_path,
+):
+    """E2E:模擬 cloud 容器 reboot → fetch_watchlist_from_github 失敗 →
+    safe_boot_load fallback 載入種子 (4 檔)→ user 加入 1 檔 → dump → push 到 GH
+
+    遠端是真實 19 檔狀態,新 push 只有 5 檔(4 種子 + 1 新加)→ regression guard
+    該拒推,不該打 HTTP PUT。守住 2026-05-16 主公回報的 bug 不再發生。
+    """
+    from unittest.mock import MagicMock, patch
+    from src import github_sync, watchlist_snapshot
+
+    # --- Step 1: 模擬 cloud env(設 PAT,啟用 push)+ 模擬 main 種子 CSV(4 檔)
+    monkeypatch.setenv("GITHUB_PAT", "test-token")
+    monkeypatch.setenv("GITHUB_REPO", "jjen0206/stock-screener")
+    monkeypatch.setenv("GITHUB_BRANCH", "watchlist-sync")
+    # PROJECT_ROOT guard 用 tmp_path 會 false → 用 monkeypatch 強制放行,讓 dump 真的執行
+    monkeypatch.setattr(
+        watchlist_snapshot, "_db_inside_project", lambda _: True,
+    )
+    # 用 tmp_path 模擬 SNAPSHOT_DIR + WATCHLIST_CSV(避免污染專案 data/ 目錄)
+    seed_dir = tmp_path / "twse_snapshot"
+    seed_dir.mkdir()
+    seed_csv_path = seed_dir / "watchlist.csv"
+    seed_csv_path.write_text(
+        "stock_id,added_at,note\n"
+        "2454,2026-04-30T22:29:17+00:00,\n"
+        "2317,2026-04-30T22:29:17+00:00,\n"
+        "2330,2026-04-30T22:29:17+00:00,\n"
+        "3680,2026-04-30T22:29:17+00:00,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchlist_snapshot, "SNAPSHOT_DIR", seed_dir)
+    monkeypatch.setattr(watchlist_snapshot, "WATCHLIST_CSV", seed_csv_path)
+
+    # --- Step 2: 模擬 fetch_watchlist_from_github 失敗 → safe_boot_load fallback
+    monkeypatch.setattr(
+        github_sync, "fetch_watchlist_from_github",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated network fail")),
+    )
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "fallback-fetch-exception"
+    # SQLite 此時只有 4 檔(seed)
+    items_after_boot = {it["stock_id"] for it in db.get_watchlist()}
+    assert items_after_boot == {"2454", "2317", "2330", "3680"}
+
+    # --- Step 3: user 在 cloud 上 add 1 檔 → 觸發 _dump_watchlist_snapshot → push
+    # 模擬遠端 watchlist-sync 上是 19 檔真實狀態
+    remote_19_csv = (
+        "stock_id,added_at,note\n"
+        + "".join(
+            f"{sid},2026-04-30T00:00:00+00:00,\n"
+            for sid in [
+                "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+                "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+                "2454", "2317", "2330", "3680", "2308",
+            ]
+        )
+    )
+    import base64
+    import requests as _requests
+    get_resp = MagicMock(spec=_requests.Response)
+    get_resp.status_code = 200
+    get_resp.json.return_value = {
+        "sha": "stalesha",
+        "content": base64.b64encode(remote_19_csv.encode()).decode(),
+    }
+    get_resp.raise_for_status.return_value = None
+    put_resp = MagicMock(spec=_requests.Response)
+    put_resp.status_code = 200
+    put_resp.json.return_value = {"content": {"sha": "x"}}
+    put_resp.raise_for_status.return_value = None
+
+    # 把 dump thread 跑成 sync,讓 push 真的執行完才回(用 monkeypatch 直呼 push_fn)
+    def sync_spawn(push_fn, csv_content, label):
+        push_fn(csv_content)
+
+    monkeypatch.setattr(db, "_spawn_github_push_thread", sync_spawn)
+
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(
+             github_sync.requests, "put", return_value=put_resp,
+         ) as m_put:
+        # user 在 cloud 上加 1 檔 → 觸發 dump → 觸發 push
+        db.add_to_watchlist("9999", note="test add after reboot")
+
+    # 關鍵 assert:regression guard 該攔下,絕不該打 PUT
+    m_put.assert_not_called()
+
+
+def test_boot_remote_success_then_dump_push_proceeds(
+    tmp_db, monkeypatch, tmp_path,
+):
+    """E2E 對照組:fetch_watchlist_from_github 成功 → SQLite 灌真實 19 檔 →
+    user add 1 檔 → dump → push 20 檔(純新增,沒遺失)→ PUT 正常執行。
+    """
+    from unittest.mock import MagicMock, patch
+    from src import github_sync, watchlist_snapshot
+
+    monkeypatch.setenv("GITHUB_PAT", "test-token")
+    monkeypatch.setenv("GITHUB_REPO", "jjen0206/stock-screener")
+    monkeypatch.setenv("GITHUB_BRANCH", "watchlist-sync")
+    monkeypatch.setattr(
+        watchlist_snapshot, "_db_inside_project", lambda _: True,
+    )
+    # SNAPSHOT_DIR 也指到 tmp_path 避免本機真實 watchlist.csv 被 push 路徑的 dump 覆寫
+    seed_dir = tmp_path / "twse_snapshot"
+    seed_dir.mkdir()
+    monkeypatch.setattr(watchlist_snapshot, "SNAPSHOT_DIR", seed_dir)
+    monkeypatch.setattr(
+        watchlist_snapshot, "WATCHLIST_CSV", seed_dir / "watchlist.csv",
+    )
+
+    remote_19_csv = (
+        "stock_id,added_at,note\n"
+        + "".join(
+            f"{sid},2026-04-30T00:00:00+00:00,\n"
+            for sid in [
+                "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+                "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+                "2454", "2317", "2330", "3680", "2308",
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        github_sync, "fetch_watchlist_from_github", lambda: remote_19_csv,
+    )
+
+    result = watchlist_snapshot.safe_boot_load()
+    assert result == "remote"
+    items_after_boot = {it["stock_id"] for it in db.get_watchlist()}
+    assert len(items_after_boot) == 19
+
+    # 然後 add 1 檔 → dump → push 20 檔 → 沒遺失,放行
+    import base64
+    import requests as _requests
+    get_resp = MagicMock(spec=_requests.Response)
+    get_resp.status_code = 200
+    get_resp.json.return_value = {
+        "sha": "old",
+        "content": base64.b64encode(remote_19_csv.encode()).decode(),
+    }
+    get_resp.raise_for_status.return_value = None
+    put_resp = MagicMock(spec=_requests.Response)
+    put_resp.status_code = 200
+    put_resp.json.return_value = {"content": {"sha": "x"}}
+    put_resp.raise_for_status.return_value = None
+
+    def sync_spawn(push_fn, csv_content, label):
+        push_fn(csv_content)
+
+    monkeypatch.setattr(db, "_spawn_github_push_thread", sync_spawn)
+
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(
+             github_sync.requests, "put", return_value=put_resp,
+         ) as m_put:
+        db.add_to_watchlist("9999", note="legit add")
+
+    m_put.assert_called_once()
+
+
 def test_query_page_toggle_remove_existing(monkeypatch, tmp_path):
     """情境 3:對已關注的股票按 toggle → 取消關注。"""
     from streamlit.testing.v1 import AppTest

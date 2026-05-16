@@ -215,3 +215,221 @@ def test_fetch_network_error_returns_none(with_pat):
                       side_effect=requests.ConnectionError("DNS fail")):
         result = github_sync.fetch_watchlist_from_github()
     assert result is None
+
+
+# === Regression guard:守 boot fallback 把遠端 19 檔覆蓋掉的 bug (2026-05-16) ===
+
+
+def _wl_csv(sids: list[str]) -> str:
+    """組 watchlist CSV — 給 regression guard 測試用。"""
+    lines = ["stock_id,added_at,note"]
+    for sid in sids:
+        lines.append(f"{sid},2026-04-30T00:00:00+00:00,")
+    return "\n".join(lines) + "\n"
+
+
+REMOTE_19 = _wl_csv([
+    "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+    "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+    "2454", "2317", "2330", "3680", "2308",
+])
+LOCAL_4_SEED = _wl_csv(["2454", "2317", "2330", "3680"])
+
+
+def test_push_watchlist_blocks_regression_loss_19_to_4(with_pat):
+    """主公 2026-05-16 bug 重現:remote 19 檔 / local 4 檔 → push 拒絕,不打 PUT。"""
+    get_resp = _mock_resp(200, {"sha": "oldsha", "content": _b64(REMOTE_19)})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put") as m_put:
+        ok = github_sync.push_watchlist_to_github(LOCAL_4_SEED)
+    assert ok is False
+    m_put.assert_not_called()
+
+
+def test_push_watchlist_allows_small_legitimate_removal(with_pat):
+    """remote 19 / local 18(移除 1 檔)→ < threshold,放行 PUT。"""
+    local_18 = _wl_csv([
+        "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+        "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+        "2454", "2317", "2330", "3680",  # 砍掉 2308
+    ])
+    get_resp = _mock_resp(200, {"sha": "oldsha", "content": _b64(REMOTE_19)})
+    put_resp = _mock_resp(200, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(local_18)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_allows_pure_addition(with_pat):
+    """remote 19 / local 20(純新增 1 檔)→ 沒任何 loss,放行。"""
+    local_20 = _wl_csv([
+        "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+        "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+        "2454", "2317", "2330", "3680", "2308", "1101",  # 新增 1101
+    ])
+    get_resp = _mock_resp(200, {"sha": "oldsha", "content": _b64(REMOTE_19)})
+    put_resp = _mock_resp(200, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(local_20)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_allows_empty_remote(with_pat):
+    """remote 404 / 完全新檔 → 沒有對照,放行(對應 seed commit 場景)。"""
+    get_resp = _mock_resp(404)
+    put_resp = _mock_resp(201, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(LOCAL_4_SEED)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_threshold_default_blocks_at_3(with_pat):
+    """預設 threshold=3:remote 5 / local 2(遺失 3 檔)→ 拒推。"""
+    remote = _wl_csv(["1101", "2317", "2330", "2454", "3680"])
+    local = _wl_csv(["1101", "2317"])  # 遺失 3
+    get_resp = _mock_resp(200, {"sha": "old", "content": _b64(remote)})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put") as m_put:
+        ok = github_sync.push_watchlist_to_github(local)
+    assert ok is False
+    m_put.assert_not_called()
+
+
+def test_push_watchlist_threshold_below_default_passes(with_pat):
+    """remote 5 / local 3(遺失 2 檔 < threshold 3)→ 放行。"""
+    remote = _wl_csv(["1101", "2317", "2330", "2454", "3680"])
+    local = _wl_csv(["1101", "2317", "2330"])  # 遺失 2
+    get_resp = _mock_resp(200, {"sha": "old", "content": _b64(remote)})
+    put_resp = _mock_resp(200, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(local)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_threshold_env_override(with_pat, monkeypatch):
+    """WATCHLIST_LOSS_THRESHOLD=10 → 遺失 5 檔 < 10,放行。"""
+    monkeypatch.setenv("WATCHLIST_LOSS_THRESHOLD", "10")
+    remote = _wl_csv(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"])
+    local = _wl_csv(["1", "2", "3", "4", "5", "6"])  # 遺失 5
+    get_resp = _mock_resp(200, {"sha": "old", "content": _b64(remote)})
+    put_resp = _mock_resp(200, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(local)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_threshold_env_blocks_below_default(with_pat, monkeypatch):
+    """WATCHLIST_LOSS_THRESHOLD=2 → 遺失 2 檔(預設會放行)該被擋。"""
+    monkeypatch.setenv("WATCHLIST_LOSS_THRESHOLD", "2")
+    remote = _wl_csv(["1101", "2317", "2330", "2454"])
+    local = _wl_csv(["1101", "2317"])  # 遺失 2
+    get_resp = _mock_resp(200, {"sha": "old", "content": _b64(remote)})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put") as m_put:
+        ok = github_sync.push_watchlist_to_github(local)
+    assert ok is False
+    m_put.assert_not_called()
+
+
+def test_push_watchlist_garbage_remote_csv_allows_push(with_pat):
+    """remote 是壞 CSV 解析失敗 → 視為「無可信對照」,放行。
+
+    parse 失敗不該擋住正常 push — 否則一次 remote 壞掉會把所有後續 push 全凍住。
+    """
+    bad_csv = "\x00\x01\x02not-a-csv"
+    get_resp = _mock_resp(200, {"sha": "old", "content": _b64(bad_csv)})
+    put_resp = _mock_resp(200, {"content": {"sha": "x"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_watchlist_to_github(LOCAL_4_SEED)
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_trades_not_affected_by_watchlist_guard(with_pat, monkeypatch):
+    """trades / paper_trades / analyst_targets 沒接 regression guard,
+    模擬 remote 5 row / local 1 row 不該被擋(那些是累積式 snapshot,不適用)。
+    """
+    monkeypatch.delenv("GITHUB_TRADES_PATH", raising=False)
+    remote_trades = (
+        "id,sid,entry_date,return_pct\n"
+        "1,2330,2026-04-30,5.0\n2,2454,2026-04-30,3.0\n"
+        "3,2317,2026-04-30,2.0\n4,3680,2026-04-30,1.0\n"
+        "5,2308,2026-04-30,4.0\n"
+    )
+    local_trades_short = "id,sid,entry_date,return_pct\n1,2330,2026-04-30,5.0\n"
+    get_resp = _mock_resp(200, {"sha": "x", "content": _b64(remote_trades)})
+    put_resp = _mock_resp(200, {"content": {"sha": "y"}})
+    with patch.object(github_sync.requests, "get", return_value=get_resp), \
+         patch.object(github_sync.requests, "put", return_value=put_resp) as m_put:
+        ok = github_sync.push_trades_to_github(local_trades_short)
+    # trades 沒接 regression guard → 即便 row 銳減仍會 PUT
+    assert ok is True
+    m_put.assert_called_once()
+
+
+def test_push_watchlist_409_retry_re_checks_regression(with_pat):
+    """409 SHA 衝突 refetch 後,新 remote 變寬(有人 push 了 19 檔),我們的 4 檔
+    再次跑 regression check → 該被擋,不該第二次 PUT。
+    """
+    get_resp_1 = _mock_resp(
+        200, {"sha": "stale", "content": _b64(_wl_csv(["2330"]))},
+    )
+    # 第一次 GET 只有 1 檔,我們 push 4 檔(會 +3) → 純新增放行
+    # PUT 收到 409 → refetch → 此時 remote 已被別人改成 19 檔 → regression 拒推
+    put_409 = _mock_resp(409, text="conflict")
+    get_resp_2 = _mock_resp(
+        200, {"sha": "fresh", "content": _b64(REMOTE_19)},
+    )
+
+    with patch.object(
+        github_sync.requests, "get",
+        side_effect=[get_resp_1, get_resp_2],
+    ), patch.object(
+        github_sync.requests, "put", side_effect=[put_409],
+    ) as m_put:
+        ok = github_sync.push_watchlist_to_github(LOCAL_4_SEED)
+    assert ok is False
+    # 應該只 PUT 一次（第一次嘗試），refetch 後被 regression guard 攔下
+    assert m_put.call_count == 1
+
+
+# === _watchlist_regression_check unit tests ===
+
+
+def test_regression_check_returns_allow_for_empty_remote():
+    """remote 為空字串 → 視為「無對照」,放行。"""
+    allow, _ = github_sync._watchlist_regression_check("", LOCAL_4_SEED)
+    assert allow is True
+
+
+def test_regression_check_returns_block_for_19_to_4():
+    """遺失 15 檔 >= threshold 3 → 拒推 + reason 描述遺失。"""
+    allow, reason = github_sync._watchlist_regression_check(
+        REMOTE_19, LOCAL_4_SEED,
+    )
+    assert allow is False
+    assert "would lose 15" in reason
+    # reason 該列出至少一個 sid 範例
+    assert any(s in reason for s in ["2308", "2484", "3711", "3105"])
+
+
+def test_regression_check_returns_allow_for_same_sids():
+    """sid 集合相同(只改 added_at)→ 放行。"""
+    new = _wl_csv([
+        "3105", "6223", "3017", "2449", "2344", "2337", "4971",
+        "2303", "2379", "3034", "7810", "4442", "2484", "3711",
+        "2454", "2317", "2330", "3680", "2308",
+    ])
+    allow, _ = github_sync._watchlist_regression_check(REMOTE_19, new)
+    assert allow is True
