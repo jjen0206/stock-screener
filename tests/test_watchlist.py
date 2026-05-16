@@ -478,11 +478,16 @@ def test_boot_fallback_dump_push_blocked_by_regression_guard(
     put_resp.json.return_value = {"content": {"sha": "x"}}
     put_resp.raise_for_status.return_value = None
 
-    # 把 dump thread 跑成 sync,讓 push 真的執行完才回(用 monkeypatch 直呼 push_fn)
-    def sync_spawn(push_fn, csv_content, label):
-        push_fn(csv_content)
+    # 把 push thread 跑成 sync(讓 PUT mock 攔得到),用 stub Thread 替換 threading.Thread
+    class _SyncThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target = target
+            self._args = args
 
-    monkeypatch.setattr(db, "_spawn_github_push_thread", sync_spawn)
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(db.threading, "Thread", _SyncThread)
 
     with patch.object(github_sync.requests, "get", return_value=get_resp), \
          patch.object(
@@ -553,10 +558,15 @@ def test_boot_remote_success_then_dump_push_proceeds(
     put_resp.json.return_value = {"content": {"sha": "x"}}
     put_resp.raise_for_status.return_value = None
 
-    def sync_spawn(push_fn, csv_content, label):
-        push_fn(csv_content)
+    class _SyncThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target = target
+            self._args = args
 
-    monkeypatch.setattr(db, "_spawn_github_push_thread", sync_spawn)
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(db.threading, "Thread", _SyncThread)
 
     with patch.object(github_sync.requests, "get", return_value=get_resp), \
          patch.object(
@@ -565,6 +575,99 @@ def test_boot_remote_success_then_dump_push_proceeds(
         db.add_to_watchlist("9999", note="legit add")
 
     m_put.assert_called_once()
+
+
+def test_concurrent_add_to_watchlist_no_sid_lost(tmp_db):
+    """並發 add 不該遺失 sid — DB 層 INSERT ON CONFLICT 該 concurrent-safe。
+
+    主公提示「只有加沒有減」+ git history 顯示 1101 / 2882 莫名遺失 → 懷疑
+    race condition。這個 test 守住 N 個 thread 同時 add 不同 sid,最終 SQLite
+    該有全部 N 個 sid(沒有任何遺失)。SQLite WAL/journal lock 保證 INSERT atomic。
+    """
+    import threading
+    sids = [f"2{i:03d}" for i in range(20)]  # 2000~2019 共 20 檔
+
+    errors: list[Exception] = []
+
+    def add_worker(sid):
+        try:
+            db.add_to_watchlist(sid, note=f"thread-{sid}")
+        except Exception as ex:  # noqa: BLE001
+            errors.append(ex)
+
+    threads = [
+        threading.Thread(target=add_worker, args=(sid,)) for sid in sids
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"add_to_watchlist threads raised: {errors}"
+    actual = {it["stock_id"] for it in db.get_watchlist()}
+    missing = set(sids) - actual
+    assert not missing, f"並發 add 遺失 sid: {sorted(missing)}"
+
+
+def test_concurrent_idempotent_add_same_sid(tmp_db):
+    """同一 sid 並發 add → 不該插重複,且不該 raise。
+
+    INSERT ON CONFLICT DO UPDATE 該保證 idempotent + concurrent-safe at SQLite level。
+    """
+    import threading
+
+    errors: list[Exception] = []
+
+    def add_same(_):
+        try:
+            db.add_to_watchlist("2330", note="same-sid")
+        except Exception as ex:  # noqa: BLE001
+            errors.append(ex)
+
+    threads = [
+        threading.Thread(target=add_same, args=(i,)) for i in range(20)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"並發 add 同一 sid 拋例外: {errors}"
+    items = db.get_watchlist()
+    assert len(items) == 1
+    assert items[0]["stock_id"] == "2330"
+
+
+def test_dump_runs_after_concurrent_adds_sees_all_sids(tmp_db, monkeypatch):
+    """並發 add N 檔 → dump_to_string 該看到全部 N 檔(read-after-write 該 consistent)。
+
+    守住 dump 路徑的 race 假設:thread 跑 dump_to_string 時讀的 SQLite 反映「啟動那
+    刻」最新狀態。本 test 模擬 push thread 在所有 add 結束後跑,csv_content 該含全部 sid。
+    """
+    from src import watchlist_snapshot
+    import threading
+    sids = [f"3{i:03d}" for i in range(15)]
+
+    threads = [
+        threading.Thread(
+            target=db.add_to_watchlist,
+            kwargs={"stock_id": sid, "note": None},
+        )
+        for sid in sids
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # 模擬 push thread (現在 dump_to_string 在 thread 內讀) — 不走 GITHUB_PAT 路徑
+    csv = watchlist_snapshot.dump_to_string()
+    csv_sids = {
+        line.split(",")[0] for line in csv.strip().splitlines()[1:]
+        if line.strip()
+    }
+    missing = set(sids) - csv_sids
+    assert not missing, f"dump_to_string 沒看到並發加入的 sid: {sorted(missing)}"
 
 
 def test_query_page_toggle_remove_existing(monkeypatch, tmp_path):

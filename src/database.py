@@ -1620,6 +1620,22 @@ def _spawn_github_push_thread(push_fn, csv_content: str, label: str) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+def _push_watchlist_worker(db_path: str | Path | None) -> None:
+    """Push thread 內的 worker:dump SQLite → push GH。
+
+    抽成 module function 讓 tests 能直接呼叫(免去開 thread 的非確定性),
+    並讓 dump_to_string 在 thread 內讀,反映「thread 啟動那刻」最新 SQLite 狀態
+    — 縮短 race window(別 session 加新 sid 但 stale snapshot 蓋掉)。
+    """
+    try:
+        from src.watchlist_snapshot import dump_to_string
+        from src.github_sync import push_watchlist_to_github
+        csv_content = dump_to_string(db_path=db_path)
+        push_watchlist_to_github(csv_content)
+    except Exception as ex:  # noqa: BLE001
+        logger.error("[GH_SYNC] watchlist thread 內未預期錯誤:%s", ex)
+
+
 def _dump_watchlist_snapshot(db_path: str | Path | None) -> None:
     """在 watchlist 變動後把 SQLite 內容 dump 成 CSV(供下次 boot 還原)。
 
@@ -1629,22 +1645,20 @@ def _dump_watchlist_snapshot(db_path: str | Path | None) -> None:
 
     若 dump 真的有寫(回傳 ≥0)且環境有設 GITHUB_PAT,會 fire-and-forget 推到 GitHub;
     沒設 PAT 時不開 thread,本機行為完全不變。
+
+    Race condition 防護:dump_to_string 在 push thread 內(_push_watchlist_worker)讀,
+    讓 thread 跑時看到的 SQLite 反映「thread 啟動那刻」的最新狀態(而非 main thread
+    取 snapshot 那一刻)。搭配 push_watchlist_to_github 的 regression guard 雙重保護。
     """
-    from src.watchlist_snapshot import dump_to_csv, dump_to_string
+    from src.watchlist_snapshot import dump_to_csv
     n = dump_to_csv(db_path=db_path)
     if n < 0:
         return
     if not os.environ.get("GITHUB_PAT"):
         return
-    try:
-        csv_content = dump_to_string(db_path=db_path)
-    except Exception as ex:  # noqa: BLE001
-        logger.error("[GH_SYNC] 取 watchlist csv 字串失敗:%s", ex)
-        return
-    from src.github_sync import push_watchlist_to_github
-    _spawn_github_push_thread(
-        push_watchlist_to_github, csv_content, "watchlist",
-    )
+    threading.Thread(
+        target=_push_watchlist_worker, args=(db_path,), daemon=True,
+    ).start()
 
 
 def _dump_trades_snapshot(db_path: str | Path | None) -> None:

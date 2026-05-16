@@ -156,3 +156,74 @@ git show 6639390:data/twse_snapshot/watchlist.csv > data/twse_snapshot/watchlist
   threshold-3 還不夠用再加。
 - `bulk_add_to_watchlist` 反向(批次刪除)介面引入時,要記得提供「明確跳過 guard」
   的 explicit flag,而非靜默通過。
+
+
+---
+
+## Followup (主公提供關鍵資訊後第二次調查)
+
+主公補:**應該有 ~10 檔**、**只有加沒有減**(從未手動刪)。這明確排除「手動刪除」根因,
+重新審視 git history 後找到**更多遺失事件**:
+
+| 時間 | Commit | 訊息 | sids 進展 |
+|---|---|---|---|
+| 2026-05-01 06:57 | `7bd3e8a` | auto-sync from cloud app | 7 檔含 **1101 + 2882** |
+| 2026-05-06 07:07 | `f7a71b1` | auto-sync from cloud app | 7 檔(**1101 不見了**) |
+| 2026-05-06 07:07 | `f0c575e` | auto-sync from cloud app | 6 檔(**2882 也不見了**) |
+| 2026-05-11 08:30 | `ce55b99` | auto-sync from cloud app | 7 檔(**2308 不見了**,4 檔老股時間戳變種子值) |
+| 2026-05-15 09:26 | `6639390` | auto-sync from cloud app | **19 檔**(2308 又回來) |
+| 2026-05-16 22:42 | `73b4cf0` | auto-sync from cloud app | **4 檔**(本次主公回報) |
+
+「2308 消失又出現」說明同樣的 regression 機制至少觸發過 4 次。**1101 / 2882 永久遺失**
+(沒人手動再加回來)。
+
+### 補充根因:race condition
+
+主公 ★★★ 提示:`_dump_watchlist_snapshot` 是
+1. main thread:`dump_to_csv` (寫 local) → `dump_to_string` (讀 SQLite → CSV 字串)
+2. fire-and-forget thread:`push_watchlist_to_github(csv_content)`
+
+兩個 session 在不同時間點同時 add:
+- A: SQLite write sid_A → main 取 csv = {sid_A} → thread A 啟動
+- B: SQLite write sid_B → main 取 csv = {sid_A, sid_B} → thread B 啟動
+- thread B 先到 GH PUT {sid_A, sid_B} ✅
+- thread A 後到 GH PUT {sid_A}(stale snapshot)→ 409 retry → refetch sha
+  → PUT {sid_A} 又一次 → **sid_B 被覆蓋**
+
+這個 race 只丟 1 檔,**低於 regression guard threshold (3)**,所以
+threshold-3 的 guard 攔不下。
+
+### 補充修法
+
+1. **`_push_watchlist_worker(db_path)`** 抽成 module function,**`dump_to_string` 移到
+   push thread 內執行**。讓 thread 跑時讀的 SQLite 反映「thread 啟動那刻」最新狀態
+   (而非 main thread 取 snapshot 那一刻)。縮短 race window。
+2. **`tests/test_watchlist.py`** 加 3 條 concurrent test:
+   - `test_concurrent_add_to_watchlist_no_sid_lost`: 20 thread 同時 add 不同 sid →
+     全部該在 SQLite
+   - `test_concurrent_idempotent_add_same_sid`: 20 thread 同時 add 同一 sid → 1 row
+   - `test_dump_runs_after_concurrent_adds_sees_all_sids`: 並發 add 後 dump_to_string
+     該看到全部 sid
+
+### 補充還原:full union 不只 19 檔
+
+主公「只有加沒有減」→ 把 git history 中所有曾出現過的 sid 都 union 回去:
+- 從前次的 19 檔基礎,**補加 1101 / 2882**(永久遺失但主公從未手動刪)
+- 每個 sid 用 git history 中第一次出現時的 added_at(真實 user-add 時間),
+  不再用種子的 `2026-04-30T22:29:17` 假時間戳
+- **共 21 檔**
+
+### 還發現:我自己的 e2e test 之前污染了 main 的 watchlist.csv
+
+第一個 commit `4b23f86` 寫進的 watchlist.csv 其實是 test data(timestamps 全為
+`2026-04-30T00:00:00` + 有測試用 sid `9999,note=legit add`)。原因是當時測試
+**只 monkeypatch 了 `_db_inside_project`,沒 patch `SNAPSHOT_DIR` / `WATCHLIST_CSV`**,
+所以 dump 真的寫到專案 `data/twse_snapshot/watchlist.csv`,而我沒檢查就 git add。
+
+這次 followup commit 已修:
+- 測試全程用 `tmp_path` + monkeypatch `SNAPSHOT_DIR` + `WATCHLIST_CSV`
+- 重新跑驗證 watchlist.csv 內容跟測試前一致
+
+教訓 → 加進 memory 「e2e test 改動 SQLite + dump path 時必須完整 monkeypatch
+SNAPSHOT_DIR / WATCHLIST_CSV / DB,任何一個漏 patch 都會污染專案 data/」。
+
