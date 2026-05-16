@@ -1,0 +1,136 @@
+name: Backfill Financials (one-shot manual)
+
+# 補 financials 表(quarterly EPS / ROE)缺漏的全市場資料。
+#
+# 2026-05-16 健診:financials 只覆蓋 1073 / 2127 純股(~50%),長線基本面策略
+# 在沒財報的 1054 檔上跑不了。
+#
+# 一次性手動觸發 — 跑完即可,不放 cron。想再跑到 GH UI > Actions > Backfill
+# Financials > Run workflow。
+#
+# 預估 runtime:~2000 待補檔 × FinMind throttle ~1 call/s + sleep = 30-60 min。
+# 給 GH runner 120 min 上限應該夠。
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "抓近幾年季報(預設 5)"
+        required: false
+        default: "5"
+      force:
+        description: "強制重抓(忽略 financials 已有的 sid)"
+        required: false
+        default: "false"
+      limit:
+        description: "只跑前 N 檔(debug 用,留空 = 全跑)"
+        required: false
+        default: ""
+      sleep:
+        description: "每檔 sleep 秒數(預設 0.5,FinMind 友善)"
+        required: false
+        default: "0.5"
+      dump_csv:
+        description: "結束後 dump financials_quarterly.csv 並 commit(預設 true)"
+        required: false
+        default: "true"
+
+concurrency:
+  group: backfill-financials
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Init universe + preload financials snapshot
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          python scripts/daily_fetch.py || true
+          python -c "
+          from src import database as db
+          db.init_db()
+          n = db.preload_snapshots()
+          print(f'[PRELOAD] {n}')
+          "
+
+      - name: Run financials backfill
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FINMIND_LONG_BACKOFF: "1"
+        run: |
+          ARGS="--years ${{ inputs.years || '5' }}"
+          ARGS="$ARGS --sleep ${{ inputs.sleep || '0.5' }}"
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ "${{ inputs.dump_csv }}" = "true" ]; then ARGS="$ARGS --dump-csv"; fi
+          echo "Running: python scripts/backfill_financials.py $ARGS"
+          python scripts/backfill_financials.py $ARGS
+
+      - name: Verify backfilled rows
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          with db.get_conn() as c:
+              row = c.execute(\"\"\"SELECT
+                  COUNT(*),
+                  COUNT(DISTINCT stock_id),
+                  MIN(period), MAX(period)
+                  FROM financials WHERE period_type='quarterly'\"\"\").fetchone()
+              print(f'[VERIFY] financials.quarterly: {row[0]} rows / {row[1]} 不同 stock_id / 範圍 {row[2]} ~ {row[3]}')
+          "
+
+      - name: Commit & push financials_quarterly.csv
+        if: inputs.dump_csv == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/financials_quarterly.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to financials_quarterly.csv"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): backfill financials.quarterly [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "push failed after 5 retries"
+          exit 1
+
+      - name: Upload backfill log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-financials-log
+          path: logs/*-backfill_financials.log
+          retention-days: 14
