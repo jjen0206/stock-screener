@@ -12,18 +12,6 @@ from typing import Any
 import streamlit as st
 
 
-def _fmt_num(v: Any, fmt: str = "{:.2f}", default: str = "—") -> str:
-    """數字格式化;None / NaN 顯示 default。"""
-    if v is None:
-        return default
-    try:
-        if v != v:  # NaN
-            return default
-        return fmt.format(float(v))
-    except (TypeError, ValueError):
-        return default
-
-
 def _on_add_to_watchlist(stock_id: str) -> None:
     """⭐ 按鈕的 on_click callback。
 
@@ -43,17 +31,6 @@ def _on_remove_from_watchlist(stock_id: str) -> None:
     from src import database as db
     db.remove_from_watchlist(stock_id)
     st.toast(f"已移除 {stock_id}", icon="🗑️")
-
-
-def _fire_emoji(n_signals: int) -> str:
-    """信號數 → 🔥 視覺。"""
-    if n_signals <= 0:
-        return ""
-    if n_signals == 1:
-        return "🔥"
-    if n_signals == 2:
-        return "🔥🔥"
-    return "🔥🔥🔥"  # 3+
 
 
 def _build_consensus_badge_html(consensus: dict | None) -> str:

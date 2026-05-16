@@ -82,46 +82,6 @@ def _load_ohlc_panel(min_date: str, db_path: str | Path | None = None) -> pd.Dat
     return df
 
 
-def _simulate_outcome_vec(
-    entries: pd.DataFrame,
-) -> tuple[pd.Series, pd.Series]:
-    """對每個 (sid, t) 撈 D+1..D+5 的 OHLC,模擬 simulate_outcome 結果。
-
-    entries: 必含 columns ['stock_id', 't_idx', 'entry_close', 'future_ohlc']
-             future_ohlc: list[(high, low, close)] 長度 ≤ HOLD_DAYS
-
-    回 (outcome_series '*win'/'lose', return_pct_series)。
-    """
-    outcomes: list[str] = []
-    returns: list[float] = []
-    for _, row in entries.iterrows():
-        ep = row["entry_close"]
-        future = row["future_ohlc"]
-        if ep is None or ep <= 0 or not future:
-            outcomes.append("lose")
-            returns.append(0.0)
-            continue
-        target_price = ep * (1 + TARGET_PCT)
-        stop_price = ep * (1 - STOP_PCT)
-        out = None
-        last_close = ep
-        for (high, low, close) in future:
-            last_close = close
-            # 同日兩邊都觸 → 保守視為先觸停損(對齊 src/backtest.simulate_outcome)
-            if low <= stop_price:
-                out = ("lose", -STOP_PCT)
-                break
-            if high >= target_price:
-                out = ("win", TARGET_PCT)
-                break
-        if out is None:
-            final_return = (last_close - ep) / ep
-            out = ("win" if final_return > 0 else "lose", final_return)
-        outcomes.append(out[0])
-        returns.append(out[1])
-    return pd.Series(outcomes), pd.Series(returns)
-
-
 def _find_gap_up_fires(
     panel: pd.DataFrame,
     min_t_date: str,

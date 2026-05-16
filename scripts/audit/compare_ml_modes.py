@@ -116,10 +116,10 @@ def _print_comparison_table(
         wr = total_wins / total_fires if total_fires else 0.0
         return total_fires, total_wins, wr
 
-    f1, w1, wr1 = _agg(mode1)
-    f2, w2, wr2 = _agg(mode2)
-    f3, w3, wr3 = _agg(mode3)
-    f4, w4, wr4 = _agg(mode4)
+    f1, _, wr1 = _agg(mode1)
+    f2, _, wr2 = _agg(mode2)
+    f3, _, wr3 = _agg(mode3)
+    f4, _, wr4 = _agg(mode4)
     def cell_summary(f: int, wr: float) -> str:
         return f"{wr * 100:5.1f}% ({f})"
     print(
