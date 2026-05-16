@@ -1,0 +1,123 @@
+name: Backfill Pick SHAP (one-shot manual)
+
+# 補歷史 daily_picks 對應的 SHAP top-feature 解釋(daily-notify 沒跑那幾天會缺)。
+#
+# 一次性手動觸發 — 跑完即可,所以不放 cron。想再跑到 GH UI > Actions >
+# Backfill Pick SHAP > Run workflow,改 start/end 就行。
+#
+# SHAP 計算純本地 CPU,無 API quota。典型 90 天 × ~10 picks/day × ~150ms/pick
+# = ~2 min。給 GH runner 30 min 上限綽綽有餘。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "起始日 (ISO,含,預設今天 -90 天)"
+        required: false
+        default: ""
+      end:
+        description: "終止日 (ISO,含,預設今天)"
+        required: false
+        default: ""
+      force:
+        description: "強制覆寫已有 SHAP (預設 false)"
+        required: false
+        default: "false"
+      dump_csv:
+        description: "結束後 dump pick_shap_explanations.csv 進 snapshot 並 commit (預設 true)"
+        required: false
+        default: "true"
+
+concurrency:
+  group: backfill-pick-shap
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # SHAP 不一定在 requirements.txt(lazy import),這裡裝確保 runner 有
+          pip install shap
+
+      - name: Preload daily_picks + existing SHAP CSV → SQLite
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          # preload_snapshots 讓 runner 有 daily_picks 可撈
+          n = db.preload_snapshots()
+          print(f'[PRELOAD] {n}')
+          "
+
+      - name: Run SHAP backfill
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
+          if [ -n "${{ inputs.end }}"   ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          if [ "${{ inputs.dump_csv }}" = "true" ]; then ARGS="$ARGS --dump-csv"; fi
+          echo "Running: python scripts/backfill_pick_shap.py $ARGS"
+          python scripts/backfill_pick_shap.py $ARGS
+
+      - name: Verify backfilled rows
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          with db.get_conn() as c:
+              row = c.execute('SELECT COUNT(*), COUNT(DISTINCT pick_date), MIN(pick_date), MAX(pick_date) FROM pick_shap_explanations').fetchone()
+              print(f'[VERIFY] pick_shap_explanations: {row[0]} rows / {row[1]} 不同 pick_date / 範圍 {row[2]} ~ {row[3]}')
+          "
+
+      - name: Commit & push pick_shap_explanations.csv
+        if: inputs.dump_csv == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/pick_shap_explanations.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to pick_shap_explanations.csv"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): backfill pick_shap_explanations [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "push failed after 5 retries"
+          exit 1
+
+      - name: Upload backfill log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-pick-shap-log
+          path: logs/*-backfill_pick_shap.log
+          retention-days: 14
