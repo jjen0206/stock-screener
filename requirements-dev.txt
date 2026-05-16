@@ -1,0 +1,8 @@
+# Dev / test only — 線上 GitHub Actions / 本機開發環境用
+# 安裝方式:pip install -r requirements.txt -r requirements-dev.txt
+
+# 測試
+pytest>=8.0.0,<10.0.0
+
+# Lint / format
+ruff>=0.4.0,<1.0.0

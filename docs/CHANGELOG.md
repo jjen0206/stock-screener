@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-05-15 — Round 1 清理維護
+
+### Changed
+- **branches**:刪 8 條已合 main 的 feature branch(local + origin):`funny-khayyam`(vbt sharpe)、`wonderful-carson`(TPEx warnings)、`fervent-mclean`(annotate-only)、`gifted-nightingale`(gap_up rule)、`optimistic-kirch`(ML calibration)、`hardcore-jennings`(regime gating)、`affectionate-cray`(consensus)、`dazzling-poitras`(theme heat)
+- **worktrees**:清掉 3 個已合 main 且閒置的 worktree(`cool-solomon`、`nervous-maxwell`、`clever-noether`)
+- **`requirements.txt`** 加版本範圍 lock(`>=X,<NEXT_MAJOR`),補上漏宣告的 `requests`,拆 `pytest`/`ruff` 到新 `requirements-dev.txt`
+- **新 `requirements-dev.txt`**:`pytest>=8.0.0,<10.0.0` + `ruff>=0.4.0,<1.0.0`(production image 不該帶測試/lint 工具)
+
+### Added
+- **`scripts/cleanup_artifacts.py`**:dry-run 預設,`--execute` 才真動;支援 VACUUM `cache.db` / 刪 `logs/*.log` > 7 天 / 刪 `models/**/*.bak` > 30 天(每組最新一份永遠保留)
+- **`docs/dependency-audit-2026-05-15.md`**:requirements 變更全紀錄
+- **`docs/workflow-audit-2026-05-15.md`**:16 條 GH Actions workflow 用途盤點 + cron 對齊檢查 + 下一步整合候選
+- **`docs/storage-audit-2026-05-15.md`**:本機 repo 占用 ~33MB 量測 + cleanup 工具用法
+
+### Notes
+- workflow audit 列了一個明確重複(`retrain-ml.yml` × `ml-weekly-retrain.yml`),**Round 1 不動**,等主公拍板下一步
+- 本輪 6 份 `*-2026-05-15.md` task spec 整合到本檔(下方),原檔刪除(commit history 可溯源)
+
+---
+
 ## 2026-05-15 — 警示股 annotate-only(amendment:不替主公做隱藏決定)
 
 ### Changed
@@ -56,6 +76,67 @@
 - 主公昨天買到違約交割股,要實作 ⚠️ 警示股 filter 避免未來再撞 — root cause 是無資料源、無濾鏡、無 UI 提示三層全空
 - 設計分硬擋 / soft 降權雙層:違約交割 + 全額交割(picks 真會卡停損 → 直接剔);注意 / 處置 / 變更交易方法(資訊性訊號 → soft 降權留在 picks 但排後面)
 - TPEx 對應 endpoint 暫 TODO,後續 follow-up
+
+---
+
+## 2026-05-15 — May 15 feature wave(6 件批次合併)
+
+> 同日合進 main 的 6 個 feature branch,整合自原本各自的 `*-2026-05-15.md` task spec(已隨 Round 1 清理刪除)。每段附原 doc 的核心結論,細節走 `git log`/`git show` 追溯。
+
+### Added — vectorbt grid Sharpe N-膨脹修法
+- **問題**:`src/vbt_backtest.py` grid search 用 `trade-level Sharpe = mean/std × sqrt(N)`,N 是 trade 筆數。N=6000+ 時 sqrt(N) ≈ 77.5× 線性放大,跨策略 / 不同 N 比較失去意義
+- **修法**:新 `_compute_daily_sharpe()` helper,把 trade returns 歸到 exit 當天 reindex 完整交易日序列(沒交易日 = 0 報酬),用 daily 報酬序列算 annualized Sharpe (× sqrt(252))
+- **新欄位**:`sharpe_daily` 並列舊欄 `sharpe`(deprecated)。UI 預設用新欄排序 + 顯示
+- **Branch**:`claude/funny-khayyam-d33b7d`
+
+### Added — gap_up 策略最終決策(rule-based + 拔掉 ML 過濾)
+- **症狀**:gap_up walk-forward ROC AUC = 0.4926(接近 random),`max_depth=5 / min_samples_leaf=10` 微改善後仍卡住
+- **發現**:gap_up 訊號**有 edge** (+7.3pp vs baseline) 但**邊緣**(48% 沒過 50%)。真正 sub-edge 在 `vol_ratio` 1.5-3x sweet spot(WR 50.3%),`>3x` 群 WR 44.8%
+- **決策**:選路 B —「rule-based 過濾收緊到甜蜜點 + 下架 ML 過濾」
+  - 加 `gap_vol_ratio_max=3.0` rule(+1.4pp 提升,51.6% vs 50.2%)
+  - 從 `STRATEGY_ML_THRESHOLDS` 移掉 `gap_up`(WF ROC 0.49 的 model 等於 noise filter)
+  - 從 `STRATEGY_RF_PARAMS` / `eval_walkforward.DEFAULT_PER_STRATEGY` 移除 → 停訓 `gap_up.pkl`
+- **Backtest 252d WR**:51.6%(vs baseline 40.7%,edge +10.9pp)
+- **Branch**:`claude/gifted-nightingale-700ce8`
+
+### Added — ML 機率校準 (probability calibration)
+- **問題**:RF `predict_proba` over-confidence — UI 顯「AI 勝率 70%」實際只命中 55%(誤導決策)
+- **修法**:base RF 訓完留**最後 20% 樣本(time-based holdout)**fit `IsotonicRegression` calibrator;predict 時 raw_prob → calibrator.transform → 校正 prob
+- **新檔**:`models/calibrators/{strategy}.pkl`,跟 base model 同生命週期 retrain
+- **Branch**:`claude/optimistic-kirch-72eabe`
+
+### Added — 大盤 Regime Gating(推薦數量 + ML threshold 動態調整)
+- **動機**:歷史 backtest 顯示大盤空頭時所有策略 hit rate 一起掉 — 但舊系統推薦數量 + threshold 沒根據 regime 動態調整,空頭時還照常推 10 檔 = 拿石頭砸自己腳
+- **設計**:三層 regime(本模組獨立,跟 `src/market_regime.py` 並存)
+  | Regime | 條件 | 短線上限 | 長線上限 | ML threshold uplift | Caption |
+  |--------|------|----------|----------|---------------------|---------|
+  | bull | 5MA>20MA>60MA + 60MA 斜率 > +0.5% | 10 | 10 | 0.00 | 📈 |
+  | range | MA 交錯 / 斜率平 / correction | 5 | 7 | +0.05 | 📊 |
+  | bear | 5MA<20MA<60MA + 60MA 斜率 < -0.5% | 2 | 5 | +0.15 | 📉 + ⚠️ |
+- **跟 `market_regime.py` 區隔**:`market_regime` 是「策略類別篩選」(4-tier 看 close vs MA);`regime_gating` 是「推薦數量 + threshold 縮量」(3-tier 看斜率)
+- **Branch**:`claude/hardcore-jennings-3b729f`
+
+### Added — 跨策略共識加成 (consensus boost)
+- **動機**:17 套策略各自跑 Top N,「同一檔被多策略同時看見」是被丟掉的強訊號 — 歷史 backtest 顯示這類個股 precision 比單策略高 10~15%
+- **設計**:用「**類別維度**」共識(跨策略類別 — 趨勢/反轉/籌碼/動能/基本面/殖利率/大盤相對 7 類)優於「票數維度」(同類別兩策略亮 = 同現象兩 lens)
+- **計分**:在原 `score = ml_prob × strategy_weight` 上加 multiplier(2 類別 = ×1.05,3 類別 = ×1.10,4+ 類別 = ×1.15)
+- **UI**:推播 + 卡片加 ⭐ badge 標出共識股
+- **Branch**:`claude/affectionate-cray-b477ec`
+
+### Added — 題材熱度動態權重(冷題材 hard exclude)
+- **起因**:5 日題材表現 — 🔥 HBM/矽光子/CoWoS 噴(+5~9%);🧊 重電/國防/低軌衛星 修正(-0.6~-10%)。主公要冷題材暫時降權
+- **v1**(內部):soft 降權 ×0.7
+- **v2 拍板**:**hard exclude** — 冷題材成分股直接不推播。理由:soft 降權雜訊大,擋掉乾淨
+- **公式**:對 `data/themes/*.yaml` 每個題材撈成分股近 5 日:
+  ```
+  heat_score = avg_return × 0.6 + win_rate × 0.4
+  ```
+  熱題材 → score multiplier ×1.10;冷題材 → 排除
+- **Branch**:`claude/dazzling-poitras-209d36`
+
+### Notes(整合 wave 共通)
+- 本批合併同時觸動 picks 排序(`_select_top_picks`):consensus boost + theme heat multiplier 都在 score 階段,regime gating 在 truncate 階段。三者疊加效果預期下週開始觀察
+- ML 校準 + gap_up 拔 ML threshold + regime threshold uplift 三件事一起改了「ML 介入推播」的 plumbing — 若推播數量明顯掉,先查 regime(空頭時 truncate 到 2 是 by design)
 
 ---
 
