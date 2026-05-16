@@ -239,7 +239,6 @@ def train_one(
     train_df = train_df.sort_values(["date"], kind="stable").reset_index(drop=True)
     X = train_df[ml_predictor.FEATURE_NAMES].copy()
     y = train_df["label"].astype(int)
-    dates = train_df["date"]
 
     rf_params = _rf_params_for(strategy_name)
     base_rf_kwargs = {
