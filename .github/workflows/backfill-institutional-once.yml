@@ -1,0 +1,140 @@
+name: Backfill Institutional (one-shot manual)
+
+# 補 institutional 表 2024-01-02 ~ 2025-11-03 的 22 個月歷史(法人籌碼 long backtest 用)。
+#
+# 這支 workflow 是「**一次性**」用的 — 跑完 22 月就不該再觸發,所以不放 cron。
+# 想再跑的時候到 GH UI > Actions > Backfill Institutional > Run workflow,
+# 改 start/end 補其他區間。
+#
+# 完整 22 月: ~440 工作日 × 2 endpoints × (HTTP + sleep) ≈ 30-60 min。
+# 給 GH runner 120 min 上限應該綽綽有餘。
+#
+# 結果:更新 data/twse_snapshot/institutional.csv 跟 commit 回 main,讓 Streamlit
+# Cloud 下次 reload 就有完整歷史。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "起始日 (ISO,含)"
+        required: false
+        default: "2024-01-02"
+      end:
+        description: "終止日 (ISO,含)"
+        required: false
+        default: "2025-11-03"
+      sleep:
+        description: "每個日期間 sleep 秒數 (預設 2.5,別調太低會被 ban)"
+        required: false
+        default: "2.5"
+      dump_csv:
+        description: "結束後 dump CSV 進 snapshot 並 commit (預設 true)"
+        required: false
+        default: "true"
+
+concurrency:
+  group: backfill-institutional
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Preload existing institutional.csv → SQLite (skip already-fetched dates)
+        run: |
+          python -c "
+          import pandas as pd
+          from pathlib import Path
+          from src import database as db
+          db.init_db()
+          p = Path('data/twse_snapshot/institutional.csv')
+          if p.exists():
+              df = pd.read_csv(p, dtype={'stock_id': str})
+              if not df.empty:
+                  records = df.to_dict('records')
+                  for r in records:
+                      for k, v in list(r.items()):
+                          if pd.isna(v): r[k] = None
+                  db.upsert_institutional(records)
+                  print(f'[PRELOAD] {len(records)} rows from CSV → SQLite')
+          else:
+              print('[PRELOAD] no existing institutional.csv')
+          "
+
+      - name: Run backfill (TWSE + TPEx, FinMind fallback)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          python scripts/backfill_institutional.py \
+            --start "${{ inputs.start }}" \
+            --end "${{ inputs.end }}" \
+            --sleep "${{ inputs.sleep }}" \
+            --max-retries 3 \
+            --progress-every 25 \
+            $([ "${{ inputs.dump_csv }}" = "true" ] && echo "--dump-csv")
+
+      - name: Verify backfilled rows
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          with db.get_conn() as c:
+              n = c.execute('SELECT COUNT(*) FROM institutional WHERE date BETWEEN ? AND ?', ('${{ inputs.start }}', '${{ inputs.end }}')).fetchone()[0]
+              days = c.execute('SELECT COUNT(DISTINCT date) FROM institutional WHERE date BETWEEN ? AND ?', ('${{ inputs.start }}', '${{ inputs.end }}')).fetchone()[0]
+              print(f'[VERIFY] {n} rows across {days} unique dates in [${{ inputs.start }}, ${{ inputs.end }}]')
+              row = c.execute('SELECT MIN(date), MAX(date) FROM institutional').fetchone()
+              print(f'[VERIFY] institutional 覆蓋區間: {row[0]} ~ {row[1]}')
+          "
+
+      - name: Commit & push updated institutional.csv
+        if: inputs.dump_csv == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/institutional.csv
+          if git diff --staged --quiet; then
+            echo "No changes to institutional.csv"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): backfill institutional ${{ inputs.start }} ~ ${{ inputs.end }} [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              echo "rebase failed — abort and bail"
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "push OK on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), retry"
+            sleep $((i * 5))
+          done
+          echo "push failed after 5 retries"
+          exit 1
+
+      - name: Upload backfill log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-institutional-log
+          path: logs/*-backfill_institutional.log
+          retention-days: 14
