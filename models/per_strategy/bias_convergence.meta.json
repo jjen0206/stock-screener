@@ -1,75 +1,75 @@
 {
   "strategy": "bias_convergence",
-  "trained_at": "2026-05-14T02:26:02+00:00",
-  "samples": 2685,
-  "wins": 845,
-  "win_rate": 0.31471135940409684,
+  "trained_at": "2026-05-16T20:08:45+00:00",
+  "samples": 3602,
+  "wins": 1124,
+  "win_rate": 0.31204886174347585,
   "status": "trained",
-  "oob_score": 0.6379888268156425,
+  "oob_score": 0.6338145474736258,
   "feature_importances": [
     {
       "name": "atr_normalized",
-      "importance": 0.13621339809373467
-    },
-    {
-      "name": "macd_dif",
-      "importance": 0.12639453503599313
+      "importance": 0.1431534067797668
     },
     {
       "name": "macd_osc",
-      "importance": 0.12342647205471269
+      "importance": 0.13115904815527626
     },
     {
-      "name": "kd_k",
-      "importance": 0.11878108097478834
-    },
-    {
-      "name": "bb_position",
-      "importance": 0.11665856542771347
-    },
-    {
-      "name": "kd_d",
-      "importance": 0.11496665342602526
+      "name": "macd_dif",
+      "importance": 0.1260279960933881
     },
     {
       "name": "bias_pct",
-      "importance": 0.1142737692734662
+      "importance": 0.11272713705792965
     },
     {
       "name": "vol_ratio",
-      "importance": 0.10738429013098626
+      "importance": 0.11257300929313896
     },
     {
-      "name": "ma_alignment",
-      "importance": 0.010118488124241069
+      "name": "kd_k",
+      "importance": 0.11121222824325501
     },
     {
-      "name": "is_theme_member",
-      "importance": 0.008884795574938388
+      "name": "kd_d",
+      "importance": 0.10895025219578545
     },
     {
-      "name": "inst_5d_zscore",
-      "importance": 0.005721444521571294
+      "name": "bb_position",
+      "importance": 0.10788325093627847
     },
     {
       "name": "inst_5d",
-      "importance": 0.004858800786065015
+      "importance": 0.010815515160674596
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.009001378415070744
     },
     {
       "name": "inst_10d",
-      "importance": 0.0045466879914241864
+      "importance": 0.008721677102445924
     },
     {
       "name": "holders_pct_change_4w",
-      "importance": 0.0041587188883597265
+      "importance": 0.0072546265897087785
     },
     {
-      "name": "regime_dummy",
-      "importance": 0.002303130241744597
+      "name": "inst_5d_zscore",
+      "importance": 0.005824582331639702
     },
     {
       "name": "holders_delta_w_zscore",
-      "importance": 0.0013091694542358135
+      "importance": 0.002459414377318143
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0022364772683234496
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.0
     }
   ],
   "feature_names": [
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "isotonic",
+    "n_holdout": 720,
+    "raw_brier": 0.1788491284770327,
+    "calibrated_brier": 0.09327752363805632,
+    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/bias_convergence.pkl"
+  }
 }

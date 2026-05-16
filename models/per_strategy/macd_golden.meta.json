@@ -1,67 +1,63 @@
 {
   "strategy": "macd_golden",
-  "trained_at": "2026-05-14T02:27:00+00:00",
-  "samples": 260,
-  "wins": 99,
-  "win_rate": 0.38076923076923075,
+  "trained_at": "2026-05-16T20:10:04+00:00",
+  "samples": 368,
+  "wins": 138,
+  "win_rate": 0.375,
   "status": "trained",
-  "oob_score": 0.573076923076923,
+  "oob_score": 0.5597826086956522,
   "feature_importances": [
     {
       "name": "atr_normalized",
-      "importance": 0.19417570242187476
-    },
-    {
-      "name": "macd_osc",
-      "importance": 0.13592397120552088
+      "importance": 0.15271867198633224
     },
     {
       "name": "kd_k",
-      "importance": 0.13252419308372795
-    },
-    {
-      "name": "kd_d",
-      "importance": 0.11308560117104316
-    },
-    {
-      "name": "bias_pct",
-      "importance": 0.10721412063733292
-    },
-    {
-      "name": "vol_ratio",
-      "importance": 0.10715202929351235
+      "importance": 0.15169258950343323
     },
     {
       "name": "macd_dif",
-      "importance": 0.10667882381400763
+      "importance": 0.1252484901174855
+    },
+    {
+      "name": "kd_d",
+      "importance": 0.12429591703452719
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.11661919973696999
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.1131562226039193
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.10605657578416923
     },
     {
       "name": "bb_position",
-      "importance": 0.09900286938835827
-    },
-    {
-      "name": "is_theme_member",
-      "importance": 0.0015548732116823995
-    },
-    {
-      "name": "ma_alignment",
-      "importance": 0.00131462614989434
-    },
-    {
-      "name": "holders_pct_change_4w",
-      "importance": 0.0010034656464637118
-    },
-    {
-      "name": "holders_delta_w_zscore",
-      "importance": 0.0003697239765814657
-    },
-    {
-      "name": "inst_5d",
-      "importance": 0.0
+      "importance": 0.10368619345270529
     },
     {
       "name": "inst_10d",
-      "importance": 0.0
+      "importance": 0.0022554864353124073
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.001761135233468837
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.0009773543264453416
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.0007719931223176183
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0007601706629138055
     },
     {
       "name": "inst_5d_zscore",
@@ -69,6 +65,10 @@
     },
     {
       "name": "regime_dummy",
+      "importance": 0.0
+    },
+    {
+      "name": "is_theme_member",
       "importance": 0.0
     }
   ],
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 74,
+    "raw_brier": 0.13832929473192543,
+    "calibrated_brier": 0.14898724193643273,
+    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/macd_golden.pkl"
+  }
 }

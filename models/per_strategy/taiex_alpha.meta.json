@@ -1,74 +1,74 @@
 {
   "strategy": "taiex_alpha",
-  "trained_at": "2026-05-14T02:34:16+00:00",
-  "samples": 2248,
-  "wins": 1161,
-  "win_rate": 0.516459074733096,
+  "trained_at": "2026-05-16T20:19:18+00:00",
+  "samples": 2648,
+  "wins": 1305,
+  "win_rate": 0.4928247734138973,
   "status": "trained",
-  "oob_score": 0.6045373665480427,
+  "oob_score": 0.5944108761329305,
   "feature_importances": [
     {
       "name": "macd_dif",
-      "importance": 0.16747547232538584
+      "importance": 0.16212811900442894
     },
     {
       "name": "atr_normalized",
-      "importance": 0.15425040849215393
+      "importance": 0.15022783487272381
     },
     {
       "name": "kd_d",
-      "importance": 0.12242695226129192
-    },
-    {
-      "name": "macd_osc",
-      "importance": 0.10310093461702995
+      "importance": 0.11609803949294144
     },
     {
       "name": "vol_ratio",
-      "importance": 0.1022410643705097
+      "importance": 0.11166941374988217
     },
     {
       "name": "kd_k",
-      "importance": 0.099769927352316
+      "importance": 0.10866732706555872
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.10307227370888188
     },
     {
       "name": "bias_pct",
-      "importance": 0.0938254332016765
+      "importance": 0.09600830171384322
     },
     {
       "name": "bb_position",
-      "importance": 0.08198748921192626
+      "importance": 0.08230749403358936
     },
     {
       "name": "holders_pct_change_4w",
-      "importance": 0.02526414131347553
-    },
-    {
-      "name": "is_theme_member",
-      "importance": 0.019613815895629397
-    },
-    {
-      "name": "holders_delta_w_zscore",
-      "importance": 0.011680524249853845
+      "importance": 0.023785134481024393
     },
     {
       "name": "ma_alignment",
-      "importance": 0.010771782666818963
+      "importance": 0.014568306722049515
     },
     {
-      "name": "inst_10d",
-      "importance": 0.0027240624662094037
+      "name": "holders_delta_w_zscore",
+      "importance": 0.012181818877310197
     },
     {
       "name": "inst_5d",
-      "importance": 0.0027023461289047753
+      "importance": 0.009012531116449684
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.008455387984516045
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.0021656454468178825
+      "importance": 0.0018180171768007068
     },
     {
       "name": "regime_dummy",
+      "importance": 0.0
+    },
+    {
+      "name": "is_theme_member",
       "importance": 0.0
     }
   ],
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "isotonic",
+    "n_holdout": 530,
+    "raw_brier": 0.17565690078438495,
+    "calibrated_brier": 0.11358822073042299,
+    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/taiex_alpha.pkl"
+  }
 }

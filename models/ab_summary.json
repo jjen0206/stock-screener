@@ -1,0 +1,44 @@
+{
+  "old_ts": "2026-05-16T19:55:12+00:00",
+  "new_ts": "2026-05-16T20:20:59+00:00",
+  "tolerance": 0.02,
+  "force": false,
+  "decisions": {
+    "bb_lower_rebound": {
+      "verdict": "KEEP",
+      "old_roc": 0.4848133033117553,
+      "new_roc": 0.4848133033117553
+    },
+    "bias_convergence": {
+      "verdict": "KEEP",
+      "old_roc": 0.5738735884199228,
+      "new_roc": 0.5738735884199228
+    },
+    "big_holder_inflow": {
+      "verdict": "KEEP",
+      "old_roc": 0.5981360585564914,
+      "new_roc": 0.6041796882673013
+    },
+    "macd_golden": {
+      "verdict": "KEEP",
+      "old_roc": 0.607843137254902,
+      "new_roc": 0.607843137254902
+    },
+    "short_pick": {
+      "verdict": "KEEP",
+      "old_roc": 0.6410637198778761,
+      "new_roc": 0.6410637198778761
+    },
+    "taiex_alpha": {
+      "verdict": "KEEP",
+      "old_roc": 0.6020856448920994,
+      "new_roc": 0.6020856448920994
+    },
+    "volume_breakout": {
+      "verdict": "KEEP",
+      "old_roc": 0.5179334757669589,
+      "new_roc": 0.5179334757669589
+    }
+  },
+  "rolled_back": []
+}

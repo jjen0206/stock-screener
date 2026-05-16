@@ -1,74 +1,74 @@
 {
   "strategy": "gap_up",
-  "trained_at": "2026-05-15T02:58:50+00:00",
-  "samples": 774,
-  "wins": 347,
-  "win_rate": 0.4483204134366925,
+  "trained_at": "2026-05-16T20:16:48+00:00",
+  "samples": 495,
+  "wins": 235,
+  "win_rate": 0.47474747474747475,
   "status": "trained",
-  "oob_score": 0.5297157622739018,
+  "oob_score": 0.509090909090909,
   "feature_importances": [
     {
-      "name": "macd_dif",
-      "importance": 0.16442548375761523
-    },
-    {
-      "name": "macd_osc",
-      "importance": 0.14962409868973875
+      "name": "vol_ratio",
+      "importance": 0.15117536783836313
     },
     {
       "name": "kd_d",
-      "importance": 0.13709653829487525
-    },
-    {
-      "name": "atr_normalized",
-      "importance": 0.11699213452053901
+      "importance": 0.1453778879521843
     },
     {
       "name": "kd_k",
-      "importance": 0.11342612768563186
+      "importance": 0.12413895064753612
     },
     {
-      "name": "vol_ratio",
-      "importance": 0.11226274691137825
+      "name": "macd_osc",
+      "importance": 0.1225993855496294
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.12184478322632071
     },
     {
       "name": "bias_pct",
-      "importance": 0.10900145580990485
+      "importance": 0.11476852550652404
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.10620549080213092
     },
     {
       "name": "bb_position",
-      "importance": 0.06007625504441616
+      "importance": 0.06618867061083775
     },
     {
       "name": "holders_pct_change_4w",
-      "importance": 0.010108336233186922
+      "importance": 0.014877081481684507
     },
     {
       "name": "holders_delta_w_zscore",
-      "importance": 0.009682046333799963
-    },
-    {
-      "name": "is_theme_member",
-      "importance": 0.00611118017564498
+      "importance": 0.013406777641864048
     },
     {
       "name": "inst_10d",
-      "importance": 0.005004632636059146
+      "importance": 0.006587587106978533
     },
     {
       "name": "inst_5d",
-      "importance": 0.0045275203248178976
+      "importance": 0.005258087741485258
     },
     {
       "name": "ma_alignment",
-      "importance": 0.0016614435823917146
+      "importance": 0.004811420506284283
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.0
+      "importance": 0.0027599833881769916
     },
     {
       "name": "regime_dummy",
+      "importance": 0.0
+    },
+    {
+      "name": "is_theme_member",
       "importance": 0.0
     }
   ],
@@ -97,6 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 5,
-  "min_samples_leaf": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 99,
+    "raw_brier": 0.15142486282150133,
+    "calibrated_brier": 0.15602183750908707,
+    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/gap_up.pkl"
+  }
 }

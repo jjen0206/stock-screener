@@ -1,71 +1,71 @@
 {
   "strategy": "big_holder_inflow",
-  "trained_at": "2026-05-14T02:35:11+00:00",
-  "samples": 388,
-  "wins": 231,
-  "win_rate": 0.595360824742268,
+  "trained_at": "2026-05-16T20:20:54+00:00",
+  "samples": 1670,
+  "wins": 779,
+  "win_rate": 0.4664670658682635,
   "status": "trained",
-  "oob_score": 0.7010309278350515,
+  "oob_score": 0.6892215568862275,
   "feature_importances": [
     {
-      "name": "kd_d",
-      "importance": 0.12699203271073592
+      "name": "atr_normalized",
+      "importance": 0.14514248622497672
     },
     {
       "name": "macd_osc",
-      "importance": 0.10967280906161854
+      "importance": 0.138885466791544
     },
     {
-      "name": "atr_normalized",
-      "importance": 0.10395793661720512
-    },
-    {
-      "name": "kd_k",
-      "importance": 0.09540291471358699
-    },
-    {
-      "name": "bias_pct",
-      "importance": 0.09472958333962223
+      "name": "kd_d",
+      "importance": 0.12689704434969715
     },
     {
       "name": "macd_dif",
-      "importance": 0.08793033959122278
+      "importance": 0.12520871538302203
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.10649614840729014
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.10102835786021137
     },
     {
       "name": "vol_ratio",
-      "importance": 0.08715002429968532
-    },
-    {
-      "name": "holders_pct_change_4w",
-      "importance": 0.08481852186441668
+      "importance": 0.08593711148542271
     },
     {
       "name": "bb_position",
-      "importance": 0.08190237512454535
-    },
-    {
-      "name": "holders_delta_w_zscore",
-      "importance": 0.050541604052447356
-    },
-    {
-      "name": "inst_10d",
-      "importance": 0.030655551513475682
-    },
-    {
-      "name": "inst_5d",
-      "importance": 0.019021673086526004
+      "importance": 0.08580249313097489
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.015069457122357462
+      "importance": 0.022005876976091843
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.0195198017500924
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.019132059611762918
     },
     {
       "name": "ma_alignment",
-      "importance": 0.006268952491722
+      "importance": 0.010928871379740216
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.0074674875251196085
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.005548079124054046
     },
     {
       "name": "regime_dummy",
-      "importance": 0.005886224410832608
+      "importance": 0.0
     },
     {
       "name": "is_theme_member",
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 334,
+    "raw_brier": 0.14783332926004045,
+    "calibrated_brier": 0.10949093217429655,
+    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/big_holder_inflow.pkl"
+  }
 }
