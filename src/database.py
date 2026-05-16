@@ -2942,7 +2942,7 @@ def load_latest_strategy_backtest(
 def load_strategy_backtest_for_period(
     period_end: str,
     db_path: str | Path | None = None,
-):
+) -> "pd.DataFrame":
     """撈某個 period_end 的全部 strategy 結果,回 pd.DataFrame(空表回空 DataFrame)。"""
     import pandas as _pd
 
@@ -3010,7 +3010,7 @@ def load_vbt_grid_results(
     strategy: str | None = None,
     top_n: int | None = None,
     db_path: str | Path | None = None,
-):
+) -> "pd.DataFrame":
     """撈 vbt_grid_results,按 sharpe DESC 排。
 
     Args:
@@ -3243,7 +3243,7 @@ def get_stock_kline_with_indicators(
     sid: str,
     days: int = 60,
     db_path: str | Path | None = None,
-):
+) -> "pd.DataFrame":
     """近 N 天 OHLCV + MA20/MA60 + BB(20,2)。回 pandas DataFrame。
 
     SQL 多撈 80 天歷史讓 MA60 / BB(20) 在最後 N 天都有滿值(rolling 邊界補滿),
