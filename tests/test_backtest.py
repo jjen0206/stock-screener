@@ -4,20 +4,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src import config, database as db
+from src import database as db
 from src.backtest import (
     backtest_all_strategies, backtest_strategy, simulate_outcome,
 )
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "backtest.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 # === simulate_outcome ===

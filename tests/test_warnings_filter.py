@@ -13,19 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from src import config, database as db
+from src import database as db
 from src import warnings_filter as wf
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """每個測試一份乾淨 DB(用 production schema,不自編 CREATE TABLE)。"""
-    db_file = tmp_path / "wf_test.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()  # type: ignore[attr-defined]
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()  # type: ignore[attr-defined]
+# tmp_db fixture 共用 tests/conftest.py
 
 
 @pytest.fixture

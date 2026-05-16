@@ -4,24 +4,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 # 讓 import scripts.precompute_strategies 找得到
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from src import config, database as db  # noqa: E402
+from src import database as db  # noqa: E402
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "precompute.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 def _seed_minimal_universe(monkeypatch):

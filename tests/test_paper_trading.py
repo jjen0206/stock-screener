@@ -3,17 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from src import config, database as db, paper_trading as pt
+from src import database as db, paper_trading as pt
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "paper.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 def _seed_prices(sid: str, rows: list[dict]) -> None:

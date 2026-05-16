@@ -13,9 +13,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import config, database as db
+from src import database as db
 from src.vbt_backtest import (
-    _build_signals_matrix,
     _clean_close_matrix,
     _hash_params,
     _make_exits_after_hold,
@@ -25,15 +24,7 @@ from src.vbt_backtest import (
     persist_grid_results,
 )
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "vbt.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 # === pure helpers (不需 DB) ===
