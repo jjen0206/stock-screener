@@ -1,48 +1,57 @@
 """TWSE / TPEx 警示股紀錄抓取 CLI(2026-05-15 主公拍板加入,違約交割教訓)。
 
 抓取的警示分類(寫入 stock_warnings.warning_type):
-  - default_settlement (違約交割) — TWSE punish 公告
-  - attention         (注意股)   — TWSE notice 公告 + TPEx trading_warning_information
-  - disposition       (處置股)   — TWSE punish/disposition(fallback TWTBAU2)
-                                  + TPEx disposal_information
-  - full_cash         (全額交割) — TWSE 變更交易方法 - 全額交割
-                                  + TPEx cmode 之 ManagedStock=Ｙ(管理股票)
-  - method_changed    (變更交易方法 - 其他) — 同一公告分支
-                                  + TPEx cmode 之 AlteredTrading=Ｙ(未列為管理)
+  - default_settlement (違約交割) — **TWSE/TPEx OpenAPI 皆無對應 endpoint**
+                                     (兩家都是 SPA 表單頁,需 browser 自動化)
+                                     run() 會 log warning 提醒主公,別 silent skip
+  - attention         (注意股)   — TWSE /announcement/notice + /announcement/notetrans
+                                  + TPEx tpex_trading_warning_information
+  - disposition       (處置股)   — TWSE /announcement/punish
+                                  + TPEx tpex_disposal_information
+  - full_cash         (全額交割) — TPEx tpex_cmode 之 ManagedStock=Ｙ(管理股票)
+                                  TWSE 變更交易 endpoint 不分 full_cash vs other,
+                                  全進 method_changed(欄位陽春,picks 統一 soft 降權)
+  - method_changed    (變更交易方法) — TWSE /exchangeReport/TWT85U
+                                  + TPEx tpex_cmode 之 AlteredTrading=Ｙ
 
-主要資料來源:
+主要資料來源(2026-05-16 從 bs4 HTML 改成 OpenAPI JSON,silent 0 rows 修復):
   TWSE (上市):
-    - 違約交割 https://www.twse.com.tw/zh/announcement/punish.html
-    - 注意股   https://www.twse.com.tw/zh/announcement/notice.html
-    - 處置股   https://www.twse.com.tw/zh/announcement/punish/disposition.html
-                fallback https://www.twse.com.tw/zh/trading/exchange/TWTBAU2.html
-    - 變更交易方法 https://www.twse.com.tw/zh/announcement/method.html
+    - 處置股   https://openapi.twse.com.tw/v1/announcement/punish
+    - 注意股   https://openapi.twse.com.tw/v1/announcement/notice
+                + https://openapi.twse.com.tw/v1/announcement/notetrans
+                  (累計次數補充來源,沒 Date 欄位)
+    - 變更交易 https://openapi.twse.com.tw/v1/exchangeReport/TWT85U
+                (僅含 Code/Name/PeriodicCallAuctionTrading,無 Date/Reason/迄日;
+                 全標 method_changed)
+    - 違約交割 :TWSE OpenAPI v1 swagger 143 paths 無對應 endpoint(2026-05 確認);
+                只有 SPA 表單頁 /zh/announcement/bfigtu.html,需 browser
+                automation,違反專案禁止 selenium 原則 → 暫不抓,run() log
+                warning 提醒。see docs/twse-warnings-still-broken.md
   TPEx (上櫃):
     - 注意股   https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information
     - 處置股   https://www.tpex.org.tw/openapi/v1/tpex_disposal_information
     - 變更交易方法 https://www.tpex.org.tw/openapi/v1/tpex_cmode
-    - 違約交割 :TPEx OpenAPI v1 沒對應 endpoint(2026-05 已 web 確認);
-                只有 SPA 表單頁 /web/bulletin/announcement/default.php,需
-                browser automation,違反專案禁止 selenium 原則 → 暫不抓,
-                每次跑會 log warning 提醒(別 silent skip,違約交割教訓)。
+    - 違約交割 :TPEx OpenAPI v1 也無對應 endpoint(同 TWSE 困境)
 
-設計原則(對齊 fetch_shareholder_concentration.py):
-  - TWSE 純 HTTP requests + bs4 解析 HTML
-  - TPEx 走官方 OpenAPI v1 JSON(穩定,不用 bs4)
-  - 不依賴 selenium / playwright
-  - User-Agent 必填(TDCC / TWSE / TPEx 都會擋 python-requests UA)
+設計原則:
+  - 全 source 走 JSON(TWSE / TPEx OpenAPI v1),不再用 bs4 解 HTML
+  - User-Agent 必填(TWSE / TPEx 都會擋 python-requests UA)
   - retry 3 次(走 src._retry.with_retry)
-  - parse 失敗 raise + 寫 log,讓 CI exit 1 觸發告警
+  - HTTP error / JSON parse fail → raise,讓 CI exit 1 觸發告警
+  - 「endpoint 整體壞掉」防呆:run 後檢查兩條基線 (TWSE punish + TWT85U) 是否
+    皆 0 rows;若是 → raise(這兩條源歷史上一定有資料,同時 0 表示 endpoint
+    壞掉,不是「假日沒事件」)
+  - 「假日沒事件」自然 0 rows → 不 raise(notice / notetrans / TPEx 三條合理 0)
   - upsert 進 stock_warnings,同 PK (stock_id, warning_type, announced_date) 覆寫
-    (TWSE / TPEx 共用同表,PK 已含 sid,4 開頭上市 vs 4 開頭上櫃理論上互斥不會撞)
 
 Exit code:
-  0 = 成功(寫入 0 筆也算成功)
-  1 = 抓取或解析失敗
+  0 = 成功(寫入 0 筆也算成功,只要 baseline 兩條源沒同時 0)
+  1 = 抓取或解析失敗 / baseline 同時 0 rows
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -63,8 +72,8 @@ logger = logging.getLogger(__name__)
 
 # === HTTP setup ===
 _HTTP_TIMEOUT = 30
-# TWSE 的 SSL 憑證鏈缺 SubjectKeyIdentifier,新版 OpenSSL 會擋 → 用同 src/financial_fetcher_free.py
-# 處理 pattern,公開資料 read-only 無 MITM 風險
+# TWSE 的 SSL 憑證鏈缺 SubjectKeyIdentifier,新版 OpenSSL 會擋 → 用同 pattern
+# 處理,公開資料 read-only 無 MITM 風險
 _VERIFY_SSL = False
 # python-requests 預設 UA 會被 TWSE 擋進 redirect loop / 403,必填常見瀏覽器 UA
 _HTTP_HEADERS = {
@@ -72,22 +81,19 @@ _HTTP_HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/121.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/json,*/*",
+    "Accept": "application/json,text/json,*/*",
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
 }
 
 
-# === 各來源 URL(可被測試 monkeypatch)===
+# === TWSE OpenAPI v1 endpoints(2026-05-16 從 bs4 改 JSON) ===
 
-URL_PUNISH = "https://www.twse.com.tw/zh/announcement/punish.html"
-URL_NOTICE = "https://www.twse.com.tw/zh/announcement/notice.html"
-URL_DISPOSITION = "https://www.twse.com.tw/zh/announcement/punish/disposition.html"
-URL_DISPOSITION_FALLBACK = (
-    "https://www.twse.com.tw/zh/trading/exchange/TWTBAU2.html"
-)
-URL_METHOD_CHANGED = "https://www.twse.com.tw/zh/announcement/method.html"
+URL_PUNISH = "https://openapi.twse.com.tw/v1/announcement/punish"
+URL_NOTICE = "https://openapi.twse.com.tw/v1/announcement/notice"
+URL_NOTETRANS = "https://openapi.twse.com.tw/v1/announcement/notetrans"
+URL_METHOD_CHANGED = "https://openapi.twse.com.tw/v1/exchangeReport/TWT85U"
 
-# TPEx (上櫃) — 走官方 OpenAPI v1 JSON,結構穩定;欄位以 swagger.json 為準。
+# TPEx (上櫃) — 走官方 OpenAPI v1 JSON,結構穩定。
 # 違約交割 endpoint 不存在 OpenAPI(只有 SPA 表單頁),先不抓,run() 會 log warning。
 TPEX_URL_DISPOSITION = (
     "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
@@ -113,12 +119,11 @@ def _http_get(url: str) -> str:
         url, timeout=_HTTP_TIMEOUT, verify=_VERIFY_SSL, headers=_HTTP_HEADERS,
     )
     resp.raise_for_status()
-    # TWSE 通常回 UTF-8;requests 預設 charset 偵測夠用
     return resp.text
 
 
 def fetch_url_with_retry(url: str, label: str) -> str:
-    """打 URL 拿原始 HTML / JSON 字串,失敗 retry 3 次(指數退避 1s/2s/4s)。
+    """打 URL 拿原始 JSON 字串,失敗 retry 3 次(指數退避 1s/2s/4s)。
 
     給上層 parser 餵原始字串。網路 / 5xx 連續失敗會 raise,讓 CLI exit 1。
     """
@@ -132,17 +137,25 @@ def fetch_url_with_retry(url: str, label: str) -> str:
 
 # === 共用解析 ===
 
-# TWSE 公告的「日期」常見格式:
-#   "民國 114 年 05 月 12 日" / "114/05/12" / "2025/05/12" / "2025-05-12"
+# TWSE / TPEx 日期常見格式:
+#   "1150506"    (民國連寫 YYYMMDD,如 OpenAPI punish.Date)
+#   "20260506"   (西元連寫 YYYYMMDD)
+#   "115/05/07"  (民國有分隔符,如 punish.DispositionPeriod 起迄)
+#   "2026-05-07" (西元有分隔符)
+#   "民國 114 年 05 月 12 日" / "114年5月3日" (民國中文)
 _ROC_PATTERN = re.compile(r"^(\d{2,3})[/\-年]\s*(\d{1,2})[/\-月]\s*(\d{1,2})")
 _AD_PATTERN = re.compile(r"^(\d{4})[/\-年]\s*(\d{1,2})[/\-月]\s*(\d{1,2})")
+_ROC_COMPACT = re.compile(r"^(\d{3})(\d{2})(\d{2})$")
+_AD_COMPACT = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 
 
 def normalize_date(raw: str | None) -> str | None:
     """民國 / 西元日期 → ISO YYYY-MM-DD。
 
     支援:
-      "民國 114 年 05 月 12 日" / "114/05/12" → "2025-05-12"
+      "1150506"  (民國 115/05/06 連寫) → "2026-05-06"
+      "20260506" (西元 2026-05-06 連寫) → "2026-05-06"
+      "115/05/07" / "114年5月3日" → "2026-05-07" / "2025-05-03"
       "2025/05/12" / "2025-05-12" → "2025-05-12"
       空字串 / None / 解析失敗 → None
     """
@@ -151,7 +164,23 @@ def normalize_date(raw: str | None) -> str | None:
     s = str(raw).strip().replace(" ", "").replace("民國", "")
     if not s:
         return None
-    # 西元(4 位數年)優先試
+    # 連寫格式優先(OpenAPI Date 常見)
+    m_ad_c = _AD_COMPACT.match(s)
+    if m_ad_c:
+        y, mo, d = m_ad_c.groups()
+        try:
+            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        except ValueError:
+            return None
+    m_roc_c = _ROC_COMPACT.match(s)
+    if m_roc_c:
+        y_roc, mo, d = m_roc_c.groups()
+        try:
+            year = int(y_roc) + 1911
+            return f"{year:04d}-{int(mo):02d}-{int(d):02d}"
+        except ValueError:
+            return None
+    # 有分隔符:西元(4 位數年)優先試
     m_ad = _AD_PATTERN.match(s)
     if m_ad:
         y, mo, d = m_ad.groups()
@@ -159,7 +188,6 @@ def normalize_date(raw: str | None) -> str | None:
             return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
         except ValueError:
             return None
-    # 民國(2-3 位數年)
     m_roc = _ROC_PATTERN.match(s)
     if m_roc:
         y_roc, mo, d = m_roc.groups()
@@ -169,6 +197,13 @@ def normalize_date(raw: str | None) -> str | None:
         except ValueError:
             return None
     return None
+
+
+# TPEx 連寫日期專用 alias(向後相容測試)。
+# 行為與 normalize_date 完全一致(都支援民國/西元連寫 + 分隔符)。
+def normalize_tpex_date(raw: str | None) -> str | None:
+    """TPEx 連寫 / 分隔符日期 → ISO YYYY-MM-DD(alias to normalize_date)。"""
+    return normalize_date(raw)
 
 
 def _extract_stock_id(raw: str | None) -> str | None:
@@ -185,265 +220,31 @@ def _extract_stock_id(raw: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _parse_html_rows(html_text: str) -> list[dict[str, str]]:
-    """通用 TWSE HTML 表格解析:把 <table> 內每個 <tr> 轉成 {header: cell_text}。
-
-    TWSE 公告頁多用 <table> 配 <thead>/<tbody>,有些頁是 div table。這裡只處理
-    傳統 <table>;若該源是 SPA 沒 <table>,parser 回 [],fetcher 該 raise 提示
-    主公換 endpoint(別 silent skip,違約交割教訓)。
-    """
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError as e:
-        raise RuntimeError(
-            "需要 beautifulsoup4 (pip install beautifulsoup4) 才能解析 TWSE HTML"
-        ) from e
-
-    soup = BeautifulSoup(html_text, "html.parser")
-    out: list[dict[str, str]] = []
-    for table in soup.find_all("table"):
-        # 抽 header(thead 或第一列 tr)
-        headers: list[str] = []
-        thead = table.find("thead")
-        if thead:
-            head_row = thead.find("tr")
-            if head_row:
-                headers = [
-                    th.get_text(strip=True)
-                    for th in head_row.find_all(["th", "td"])
-                ]
-        if not headers:
-            first_tr = table.find("tr")
-            if first_tr:
-                headers = [
-                    c.get_text(strip=True)
-                    for c in first_tr.find_all(["th", "td"])
-                ]
-        if not headers:
-            continue
-
-        body = table.find("tbody") or table
-        for tr in body.find_all("tr"):
-            cells = tr.find_all(["td", "th"])
-            if not cells:
-                continue
-            # skip header row 自己
-            if all(c.name == "th" for c in cells):
-                continue
-            values = [c.get_text(strip=True) for c in cells]
-            if len(values) < 2:
-                continue
-            row: dict[str, str] = {}
-            for i, v in enumerate(values):
-                key = headers[i] if i < len(headers) else f"col_{i}"
-                row[key] = v
-            out.append(row)
-    return out
-
-
-# === Per-source 解析函式 ===
-
-def _find_first_key(row: dict[str, str], candidates: list[str]) -> str | None:
-    """在 row dict 內找第一個 match 的 key(支援 substring 包含)。
-
-    TWSE 表頭常見變體:「處置股票」/「股票名稱」/「股票代號」等,寬鬆匹配。
-    """
-    for k in row.keys():
-        for c in candidates:
-            if c in k:
-                return k
-    return None
-
-
-def parse_default_settlement_html(html_text: str, source_url: str) -> list[dict]:
-    """違約交割公告 → list of stock_warnings rows(warning_type='default_settlement')。
-
-    TWSE punish 公告欄位常見:公告日期 / 違約日期 / 證券代號 / 證券名稱 / 違約金額 / 說明
-    違約交割沒有「解除日」概念(歷史污點),effective_to 一律 NULL。
-    """
-    rows = _parse_html_rows(html_text)
-    out: list[dict] = []
-    for r in rows:
-        sid_key = _find_first_key(r, ["代號", "證券代號", "股票代號", "代碼"])
-        date_key = _find_first_key(r, ["公告日期", "公告日", "日期"])
-        reason_key = _find_first_key(r, ["說明", "事由", "違約", "原因"])
-        sid = _extract_stock_id(r.get(sid_key) if sid_key else None)
-        announced = normalize_date(r.get(date_key) if date_key else None)
-        if not sid or not announced:
-            continue
-        reason = (r.get(reason_key) if reason_key else None) or "違約交割公告"
-        out.append({
-            "stock_id": sid,
-            "warning_type": "default_settlement",
-            "announced_date": announced,
-            "effective_from": announced,
-            "effective_to": None,
-            "reason": str(reason)[:500],
-            "source_url": source_url,
-        })
-    return out
-
-
-def parse_attention_html(html_text: str, source_url: str) -> list[dict]:
-    """注意股公告 → warning_type='attention'。
-
-    注意股有「公告日 / 處置起 / 處置迄」三日期欄位;effective_to 取「處置迄」,
-    缺值寫 NULL(視為仍生效)。
-    """
-    return _parse_typical_warning_html(
-        html_text, source_url, warning_type="attention",
-        default_reason="注意股公告",
-    )
-
-
-def parse_disposition_html(html_text: str, source_url: str) -> list[dict]:
-    """處置股公告 → warning_type='disposition'。"""
-    return _parse_typical_warning_html(
-        html_text, source_url, warning_type="disposition",
-        default_reason="處置股公告",
-    )
-
-
-def parse_method_changed_html(html_text: str, source_url: str) -> list[dict]:
-    """變更交易方法公告 → warning_type='full_cash' / 'method_changed'。
-
-    若公告 reason 含「全額交割」→ 歸類 full_cash(picks 硬擋之列);其餘
-    歸類 method_changed(soft 降權)。
-    """
-    rows = _parse_html_rows(html_text)
-    out: list[dict] = []
-    for r in rows:
-        sid_key = _find_first_key(r, ["代號", "證券代號", "股票代號", "代碼"])
-        date_key = _find_first_key(r, ["公告日期", "公告日", "日期"])
-        from_key = _find_first_key(r, ["生效日", "起始", "起日", "處置起"])
-        to_key = _find_first_key(r, ["解除日", "迄日", "結束", "處置迄"])
-        reason_key = _find_first_key(r, ["變更", "說明", "事由", "原因", "方法"])
-        sid = _extract_stock_id(r.get(sid_key) if sid_key else None)
-        announced = normalize_date(r.get(date_key) if date_key else None)
-        if not sid or not announced:
-            continue
-        reason = (r.get(reason_key) if reason_key else None) or "變更交易方法"
-        wt = (
-            "full_cash" if "全額交割" in str(reason)
-            else "method_changed"
-        )
-        out.append({
-            "stock_id": sid,
-            "warning_type": wt,
-            "announced_date": announced,
-            "effective_from": normalize_date(
-                r.get(from_key) if from_key else None
-            ),
-            "effective_to": normalize_date(
-                r.get(to_key) if to_key else None
-            ),
-            "reason": str(reason)[:500],
-            "source_url": source_url,
-        })
-    return out
-
-
-def _parse_typical_warning_html(
-    html_text: str,
-    source_url: str,
-    warning_type: str,
-    default_reason: str,
-) -> list[dict]:
-    """通用注意 / 處置股 parser(都是「公告日 + 處置起迄 + sid + 原因」結構)。"""
-    rows = _parse_html_rows(html_text)
-    out: list[dict] = []
-    for r in rows:
-        sid_key = _find_first_key(r, ["代號", "證券代號", "股票代號", "代碼"])
-        date_key = _find_first_key(r, ["公告日期", "公告日", "日期"])
-        from_key = _find_first_key(r, ["處置起", "起日", "生效日", "起始"])
-        to_key = _find_first_key(r, ["處置迄", "迄日", "解除日", "結束"])
-        reason_key = _find_first_key(r, ["原因", "事由", "說明"])
-        sid = _extract_stock_id(r.get(sid_key) if sid_key else None)
-        announced = normalize_date(r.get(date_key) if date_key else None)
-        if not sid or not announced:
-            continue
-        reason = (r.get(reason_key) if reason_key else None) or default_reason
-        out.append({
-            "stock_id": sid,
-            "warning_type": warning_type,
-            "announced_date": announced,
-            "effective_from": normalize_date(
-                r.get(from_key) if from_key else None
-            ),
-            "effective_to": normalize_date(
-                r.get(to_key) if to_key else None
-            ),
-            "reason": str(reason)[:500],
-            "source_url": source_url,
-        })
-    return out
-
-
-# === TPEx (上櫃) JSON parsers ===
-
-# TPEx 日期欄位常見兩種:
-#   ROC YYYMMDD 連寫 "1150514"(disposal / attention / cmode endpoint)
-#   西元 YYYYMMDD 連寫 "20260514"(warning_note endpoint;為一致也支援)
-_TPEX_ROC_COMPACT = re.compile(r"^(\d{3})(\d{2})(\d{2})$")
-_TPEX_AD_COMPACT = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
-
-
-def normalize_tpex_date(raw: str | None) -> str | None:
-    """TPEx 連寫日期 → ISO YYYY-MM-DD。
+def _parse_period(raw: str | None) -> tuple[str | None, str | None]:
+    """通用「處置起~迄」字串 → (from, to)。
 
     支援:
-      "1150514"  (民國 114/05/14) → "2025-05-14"
-      "20260514" (西元 2026-05-14) → "2026-05-14"
-      也接 normalize_date 支援的所有有分隔符格式(走 fallback)
-      空字串 / None / 解析失敗 → None
-    """
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    m_ad = _TPEX_AD_COMPACT.match(s)
-    if m_ad:
-        y, mo, d = m_ad.groups()
-        try:
-            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
-        except ValueError:
-            return None
-    m_roc = _TPEX_ROC_COMPACT.match(s)
-    if m_roc:
-        y_roc, mo, d = m_roc.groups()
-        try:
-            year = int(y_roc) + 1911
-            return f"{year:04d}-{int(mo):02d}-{int(d):02d}"
-        except ValueError:
-            return None
-    # 有分隔符的格式走通用 normalizer
-    return normalize_date(s)
-
-
-def _parse_tpex_period(raw: str | None) -> tuple[str | None, str | None]:
-    """解析 TPEx DispositionPeriod 字串 "1150515~1150528" → (from, to) ISO 日期。
-
-    處置 / 注意股的處置期常以 ~ 或 - 或 ～ 分隔起迄。缺值或解析失敗回 (None, None)。
+      "1150515~1150528"      (TPEx 連寫 + ASCII tilde)
+      "115/05/07～115/05/20"  (TWSE 帶分隔符 + 全形波浪)
+      "114/05/01-114/05/12"  (短橫線)
+    缺值或單邊解析失敗 → (None, None) 或 (from, None)
     """
     if not raw:
         return None, None
     s = str(raw).strip()
     if not s:
         return None, None
-    # 接受 ASCII tilde / 全形波浪 / 短橫線當分隔符
-    parts = re.split(r"[~～\-]", s, maxsplit=1)
+    parts = re.split(r"[~～\-至]", s, maxsplit=1)
     if len(parts) != 2:
-        return normalize_tpex_date(s), None
-    return normalize_tpex_date(parts[0]), normalize_tpex_date(parts[1])
+        return normalize_date(s), None
+    return normalize_date(parts[0]), normalize_date(parts[1])
 
 
-def _decode_tpex_json(raw_text: str) -> list[dict]:
-    """TPEx OpenAPI v1 一律回 JSON list[dict]。空字串 / 非 list 回 []。
+def _decode_json(raw_text: str) -> list[dict]:
+    """OpenAPI v1 一律回 JSON list[dict]。空字串 / 非 list 回 []。
 
     parse 失敗(JSONDecodeError)直接 raise,讓上層 fetcher exit 1。
     """
-    import json
     s = (raw_text or "").strip()
     if not s:
         return []
@@ -453,20 +254,210 @@ def _decode_tpex_json(raw_text: str) -> list[dict]:
     return [r for r in data if isinstance(r, dict)]
 
 
+def _is_empty_placeholder_row(r: dict) -> bool:
+    """OpenAPI 假日 / 沒事件回 1 筆 sentinel row(欄位全空 + Number='0')。
+
+    例:notice endpoint 沒事件時回 [{"Number":"0","Code":"","Name":"",...}]
+    這種 row 要 skip,不寫進 DB。
+    """
+    code = str(r.get("Code", "") or "").strip()
+    name = str(r.get("Name", "") or "").strip()
+    if code or name:
+        return False
+    return True
+
+
+# === TWSE OpenAPI parsers ===
+
+def parse_twse_punish_json(raw_text: str, source_url: str) -> list[dict]:
+    """TWSE /announcement/punish JSON → 處置股(warning_type='disposition')。
+
+    Schema 欄位(2026-05 確認):
+      Number, Date(民國連寫 1150506), Code, Name, NumberOfAnnouncement,
+      ReasonsOfDisposition(處置條件), DispositionPeriod("115/05/07～115/05/20"),
+      DispositionMeasures(第一次/第二次處置), Detail(完整文字), LinkInformation
+    """
+    rows = _decode_json(raw_text)
+    out: list[dict] = []
+    for r in rows:
+        if _is_empty_placeholder_row(r):
+            continue
+        sid = _extract_stock_id(r.get("Code"))
+        announced = normalize_date(r.get("Date"))
+        if not sid or not announced:
+            continue
+        eff_from, eff_to = _parse_period(r.get("DispositionPeriod"))
+        reason_parts = [
+            str(r.get(k, "") or "").strip()
+            for k in ("ReasonsOfDisposition", "DispositionMeasures")
+        ]
+        reason = " / ".join(p for p in reason_parts if p) or "TWSE 處置股公告"
+        out.append({
+            "stock_id": sid,
+            "warning_type": "disposition",
+            "announced_date": announced,
+            "effective_from": eff_from or announced,
+            "effective_to": eff_to,
+            "reason": reason[:500],
+            "source_url": source_url,
+        })
+    return out
+
+
+def parse_twse_notice_json(raw_text: str, source_url: str) -> list[dict]:
+    """TWSE /announcement/notice JSON → 當日注意股(warning_type='attention')。
+
+    Schema 欄位:
+      Number, Code, Name, NumberOfAnnouncement,
+      TradingInfoForAttention(注意交易資訊), Date, ClosingPrice, PE
+    假日 / 沒事件 → 回 1 筆 Number='0' 全空 sentinel,被 _is_empty_placeholder_row 過濾。
+    """
+    rows = _decode_json(raw_text)
+    out: list[dict] = []
+    for r in rows:
+        if _is_empty_placeholder_row(r):
+            continue
+        sid = _extract_stock_id(r.get("Code"))
+        announced = normalize_date(r.get("Date"))
+        if not sid or not announced:
+            continue
+        reason = str(r.get("TradingInfoForAttention", "") or "").strip() \
+            or "TWSE 注意股公告"
+        out.append({
+            "stock_id": sid,
+            "warning_type": "attention",
+            "announced_date": announced,
+            "effective_from": announced,
+            "effective_to": None,
+            "reason": reason[:500],
+            "source_url": source_url,
+        })
+    return out
+
+
+# 從 notetrans 的 RecentlyMetAttentionSecuritiesCriteria 文字抽日期。
+# 範例:"115年5月14日至115年5月15日連續二次" → 取最後一個日期作為 announced。
+_NOTETRANS_DATE_RE = re.compile(r"(\d{2,3})年(\d{1,2})月(\d{1,2})日")
+
+
+def parse_twse_notetrans_json(
+    raw_text: str,
+    source_url: str,
+    fallback_date: str | None = None,
+) -> list[dict]:
+    """TWSE /announcement/notetrans JSON → 注意累計次數(warning_type='attention')。
+
+    Schema 欄位:
+      Code, Name, RecentlyMetAttentionSecuritiesCriteria
+      (内含「115年5月14日至115年5月15日連續二次」這種句子,沒獨立 Date 欄位)
+
+    日期處理:從 criteria 文字正則抽出最後一個日期(代表最近一次達標);
+    抽不到 → 用 fallback_date(預設為 UTC 今天)。
+    """
+    rows = _decode_json(raw_text)
+    if fallback_date is None:
+        fallback_date = datetime.now(timezone.utc).date().isoformat()
+    out: list[dict] = []
+    for r in rows:
+        if _is_empty_placeholder_row(r):
+            continue
+        sid = _extract_stock_id(r.get("Code"))
+        if not sid:
+            continue
+        criteria = str(r.get("RecentlyMetAttentionSecuritiesCriteria", "") or "")
+        matches = _NOTETRANS_DATE_RE.findall(criteria)
+        if matches:
+            # 用最後一個日期(criteria 文字結尾通常是最近的日期)
+            y_roc, mo, d = matches[-1]
+            try:
+                year = int(y_roc) + 1911
+                announced = f"{year:04d}-{int(mo):02d}-{int(d):02d}"
+            except ValueError:
+                announced = fallback_date
+        else:
+            announced = fallback_date
+        reason = criteria.strip() or "TWSE 注意股累計次數異常"
+        out.append({
+            "stock_id": sid,
+            "warning_type": "attention",
+            "announced_date": announced,
+            "effective_from": announced,
+            "effective_to": None,
+            "reason": reason[:500],
+            "source_url": source_url,
+        })
+    return out
+
+
+def parse_twse_method_changed_json(
+    raw_text: str,
+    source_url: str,
+    fallback_date: str | None = None,
+) -> list[dict]:
+    """TWSE /exchangeReport/TWT85U JSON → 變更交易(warning_type='method_changed')。
+
+    Schema 欄位(陽春):
+      Code, Name, PeriodicCallAuctionTrading(分盤集合競價 flag,"**" 或 "  ")
+      **無 Date 欄位、無 reason、無迄日** — endpoint 限制。
+
+    處理:
+      announced_date = fallback_date(預設今天 UTC),全標 method_changed。
+      因 schema 無法區分 full_cash vs 一般變更方法,picks 統一 soft 降權。
+      reason 標記是否為「分盤集合競價」。
+    """
+    rows = _decode_json(raw_text)
+    if fallback_date is None:
+        fallback_date = datetime.now(timezone.utc).date().isoformat()
+    out: list[dict] = []
+    for r in rows:
+        if _is_empty_placeholder_row(r):
+            continue
+        sid = _extract_stock_id(r.get("Code"))
+        if not sid:
+            continue
+        flag = str(r.get("PeriodicCallAuctionTrading", "") or "").strip()
+        if flag == "**":
+            reason = "TWSE 變更交易方法:分盤集合競價"
+        else:
+            reason = "TWSE 變更交易方法"
+        out.append({
+            "stock_id": sid,
+            "warning_type": "method_changed",
+            "announced_date": fallback_date,
+            "effective_from": fallback_date,
+            "effective_to": None,
+            "reason": reason[:500],
+            "source_url": source_url,
+        })
+    return out
+
+
+# === TPEx (上櫃) OpenAPI v1 JSON parsers ===
+
+def _decode_tpex_json(raw_text: str) -> list[dict]:
+    """alias for _decode_json,測試向後相容用。"""
+    return _decode_json(raw_text)
+
+
+def _parse_tpex_period(raw: str | None) -> tuple[str | None, str | None]:
+    """alias for _parse_period,測試向後相容用。"""
+    return _parse_period(raw)
+
+
 def parse_tpex_disposition_json(raw_text: str, source_url: str) -> list[dict]:
     """TPEx 上櫃處置 JSON → list of stock_warnings rows(warning_type='disposition')。
 
     JSON 欄位:Date, SecuritiesCompanyCode, CompanyName, DispositionPeriod,
               DispositionReasons, DisposalCondition
     """
-    rows = _decode_tpex_json(raw_text)
+    rows = _decode_json(raw_text)
     out: list[dict] = []
     for r in rows:
         sid = _extract_stock_id(r.get("SecuritiesCompanyCode"))
-        announced = normalize_tpex_date(r.get("Date"))
+        announced = normalize_date(r.get("Date"))
         if not sid or not announced:
             continue
-        eff_from, eff_to = _parse_tpex_period(r.get("DispositionPeriod"))
+        eff_from, eff_to = _parse_period(r.get("DispositionPeriod"))
         reason = (
             r.get("DispositionReasons")
             or r.get("DisposalCondition")
@@ -491,11 +482,11 @@ def parse_tpex_attention_json(raw_text: str, source_url: str) -> list[dict]:
               ClosePrice, PriceEarningRatio
     注意:此 endpoint 沒有處置期欄位,effective_from/to 全 NULL(視同公告日當天)。
     """
-    rows = _decode_tpex_json(raw_text)
+    rows = _decode_json(raw_text)
     out: list[dict] = []
     for r in rows:
         sid = _extract_stock_id(r.get("SecuritiesCompanyCode"))
-        announced = normalize_tpex_date(r.get("Date"))
+        announced = normalize_date(r.get("Date"))
         if not sid or not announced:
             continue
         reason = r.get("TradingInformation") or "上櫃注意股公告"
@@ -526,11 +517,11 @@ def parse_tpex_cmode_json(raw_text: str, source_url: str) -> list[dict]:
       其他單純 PeriodicTrading 或 FinancialAnnouncements → method_changed
       全為空 → skip(不寫入)
     """
-    rows = _decode_tpex_json(raw_text)
+    rows = _decode_json(raw_text)
     out: list[dict] = []
     for r in rows:
         sid = _extract_stock_id(r.get("SecuritiesCompanyCode"))
-        announced = normalize_tpex_date(r.get("Date"))
+        announced = normalize_date(r.get("Date"))
         if not sid or not announced:
             continue
 
@@ -576,19 +567,16 @@ def parse_tpex_cmode_json(raw_text: str, source_url: str) -> list[dict]:
 # Source 表:每筆 (warning_type_label, url, parser, market)
 # parser 簽名:(text: str, source_url: str) -> list[dict rows]
 # market: "TWSE" / "TPEx" — 只用於 log prefix 區分
+#
+# TWSE 違約交割不在表內 — OpenAPI 無 endpoint(swagger 143 paths 確認),
+# fetch_and_parse_all() 會 log warning 提醒。
 _SOURCES: list[tuple[str, str, callable, str]] = [
-    # --- TWSE 上市 (HTML 解析) ---
-    ("default_settlement", URL_PUNISH, parse_default_settlement_html, "TWSE"),
-    ("attention", URL_NOTICE, parse_attention_html, "TWSE"),
-    ("disposition", URL_DISPOSITION, parse_disposition_html, "TWSE"),
-    (
-        "method_changed_or_full_cash",
-        URL_METHOD_CHANGED,
-        parse_method_changed_html,
-        "TWSE",
-    ),
+    # --- TWSE 上市 (OpenAPI v1 JSON) ---
+    ("disposition", URL_PUNISH, parse_twse_punish_json, "TWSE"),
+    ("attention", URL_NOTICE, parse_twse_notice_json, "TWSE"),
+    ("attention_notetrans", URL_NOTETRANS, parse_twse_notetrans_json, "TWSE"),
+    ("method_changed", URL_METHOD_CHANGED, parse_twse_method_changed_json, "TWSE"),
     # --- TPEx 上櫃 (OpenAPI v1 JSON) ---
-    # 違約交割 endpoint 不存在 OpenAPI;run() 會 log warning 提醒。
     ("attention", TPEX_URL_ATTENTION, parse_tpex_attention_json, "TPEx"),
     ("disposition", TPEX_URL_DISPOSITION, parse_tpex_disposition_json, "TPEx"),
     (
@@ -599,74 +587,76 @@ _SOURCES: list[tuple[str, str, callable, str]] = [
     ),
 ]
 
-
-def _try_disposition_with_fallback(label: str) -> tuple[str, str]:
-    """處置股主端點 404 / 抓不到 → fallback TWTBAU2。回 (html_text, used_url)。"""
-    try:
-        html = fetch_url_with_retry(URL_DISPOSITION, label=f"TWSE {label}")
-        return html, URL_DISPOSITION
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "[WARNINGS] %s 主端點失敗,fallback TWTBAU2: %s", label, e,
-        )
-        html = fetch_url_with_retry(
-            URL_DISPOSITION_FALLBACK, label=f"TWSE {label} fallback",
-        )
-        return html, URL_DISPOSITION_FALLBACK
+# baseline endpoints — 這兩條源歷史上絕對有資料,若同時 0 rows 表示 endpoint
+# 整體壞掉(網域改、schema 變、被擋等),raise 警告主公自己處理。
+# (notice / notetrans / TPEx 三條允許 0 rows = 假日沒事件,不在 baseline 內)
+_BASELINE_URLS = {URL_PUNISH, URL_METHOD_CHANGED}
 
 
 def fetch_and_parse_all(
     html_overrides: dict[str, str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, int]]:
     """打所有 source、parse、合併成單一 rows list(不寫 DB)。
 
     Args:
-        html_overrides: {url: html_or_json_text} — 測試用,跳過真實 HTTP。
-            key 應對應 _SOURCES 內的 URL_* constant 或 fallback URL。
-            (鍵 "html_overrides" 是歷史名稱,實際同時接 TWSE HTML 和 TPEx JSON 字串)
+        html_overrides: {url: json_text} — 測試用,跳過真實 HTTP。
+            key 對應 _SOURCES 內的 URL_* constant。
+            (鍵 "html_overrides" 是歷史名稱,實際接 JSON 字串)
 
-    任何 source 抓 / parse 失敗 → raise(讓 CI exit 1 觸發告警),
-    不要 silent skip(違約交割教訓:沒抓到等於沒擋,使用者繼續被坑)。
+    Returns:
+        (all_rows, per_source_counts):per_source_counts 是 {url: row_count}。
 
-    額外行為:TPEx 違約交割無 OpenAPI v1 endpoint(2026-05 確認),每跑一次
+    任何 source 抓 / parse 失敗 → raise(讓 CI exit 1 觸發告警),不要 silent skip。
+
+    Baseline 防呆:跑完後若 TWSE punish + TWT85U 兩條源都 0 rows → raise
+    (這兩條歷史上一定有資料,同時 0 表示 endpoint 整體壞掉)。
+
+    額外行為:TWSE / TPEx 違約交割無 OpenAPI v1 endpoint(2026-05 確認),每跑一次
     log warning,讓主公知道這條線目前還沒覆蓋(別 silent miss)。
     """
     html_overrides = html_overrides or {}
     all_rows: list[dict] = []
+    per_source: dict[str, int] = {}
+
     logger.warning(
-        "[TPEx] default_settlement: OpenAPI v1 無對應 endpoint,本次 run 不抓 "
-        "上櫃違約;TWSE default_settlement 仍正常運作"
+        "[WARNINGS] default_settlement(違約交割):TWSE/TPEx OpenAPI v1 皆無對應 "
+        "endpoint,本次 run 不抓;見 docs/twse-warnings-still-broken.md"
     )
+
     for label, url, parser, market in _SOURCES:
-        # TWSE disposition 有 fallback URL 鏈;TPEx 沒有
-        if market == "TWSE" and label == "disposition":
-            if url in html_overrides:
-                text, used_url = html_overrides[url], url
-            elif URL_DISPOSITION_FALLBACK in html_overrides:
-                text = html_overrides[URL_DISPOSITION_FALLBACK]
-                used_url = URL_DISPOSITION_FALLBACK
-            else:
-                text, used_url = _try_disposition_with_fallback(label)
+        if url in html_overrides:
+            text = html_overrides[url]
         else:
-            if url in html_overrides:
-                text, used_url = html_overrides[url], url
-            else:
-                text = fetch_url_with_retry(url, label=f"{market} {label}")
-                used_url = url
+            text = fetch_url_with_retry(url, label=f"{market} {label}")
 
         try:
-            rows = parser(text, used_url)
+            rows = parser(text, url)
         except Exception as ex:
             raise RuntimeError(
                 f"[WARNINGS] parse {market} {label} 失敗:"
                 f"{type(ex).__name__}: {ex}"
             ) from ex
+
+        per_source[url] = len(rows)
         print(
-            f"[WARNINGS] [{market}] {label:<28s} {len(rows)} rows",
+            f"[WARNINGS] [{market}] {label:<28s} {len(rows):>4d} rows",
             flush=True,
         )
         all_rows.extend(rows)
-    return all_rows
+
+    # baseline 偵測:TWSE punish + TWT85U 兩條源歷史一定有資料,
+    # 同時 0 rows → endpoint 壞掉,raise 警告主公。
+    baseline_zero = [
+        u for u in _BASELINE_URLS if per_source.get(u, 0) == 0
+    ]
+    if len(baseline_zero) == len(_BASELINE_URLS):
+        raise RuntimeError(
+            "[WARNINGS] baseline TWSE endpoints (punish + TWT85U) 同時 0 rows — "
+            "OpenAPI 整體壞掉?請檢查 endpoint URL/schema 是否變更。"
+            f"baseline_zero={baseline_zero}"
+        )
+
+    return all_rows, per_source
 
 
 def run(
@@ -675,11 +665,12 @@ def run(
 ) -> dict:
     """主流程:抓 + parse 全部來源 → upsert stock_warnings。
 
-    Returns summary dict {rows_parsed, rows_written, by_type, elapsed_secs}.
+    Returns summary dict {rows_parsed, rows_written, by_type, per_source,
+                          elapsed_secs}.
     """
     t0 = time.time()
     db.init_db(db_path)
-    rows = fetch_and_parse_all(html_overrides=html_overrides)
+    rows, per_source = fetch_and_parse_all(html_overrides=html_overrides)
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for r in rows:
         r.setdefault("fetched_at", fetched_at)
@@ -698,6 +689,7 @@ def run(
         "rows_parsed": len(rows),
         "rows_written": n_written,
         "by_type": by_type,
+        "per_source": per_source,
         "elapsed_secs": elapsed,
     }
 
@@ -714,7 +706,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         if args.dry_run:
-            rows = fetch_and_parse_all()
+            rows, _ = fetch_and_parse_all()
             print(f"[WARNINGS] DRY RUN parsed {len(rows)} rows", flush=True)
             return 0
         summary = run()
