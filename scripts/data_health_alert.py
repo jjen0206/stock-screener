@@ -36,6 +36,7 @@ if str(_ROOT) not in sys.path:
 
 from src import database as db  # noqa: E402
 from src.discord_notifier import send_discord_message  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.notifier import send_telegram_message  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -242,7 +243,7 @@ def main() -> int:
     p.add_argument("--no-discord", action="store_true", help="跳過 Discord")
     args = p.parse_args()
 
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(message)s")
+    setup_file_logging("data_health_alert", level=logging.WARNING, mirror_print=True)
 
     try:
         preload_counts = db.preload_snapshots()

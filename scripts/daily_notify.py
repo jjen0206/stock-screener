@@ -32,10 +32,12 @@ if str(_ROOT) not in sys.path:
 
 from src import database as db  # noqa: E402
 from src import paper_trading as pt  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.notifier import compute_top_picks, notify_top_picks  # noqa: E402
 
 
 def main() -> int:
+    setup_file_logging("daily_notify", mirror_print=True)
     p = argparse.ArgumentParser(
         description="每日短線精選(高信心+共識≥2)→ Telegram + Discord 並行推播",
     )

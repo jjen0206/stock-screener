@@ -33,6 +33,7 @@ if str(_ROOT) not in sys.path:
 
 from src import database as db  # noqa: E402
 from src import analyst_targets as at  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 
 
 def _get_watchlist_sids() -> list[str]:
@@ -102,6 +103,8 @@ def main() -> int:
         help="每檔之間 sleep 秒數,避免被 Yahoo throttle(default 0.5)",
     )
     args = p.parse_args()
+
+    setup_file_logging("fetch_analyst_targets", mirror_print=True)
 
     db.preload_snapshots()  # GitHub Actions runner 有 fresh SQLite,需先 preload
 

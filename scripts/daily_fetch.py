@@ -26,6 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import config, database as db  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     fetch_all_daily_prices_bulk,
     fetch_daily_price,
@@ -328,6 +329,7 @@ def main() -> int:
         help="對 TOP_50 + watchlist 抓近 N 天的法人(預設 7)",
     )
     args = p.parse_args()
+    setup_file_logging("daily_fetch", mirror_print=True)
     summary = run(institutional_days=args.institutional_days)
 
     # 健康警戒:bulk 抓到太少視為異常 → exit 1 讓 GH Actions 標紅

@@ -68,6 +68,7 @@ if str(_ROOT) not in sys.path:
 
 from src import database as db  # noqa: E402
 from src._retry import with_retry  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -855,6 +856,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="只 fetch + parse,不寫 DB(smoke 用)",
     )
     args = p.parse_args(list(argv) if argv is not None else None)
+
+    setup_file_logging("fetch_stock_warnings", mirror_print=True)
 
     try:
         if args.dry_run:

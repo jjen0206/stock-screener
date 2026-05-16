@@ -40,6 +40,7 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.discord_notifier import send_discord_message  # noqa: E402
 from src.intraday import get_intraday_quote  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.notifier import send_telegram_message  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -364,7 +365,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(message)s")
+    setup_file_logging("intraday_alerts", level=logging.WARNING, mirror_print=True)
 
     try:
         preload_counts = db.preload_snapshots()

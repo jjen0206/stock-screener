@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-05-16 — Runtime log 持久化(`logs/`)
+
+### Added
+- **`src/logging_setup.py`** 新模組:`setup_file_logging(script_name, level, mirror_print)` helper
+  - 寫 `logs/{Asia/Taipei date}-{script}.log`,自動跨日 rotate(新檔)
+  - stdout `StreamHandler` 同步保留,GH Actions log 不受影響
+  - `mirror_print=True` 把 `print()` 也 tee 進檔(daily_notify / intraday_alerts 等混用 print 的 script 開啟)
+  - `_Tee` 對 Windows cp950 console 的 `UnicodeEncodeError` 容錯(emoji 用 ascii replace fallback,檔案永遠 utf-8)
+  - Idempotent:同 script 重複 setup 不疊 handler;換 script 名稱會把舊 file handler 清掉
+- **`tests/test_logging_setup.py`**:8 個 test 涵蓋寫檔 / stdout 保留 / 日期 prefix / rotation / idempotent / format / auto-mkdir
+
+### Changed
+- 7 隻 cron 入口加 `setup_file_logging(...)`:
+  - `scripts/daily_notify.py` / `scripts/intraday_alerts.py` / `scripts/data_health_alert.py`
+  - `scripts/fetch_analyst_targets.py` / `scripts/fetch_stock_warnings.py` / `scripts/news_notify.py`
+  - `scripts/daily_fetch.py` / `scripts/daily_market_update.py`
+  - 都只在 `main()` argparse 之後 call,**不動既有業務邏輯**
+- `.gitignore` 加 `logs/`:runtime log 不入 repo,GH Actions artifact 可選擇性 upload
+
+### Notes
+- `scripts/cleanup_artifacts.py` 早就有 `logs/*.log > 7 天 rm` 邏輯(2026-05-15 已加),本輪不重複處理
+- 本機驗證:`python scripts/daily_notify.py --dry-run --no-telegram --no-discord` → `logs/2026-05-16-daily_notify.log` 生出,271 行 utf-8 完整保留 emoji
+- GH Actions runner 上 logs/ 會在 job 結束後消失(除非顯式 upload-artifact),這次任務只做持久化機制 + .gitignore,artifact upload 留下一輪
+
+---
+
 ## 2026-05-15 — Round 1 清理維護
 
 ### Changed

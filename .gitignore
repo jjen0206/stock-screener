@@ -31,6 +31,10 @@ data/*.sqlite
 *.log
 *.tmp
 
+# Runtime log 持久化:cron / CLI 腳本透過 src.logging_setup 寫進 logs/{date}-{script}.log
+# 不入 repo,本機由 scripts/cleanup_artifacts.py 統一清(預設 7 天)
+logs/
+
 # ML 模型備份(M2 v1 -> v3 retrain 留下的本地 safety net,不入 repo)
 models/**/*.v1.bak
 models/**/*.v2.bak

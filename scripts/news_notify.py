@@ -38,6 +38,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import config, database as db  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.news_fetcher import (  # noqa: E402
     IMPORTANT_ARTICLES, fetch_and_store_news, list_unsent_important_news,
     mark_news_sent,
@@ -114,6 +115,8 @@ def main() -> int:
         help="跳過 Discord 推播",
     )
     args = p.parse_args()
+
+    setup_file_logging("news_notify", mirror_print=True)
 
     db.init_db()
     # GH Actions runner 是 fresh container,SQLite 空 → preload snapshot CSV

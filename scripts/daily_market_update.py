@@ -38,6 +38,7 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src.data_fetcher import fetch_daily_price  # noqa: E402
 from src.financial_fetcher_free import update_long_term_data_free  # noqa: E402
+from src.logging_setup import setup_file_logging  # noqa: E402
 from src.universe import TW_TOP_50, pure_stock_universe  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
@@ -54,6 +55,7 @@ _TAIEX_BACKFILL_DAYS = 200
 
 
 def main() -> int:
+    setup_file_logging("daily_market_update", mirror_print=True)
     db.init_db()
 
     # universe 從 TW_TOP_50(50 檔)擴到 pure_stock_universe(~2060 檔)
