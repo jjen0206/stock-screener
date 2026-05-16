@@ -1,71 +1,71 @@
 {
   "strategy": "gap_up",
-  "trained_at": "2026-05-15T02:58:50+00:00",
-  "samples": 774,
-  "wins": 347,
-  "win_rate": 0.4483204134366925,
+  "trained_at": "2026-05-16T07:21:13+00:00",
+  "samples": 497,
+  "wins": 235,
+  "win_rate": 0.47283702213279677,
   "status": "trained",
-  "oob_score": 0.5297157622739018,
+  "oob_score": 0.5110663983903421,
   "feature_importances": [
     {
-      "name": "macd_dif",
-      "importance": 0.16442548375761523
-    },
-    {
-      "name": "macd_osc",
-      "importance": 0.14962409868973875
-    },
-    {
       "name": "kd_d",
-      "importance": 0.13709653829487525
-    },
-    {
-      "name": "atr_normalized",
-      "importance": 0.11699213452053901
-    },
-    {
-      "name": "kd_k",
-      "importance": 0.11342612768563186
+      "importance": 0.14654901388316424
     },
     {
       "name": "vol_ratio",
-      "importance": 0.11226274691137825
+      "importance": 0.13989840599691322
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.1255837964651155
     },
     {
       "name": "bias_pct",
-      "importance": 0.10900145580990485
+      "importance": 0.1214832984043283
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.12004441909270529
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.10878455392120669
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.10619028644721912
     },
     {
       "name": "bb_position",
-      "importance": 0.06007625504441616
+      "importance": 0.06844479711682841
     },
     {
       "name": "holders_pct_change_4w",
-      "importance": 0.010108336233186922
+      "importance": 0.01838569159379431
     },
     {
       "name": "holders_delta_w_zscore",
-      "importance": 0.009682046333799963
+      "importance": 0.01500289684939895
     },
     {
       "name": "is_theme_member",
-      "importance": 0.00611118017564498
-    },
-    {
-      "name": "inst_10d",
-      "importance": 0.005004632636059146
-    },
-    {
-      "name": "inst_5d",
-      "importance": 0.0045275203248178976
+      "importance": 0.008951654571465455
     },
     {
       "name": "ma_alignment",
-      "importance": 0.0016614435823917146
+      "importance": 0.0065369061371261476
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.0060232178710722265
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0055568225881330565
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.0
+      "importance": 0.0025642390615293136
     },
     {
       "name": "regime_dummy",
@@ -97,6 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 5,
-  "min_samples_leaf": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 99,
+    "raw_brier": 0.15447562040249874,
+    "calibrated_brier": 0.1593631174458232,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\angry-kirch-ade18a\\models\\calibrators\\gap_up.pkl"
+  }
 }

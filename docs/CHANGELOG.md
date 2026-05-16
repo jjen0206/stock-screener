@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-05-16 — 三維健診四缺口補齊
+
+### Fixed / Added
+- **`stock_warnings` 表**：production `data/cache.db` 補建表 schema（先前未套用 `init_db()` 新版 schema），手動跑 `fetch_stock_warnings.py` 寫入 117 rows（TPEx：attention 34 / disposition 66 / method_changed 16 / full_cash 1）。code path 經實測完整、`init_db()`、fetcher 都正常，建表落地由 GH Actions cron 一次就會自動發生。
+- **`models/per_strategy/`** 新增 2 個 `.pkl`：`rsi_recovery`、`inst_oversold_reversal`（min-samples 降到 50 才能涵蓋；OOB 0.629 / 0.453）。
+- **`models/calibrators/`** 首次建立資料夾，10 個策略的 isotonic / platt calibrator `.pkl` 全到位。Brier 對比見 `docs/calib-8-log-2026-05-15.log`。
+- **`news` 表** 清掉 1 筆 `fact_date > now+1y` 髒資料（sid 2208, 公司會議公告 fact_date 寫成 2029-01-31）。`< 2020-01-01` 無髒資料。
+
+### Open
+- **TWSE 4 條警示股源全 0 rows**（root cause：TWSE 已是 jQuery-flavored SPA，HTML 內無 `<table>`），TPEx OpenAPI 正常。詳見 `docs/stock-warnings-debug-2026-05-15.md`。
+- 9 個原本沒 .pkl 的策略，其中 7 個樣本不足（< 100，多數是 fundamentals 策略 fire 太少）持續 fallback。
+
+---
+
 ## 2026-05-15 — Round 1 清理維護
 
 ### Changed

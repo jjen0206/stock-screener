@@ -1,74 +1,74 @@
 {
   "strategy": "ma_alignment",
-  "trained_at": "2026-05-14T02:24:36+00:00",
-  "samples": 137,
-  "wins": 80,
-  "win_rate": 0.583941605839416,
+  "trained_at": "2026-05-16T07:21:57+00:00",
+  "samples": 197,
+  "wins": 108,
+  "win_rate": 0.5482233502538071,
   "status": "trained",
-  "oob_score": 0.6204379562043796,
+  "oob_score": 0.6294416243654822,
   "feature_importances": [
     {
-      "name": "macd_osc",
-      "importance": 0.15938934811928515
-    },
-    {
       "name": "kd_d",
-      "importance": 0.15589736905776586
-    },
-    {
-      "name": "macd_dif",
-      "importance": 0.12888322679624356
-    },
-    {
-      "name": "bias_pct",
-      "importance": 0.11494255727570289
+      "importance": 0.14886428923026437
     },
     {
       "name": "atr_normalized",
-      "importance": 0.11440127357537022
+      "importance": 0.13910393207840988
     },
     {
-      "name": "kd_k",
-      "importance": 0.09697499118597555
+      "name": "macd_osc",
+      "importance": 0.12479576953424798
     },
     {
       "name": "vol_ratio",
-      "importance": 0.09102327191673056
+      "importance": 0.11795469223250096
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.11602301546938336
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.11579320118524038
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.09231334646821444
     },
     {
       "name": "bb_position",
-      "importance": 0.07645048209564301
+      "importance": 0.07367759589137478
     },
     {
       "name": "inst_5d",
-      "importance": 0.023890993407194402
-    },
-    {
-      "name": "is_theme_member",
-      "importance": 0.012171702538549562
-    },
-    {
-      "name": "regime_dummy",
-      "importance": 0.0121126078114707
+      "importance": 0.024663220401328397
     },
     {
       "name": "inst_10d",
-      "importance": 0.008898561698257073
+      "importance": 0.01583861514852421
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.014089238649740921
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.00869847564936521
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.004447925289657914
+      "importance": 0.005393640050791523
     },
     {
       "name": "holders_delta_w_zscore",
-      "importance": 0.0005156892321534707
-    },
-    {
-      "name": "ma_alignment",
-      "importance": 0.0
+      "importance": 0.001648265317861637
     },
     {
       "name": "holders_pct_change_4w",
+      "importance": 0.00114270269275196
+    },
+    {
+      "name": "ma_alignment",
       "importance": 0.0
     }
   ],
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 39,
+    "raw_brier": 0.10674527240439928,
+    "calibrated_brier": 0.14759154998463245,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\angry-kirch-ade18a\\models\\calibrators\\ma_alignment.pkl"
+  }
 }

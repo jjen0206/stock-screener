@@ -1,71 +1,71 @@
 {
   "strategy": "taiex_alpha",
-  "trained_at": "2026-05-14T02:34:16+00:00",
-  "samples": 2248,
-  "wins": 1161,
-  "win_rate": 0.516459074733096,
+  "trained_at": "2026-05-16T07:24:10+00:00",
+  "samples": 2648,
+  "wins": 1305,
+  "win_rate": 0.4928247734138973,
   "status": "trained",
-  "oob_score": 0.6045373665480427,
+  "oob_score": 0.5861027190332326,
   "feature_importances": [
     {
       "name": "macd_dif",
-      "importance": 0.16747547232538584
+      "importance": 0.158796435198414
     },
     {
       "name": "atr_normalized",
-      "importance": 0.15425040849215393
+      "importance": 0.1504512078416354
     },
     {
       "name": "kd_d",
-      "importance": 0.12242695226129192
-    },
-    {
-      "name": "macd_osc",
-      "importance": 0.10310093461702995
+      "importance": 0.11307669481124864
     },
     {
       "name": "vol_ratio",
-      "importance": 0.1022410643705097
+      "importance": 0.1112544045988304
     },
     {
       "name": "kd_k",
-      "importance": 0.099769927352316
+      "importance": 0.10892799738924412
     },
     {
       "name": "bias_pct",
-      "importance": 0.0938254332016765
+      "importance": 0.0996228838088878
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.09692396617806977
     },
     {
       "name": "bb_position",
-      "importance": 0.08198748921192626
+      "importance": 0.08361181466055458
     },
     {
       "name": "holders_pct_change_4w",
-      "importance": 0.02526414131347553
-    },
-    {
-      "name": "is_theme_member",
-      "importance": 0.019613815895629397
-    },
-    {
-      "name": "holders_delta_w_zscore",
-      "importance": 0.011680524249853845
+      "importance": 0.021926811500066208
     },
     {
       "name": "ma_alignment",
-      "importance": 0.010771782666818963
+      "importance": 0.013689728526628437
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.010571066866064235
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.010410992925107483
     },
     {
       "name": "inst_10d",
-      "importance": 0.0027240624662094037
+      "importance": 0.009884647191753842
     },
     {
       "name": "inst_5d",
-      "importance": 0.0027023461289047753
+      "importance": 0.009241611279548713
     },
     {
       "name": "inst_5d_zscore",
-      "importance": 0.0021656454468178825
+      "importance": 0.0016097372239464096
     },
     {
       "name": "regime_dummy",
@@ -97,5 +97,13 @@
   "hold_days": 5,
   "model_type": "RandomForestClassifier",
   "n_estimators": 200,
-  "max_depth": 10
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "isotonic",
+    "n_holdout": 530,
+    "raw_brier": 0.17727840745963747,
+    "calibrated_brier": 0.11510331218998951,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\angry-kirch-ade18a\\models\\calibrators\\taiex_alpha.pkl"
+  }
 }

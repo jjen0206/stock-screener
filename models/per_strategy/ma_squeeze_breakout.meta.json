@@ -1,6 +1,6 @@
 {
   "strategy": "ma_squeeze_breakout",
-  "trained_at": "2026-05-14T02:27:31+00:00",
+  "trained_at": "2026-05-16T07:07:10+00:00",
   "samples": 1,
   "wins": 1,
   "win_rate": 1.0,

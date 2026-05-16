@@ -1,14 +1,109 @@
 {
   "strategy": "inst_oversold_reversal",
-  "trained_at": "2026-05-14T02:33:25+00:00",
-  "samples": 33,
-  "wins": 14,
-  "win_rate": 0.42424242424242425,
-  "status": "fallback",
-  "reason": "samples 33 < 100",
-  "min_train_samples": 100,
+  "trained_at": "2026-05-16T07:14:31+00:00",
+  "samples": 53,
+  "wins": 22,
+  "win_rate": 0.41509433962264153,
+  "status": "trained",
+  "oob_score": 0.4528301886792453,
+  "feature_importances": [
+    {
+      "name": "inst_5d",
+      "importance": 0.1875202522303985
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.14568995263013013
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.09689745381967313
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.09101172181241043
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.08019331237911263
+    },
+    {
+      "name": "bb_position",
+      "importance": 0.0724103234814703
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.06725952564066358
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.06658624666010092
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.064301165623737
+    },
+    {
+      "name": "kd_d",
+      "importance": 0.06332433260176612
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.043424833486156056
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.01814051514665775
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.0032403644877234024
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.0
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.0
+    }
+  ],
+  "feature_names": [
+    "kd_k",
+    "kd_d",
+    "macd_dif",
+    "macd_osc",
+    "ma_alignment",
+    "bb_position",
+    "vol_ratio",
+    "bias_pct",
+    "atr_normalized",
+    "inst_5d",
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
+  ],
+  "min_train_samples": 50,
   "lookback_days": 200,
   "target_pct": 0.05,
   "stop_pct": 0.03,
-  "hold_days": 5
+  "hold_days": 5,
+  "model_type": "RandomForestClassifier",
+  "n_estimators": 200,
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 11,
+    "raw_brier": 0.13822725227882401,
+    "calibrated_brier": 0.14394860170681822,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\angry-kirch-ade18a\\models\\calibrators\\inst_oversold_reversal.pkl"
+  }
 }

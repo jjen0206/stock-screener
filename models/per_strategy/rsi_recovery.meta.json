@@ -1,14 +1,109 @@
 {
   "strategy": "rsi_recovery",
-  "trained_at": "2026-05-14T02:30:04+00:00",
-  "samples": 86,
-  "wins": 29,
-  "win_rate": 0.3372093023255814,
-  "status": "fallback",
-  "reason": "samples 86 < 100",
-  "min_train_samples": 100,
+  "trained_at": "2026-05-16T07:13:44+00:00",
+  "samples": 97,
+  "wins": 31,
+  "win_rate": 0.31958762886597936,
+  "status": "trained",
+  "oob_score": 0.6288659793814433,
+  "feature_importances": [
+    {
+      "name": "bb_position",
+      "importance": 0.24037313465437823
+    },
+    {
+      "name": "vol_ratio",
+      "importance": 0.13693825456479747
+    },
+    {
+      "name": "kd_d",
+      "importance": 0.11096303908538008
+    },
+    {
+      "name": "macd_dif",
+      "importance": 0.1087502423406656
+    },
+    {
+      "name": "atr_normalized",
+      "importance": 0.10690701620550774
+    },
+    {
+      "name": "macd_osc",
+      "importance": 0.09898074385776456
+    },
+    {
+      "name": "bias_pct",
+      "importance": 0.09749838957890875
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.09036640882707865
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.009222770885518957
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.0
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.0
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.0
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.0
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.0
+    },
+    {
+      "name": "is_theme_member",
+      "importance": 0.0
+    }
+  ],
+  "feature_names": [
+    "kd_k",
+    "kd_d",
+    "macd_dif",
+    "macd_osc",
+    "ma_alignment",
+    "bb_position",
+    "vol_ratio",
+    "bias_pct",
+    "atr_normalized",
+    "inst_5d",
+    "inst_10d",
+    "holders_delta_w_zscore",
+    "inst_5d_zscore",
+    "regime_dummy",
+    "holders_pct_change_4w",
+    "is_theme_member"
+  ],
+  "min_train_samples": 50,
   "lookback_days": 200,
   "target_pct": 0.05,
   "stop_pct": 0.03,
-  "hold_days": 5
+  "hold_days": 5,
+  "model_type": "RandomForestClassifier",
+  "n_estimators": 200,
+  "max_depth": 10,
+  "min_samples_leaf": 5,
+  "calibration": {
+    "method": "platt",
+    "n_holdout": 19,
+    "raw_brier": 0.15865709738280728,
+    "calibrated_brier": 0.20130326735325124,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\angry-kirch-ade18a\\models\\calibrators\\rsi_recovery.pkl"
+  }
 }
