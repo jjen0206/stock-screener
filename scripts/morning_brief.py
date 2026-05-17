@@ -437,6 +437,13 @@ def has_any_change(
         return True
     if sentiment.get("sentiment") == "bearish":
         return True
+    # B 進場時機強化(2026-05-17):TP/SL 達標也算「主公必看」。
+    try:
+        from src import take_profit_alerts as _tp
+        if _tp.is_enabled() and _tp.check_take_profit_hit():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     return False
 
 
@@ -552,6 +559,52 @@ def _format_no_change(today_iso: str, channel: str) -> str:
     )
 
 
+def _build_take_profit_alert_lines(channel: str) -> list[str]:
+    """組「持倉停損 / 停利達標」強警報行(B 進場時機強化,2026-05-17)。
+
+    TAKE_PROFIT_ALERT_ENABLED=false / 空 → []。
+    severity=danger(達停損)→ 紅燈警示;其他 → 黃燈提示。
+    """
+    try:
+        from src import take_profit_alerts as _tp
+    except Exception:  # noqa: BLE001
+        return []
+    if not _tp.is_enabled():
+        return []
+    try:
+        alerts = _tp.check_take_profit_hit()
+    except Exception:  # noqa: BLE001
+        return []
+    if not alerts:
+        return []
+    has_danger = any(a.get("severity") == "danger" for a in alerts)
+    if channel == "telegram":
+        header = (
+            "🚨 <b>持倉達標警報</b>" if has_danger
+            else "💰 <b>持倉獲利了結提醒</b>"
+        )
+    else:
+        header = (
+            "🚨 **持倉達標警報**" if has_danger
+            else "💰 **持倉獲利了結提醒**"
+        )
+    lines = [header]
+    for a in alerts[:8]:
+        msg = str(a.get("message", "")).strip()
+        action = str(a.get("suggested_action", "")).strip()
+        if msg:
+            lines.append(
+                f"• {_h(msg)}" if channel == "telegram" else f"• {msg}"
+            )
+            if action:
+                lines.append(
+                    f"    → {_h(action)}" if channel == "telegram"
+                    else f"    → {action}"
+                )
+    lines.append("")
+    return lines
+
+
 def _format_full_telegram(
     today_iso: str,
     newly_warned: list[dict],
@@ -560,6 +613,9 @@ def _format_full_telegram(
     sentiment: dict,
 ) -> str:
     lines: list[str] = [f"🌅 <b>盤前快訊 {_h(today_iso)}</b>", ""]
+
+    # B 進場時機強化(2026-05-17):TP/SL 達標警報放最前面(主公看到就要處理)。
+    lines.extend(_build_take_profit_alert_lines("telegram"))
 
     # 持倉 drawdown 警報(2026-05-17 加)— RISK_MGMT_ENABLED + 有持倉 + severity != ok
     lines.extend(_build_drawdown_alert_lines("telegram"))
@@ -651,6 +707,9 @@ def _format_full_discord(
     sentiment: dict,
 ) -> str:
     lines: list[str] = [f"🌅 **盤前快訊 {today_iso}**", ""]
+
+    # B 進場時機強化(2026-05-17):TP/SL 達標警報放最前面。
+    lines.extend(_build_take_profit_alert_lines("discord"))
 
     lines.extend(_build_drawdown_alert_lines("discord"))
 
