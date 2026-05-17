@@ -63,6 +63,16 @@ class FinMindAPIError(RuntimeError):
     """FinMind API 回傳非 200 status 或網路錯誤時拋出。"""
 
 
+class FinMindQuotaError(FinMindAPIError):
+    """FinMind quota 爆(HTTP status=402)。
+
+    跟一般 FinMindAPIError 區分是因為:402 在 retry / long-backoff 是浪費 —
+    quota window 是小時級才 reset,不該占用 5+ 分鐘 sleep slot 卡住 batch。
+    by `_api_call` 偵測 status==402 觸發,由 `with_retry(no_retry_exceptions=...)`
+    跳過重試直接 fail-fast。
+    """
+
+
 # === 共用工具 ===
 
 def _api_call(dataset: str, **params: Any) -> list[dict]:
@@ -99,6 +109,13 @@ def _api_call(dataset: str, **params: Any) -> list[dict]:
             raise FinMindAPIError(
                 f"FinMind 回傳非 JSON (status={r.status_code}): {r.text[:200]}"
             ) from ex
+        if payload.get("status") == 402:
+            # quota 爆 — fail-fast,別讓 with_retry 浪費 long-backoff slot
+            # (FinMind 免費 token 600/hr,quota window 是小時級才 reset)
+            raise FinMindQuotaError(
+                f"FinMind quota 爆 (status=402): dataset={dataset} "
+                f"msg={payload.get('msg')} — 改日再跑或加 token"
+            )
         if payload.get("status") != 200:
             raise FinMindAPIError(
                 f"FinMind 回傳錯誤: dataset={dataset} "
@@ -121,8 +138,12 @@ def _api_call(dataset: str, **params: Any) -> list[dict]:
             _attempt,
             delays=[60, 120, 300, 600, 900],
             label=f"FinMind {dataset} (long-backoff)",
+            no_retry_exceptions=(FinMindQuotaError,),
         )
-    return with_retry(_attempt, max_attempts=3, label=f"FinMind {dataset}")
+    return with_retry(
+        _attempt, max_attempts=3, label=f"FinMind {dataset}",
+        no_retry_exceptions=(FinMindQuotaError,),
+    )
 
 
 def _next_day(d: str) -> str:
@@ -377,6 +398,10 @@ def fetch_quarterly_financials(stock_id: str, start: str, end: str) -> pd.DataFr
                 raw = _api_call(
                     DATASET_FINANCIAL, data_id=stock_id, start_date=s, end_date=e
                 )
+            except FinMindQuotaError:
+                # 402 quota 爆 — 不能 swallow,batch caller(backfill_financials)
+                # 要看到才能 fail-fast 中斷整批
+                raise
             except FinMindAPIError as ex:
                 logger.warning(
                     "季財報抓取失敗(可能需要 FinMind token):%s", ex
@@ -930,6 +955,7 @@ def fetch_all_daily_prices_via_finmind(
 
 __all__ = [
     "FinMindAPIError",
+    "FinMindQuotaError",
     "list_tw_stocks",
     "ensure_stock_info",
     "fetch_all_daily_prices_bulk",
