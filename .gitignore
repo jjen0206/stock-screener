@@ -18,6 +18,10 @@ env/
 data/*.db
 data/*.sqlite
 
+# institutional 全市場 22 月快照 — 改用 parquet+zstd 進 git(~30MB),
+# CSV 形態太大會撞 GitHub 100MB single-file 上限(實測 ~280MB)
+data/twse_snapshot/institutional.csv
+
 # IDE
 .vscode/
 .idea/
