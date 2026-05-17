@@ -62,6 +62,7 @@ streamlit run app.py
 |  | 🛡️ 持倉管理 | **真倉風險管理:ATR 停損停利 + drawdown 警報 + Kelly 部位建議** |
 |  | 🚨 警報設定 | **G 個股價格警報:價位 ≥/≤ / 漲跌幅 % / 除權息,30 分 cron 自動推 Telegram + Discord** |
 |  | 🧪 實測追蹤 | paper trades(自動 entry,30 分 cron 觸發進場/停損/突破 alerts)|
+| **AI** | 💬 問軍師 | **Gemini 對「今天所有資料」做綜合判讀**(個股 / 大盤),嚴謹+主動提示風險,不替主公做隱藏決定 |
 | **系統** | 📋 系統結論 / ⚙️ 系統 / ⚙️ 設定 | 資料新鮮度 / ML 模型狀態 / token 設定 |
 
 Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全域 CSS 字體放大 1.4×、卡片寬度自適應,警示 badge 在窄屏不被截斷。
@@ -136,6 +137,55 @@ Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全
 - daily-notify(22:13)+ morning-brief(08:30)推播都加「🚨 警報快訊」section
 
 **Kill-switch**:`PRICE_ALERT_ENABLED=false` → engine 全部回 []、不推任何 alert
+
+---
+
+## 💬 C 互動命令 + AI 軍師
+
+主公拍板「我想在 Telegram / Discord 直接下命令、問軍師,不用每次都開 Streamlit」(2026-05-17)。
+
+### 💬 AI 軍師(Gemini 2.5 Flash Lite)
+
+「💬 問軍師」頁:Gemini 對「今天所有資料」(`daily_picks` / 法人 / 千張戶 / 警示 / 新聞 / SHAP / 持倉)做綜合判讀,給結論 + 風險提示。
+
+- **個股模式**:輸入 sid + 自由提問 → 軍師拉 9 表 context → 答
+- **大盤模式**:regime + 美股 sentiment + 熱題材 top 3 → 答
+- **個股深度頁底部**也有 inline 「🧙 問軍師」按鈕,免切頁
+- 軍師人設:嚴謹優先、主動提示風險、不替主公做隱藏決定、結尾固定加「⚠️ 僅供研究」
+- **Kill-switch**:`AI_ASSISTANT_ENABLED=false`
+- **需要 `GEMINI_API_KEY`**(至 https://aistudio.google.com 申請,免費 tier 夠用)
+
+### 🤖 Discord Slash Commands
+
+`src/discord_bot.py` 走 Discord Interactions HTTP endpoint(不需常駐 bot daemon):
+
+| 指令 | 用途 |
+|---|---|
+| `/picks` | 今日推薦(top 15) |
+| `/watchlist` | 關注列表 + 現價 |
+| `/chart {sid}` | 近 20 日 ASCII sparkline |
+| `/stats` | cache 健康 + 30 天 hit rate |
+| `/positions` | 未平倉 + 損益 |
+| `/alert {sid} {price_above\|price_below} {value}` | 設價格警報 |
+| `/ask {question}` | 問軍師(帶 sid 走個股,不帶走大盤) |
+
+**部署**:
+1. 設 env `DISCORD_APPLICATION_ID` / `DISCORD_BOT_TOKEN` / `DISCORD_PUBLIC_KEY`
+2. `python scripts/discord_bot_register.py` 一次性註冊 slash commands(`DISCORD_GUILD_ID=xxx` 即時生效)
+3. `python scripts/discord_bot_serve.py` 跑 HTTP server(本機 + ngrok / cloudflared 或 Cloudflare Workers / Vercel)
+4. Discord Developer Portal → Application → Interactions Endpoint URL 填上述 endpoint
+
+**Kill-switch**:`DISCORD_BOT_ENABLED=false` 或缺三件套任一 → handler 自動停用
+
+### 📲 Telegram inline keyboard
+
+`src/notifier.py` 推播訊息可帶 inline button 一排:`📊 K 線 / ⭐ 加關注 / 🚨 設警報 / 💬 問軍師`,主公點 → callback dispatch:
+- `watch` → 直接寫 watchlist
+- `chart` → 回 ASCII sparkline(reuse `discord_bot._cmd_chart`)
+- `alert` → 提示走 `/alert` 或開「🚨 警報設定」頁
+- `ask` → 走 `ai_assistant.ask_about_stock`
+
+需要主公自己跑一個 Telegram bot getUpdates / webhook loop 接 callback_query,後續 PR 補。
 
 ---
 
@@ -226,6 +276,8 @@ TRAILING_STOP_ENABLED=true         # 動態停損(only-up)+ daily-notify batch u
 TAKE_PROFIT_ALERT_ENABLED=true     # TP/SL/trailing 達標警報 + 分批了結建議(+5%/+10%)
 PRICE_ALERT_ENABLED=true           # G 個股價格警報 + 持倉急殺 + 除權息提醒
 PERFORMANCE_ENABLED=true           # D 績效分析 + 策略 attribution + 組合回測
+AI_ASSISTANT_ENABLED=true          # C 軍師(Gemini 對「今天所有資料」綜合判讀);需 GEMINI_API_KEY
+DISCORD_BOT_ENABLED=true           # C Discord slash commands;需 DISCORD_APPLICATION_ID/BOT_TOKEN/PUBLIC_KEY
 ```
 
 每個出事可立刻設 `=false` 退化整個 module。

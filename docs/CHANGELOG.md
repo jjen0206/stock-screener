@@ -36,6 +36,43 @@
 - mobile-first:plotly responsive,4 column metric 在 iPhone 直接疊
 - 沒實際平倉資料時 Tab 1 顯「尚無已平倉交易,先到🛡️ 持倉管理新增/平倉」,不擋畫面
 - 整合 weekly brief 後主公週日 10:00 收到 Telegram 同時看到「系統推薦勝率 + 自己真實買賣勝率」,差距大就表示主公手感跟系統推薦脫鉤
+## 2026-05-17 — 💬 C AI 軍師 + Discord slash commands + Telegram inline keyboard
+
+### Added
+- **`src/ai_assistant.py`** — Gemini 2.5 Flash Lite 對「今天所有資料」做綜合判讀:
+  - `collect_stock_context(sid)` 攤平 `daily_prices` / `institutional` / `shareholder_concentration` / `news` / `stock_warnings` / `daily_picks` / `pick_shap_explanations` / `company_profiles` / `user_positions`
+  - `collect_market_context()` 拉 `compute_regime` + `get_us_sentiment` + `compute_theme_heat` top 3 + 警示概況 + 今日 picks 數
+  - `build_stock_prompt` / `build_market_prompt` 固定軍師人設(嚴謹 + 主動提示風險 + 不替主公做隱藏決定),結尾固定加「⚠️ 僅供研究,非投資建議」
+  - `ask_about_stock(sid, question)` / `ask_about_market(question)` 公開入口,失敗 / quota / 缺 key 一律 graceful 回 fallback 訊息(不 raise)
+  - Kill-switch `AI_ASSISTANT_ENABLED=true`(預設 on)
+- **`src/discord_bot.py`** — Discord Slash Commands HTTP interaction handler(不需常駐 bot daemon):
+  - `get_slash_command_definitions()` 7 個指令:`/picks` `/watchlist` `/chart {sid}` `/stats` `/positions` `/alert {sid} {type} {value}` `/ask {question}`
+  - `register_commands(...)` 一次性 PUT 到 Discord API
+  - `verify_signature(...)` Ed25519 驗章(PyNaCl,缺套件 / 缺 key graceful 回 False)
+  - `handle_interaction(payload)` 主入口,dispatch + 每個 _cmd_* 純函式回 Discord 規格 response dict
+  - `_sparkline()` 8 階 Unicode block ASCII K 線(行動裝置友善)
+  - Kill-switch `DISCORD_BOT_ENABLED=true`(預設 on,缺 `DISCORD_APPLICATION_ID` / `DISCORD_BOT_TOKEN` / `DISCORD_PUBLIC_KEY` 任一 → 自動停用)
+- **`scripts/discord_bot_register.py`** — 一次性 PUT slash command 定義到 Discord(支援 `DISCORD_GUILD_ID` 即時生效模式)
+- **`scripts/discord_bot_serve.py`** — 輕量 `http.server` 接 Discord interaction webhook(本機 + ngrok 或 Cloudflare Workers 部署)
+- **`src/notifier.py`** Telegram inline keyboard 支援:
+  - `build_stock_inline_keyboard(sid)` 一排 4 按鈕「📊 K 線 / ⭐ 加關注 / 🚨 設警報 / 💬 問軍師」,callback_data 走 `<action>:<sid>` 格式(< 64 byte 守 Telegram 限制)
+  - `send_telegram_message_with_keyboard(text, keyboard, ...)` send_telegram_message 的姊妹版,帶 `reply_markup`
+  - `answer_callback_query(...)` 點按鈕後 30s 內 ACK(避免 Telegram client 一直轉圈)
+  - `handle_callback_query(update)` dispatch 4 個 action:`watch` 寫 watchlist / `chart` 回 ASCII sparkline / `alert` 提示路徑 / `ask` 走 `ai_assistant.ask_about_stock`
+- **`app.py` 新頁「💬 問軍師」** + 個股深度頁底部加 inline `_render_detail_ask_ai_section`(對該 sid 一鍵問軍師)
+- **3 個 test 檔(共 65 個 test)**:
+  - `tests/test_ai_assistant.py`(14 test):kill-switch / context 蒐集 / prompt 組裝 / Gemini 失敗 graceful / happy path mock
+  - `tests/test_discord_bot.py`(23 test):is_enabled / slash command schema / verify_signature graceful / handle_interaction dispatch 7 個指令 / `_detect_sid` + `_sparkline` 純函式
+  - `tests/test_telegram_inline_keyboard.py`(13 test):keyboard 結構 / `reply_markup` payload / `answerCallbackQuery` / `handle_callback_query` 4 個 action
+
+### Config 新增
+- `DISCORD_APPLICATION_ID` / `DISCORD_BOT_TOKEN` / `DISCORD_PUBLIC_KEY` — Discord slash commands 必備三件套(缺任何一個就停用 bot,不影響既有 `DISCORD_WEBHOOK_URL` 推播)
+- `AI_ASSISTANT_ENABLED=true` / `DISCORD_BOT_ENABLED=true` — 預設 on,出事可 kill
+
+### Notes
+- AI 軍師 prompt 固定加「⚠️ 僅供研究,非投資建議」結尾;不替主公做隱藏決定(只給判讀+選項)
+- Discord slash commands 採 webhook 互動模式而非長駐 `discord.py` daemon — Streamlit Cloud 跑不起來常駐;主公自己挑 Cloudflare Workers / Vercel / 本機 + ngrok 跑 `scripts/discord_bot_serve.py`
+- Telegram inline button 對應的 bot serve loop 仍待主公接 webhook(現階段先有 `handle_callback_query` 函式,連線層後續再補)
 
 ---
 
