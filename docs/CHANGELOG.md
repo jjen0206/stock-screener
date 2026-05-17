@@ -5,6 +5,39 @@
 
 ---
 
+## 2026-05-17 — 🤖 E ML / 訊號強化(v4 features:籌碼 / 多時間軸 / 產業相對強度)
+
+### Added
+- **`src/ml_features.py`** — v4 10 個新 features 純函式 module(籌碼類 3 / 多時間軸 5 / 產業 2):
+  - 籌碼:`concentration_change_rate`(千張戶集中度月變化,平滑分母)/ `institutional_continuity`(外資+投信同向連續天數,帶符號)/ `inst_divergence`(0-1,1.0=一買一賣)
+  - 多時間軸:`ma5_above_ma20_pct` / `ma20_above_ma60_pct`(近 60 日占比 0-1)/ `momentum_5d` / `momentum_20d` / `momentum_60d`(% 報酬)
+  - 產業:`industry_relative_strength`(該股 5d 漲幅 − 同產業平均)/ `industry_rank_pct`(產業內 percentile 0-1)
+  - `_INDUSTRY_RETURNS_CACHE`(target_date × industry)讓全市場 predict_batch 跨 sid 共用,O(M) → O(industries)
+- **`src/ml_predictor.FEATURE_NAMES` 從 16 擴成 26**,v4 features 一律 append 在尾部維持 backward-compat
+- **`MODEL_VERSION` v3 → v4** + `V3_FEATURE_COUNT = 16` 常數
+- **Kill-switch `ML_NEW_FEATURES_ENABLED=false`** → v4 features 全 fallback 0.0(dict shape 仍 26 keys,model 不炸)
+- **`tests/test_ml_features_new.py`**(36 test):每 feature 正常路徑 + edge case(< 3 檔產業 / 空 inst_df / ma 不足 / null latest)+ 2 個 SQL-backed test(_load_industry_for_sid / _load_industry_returns_5d / cache 命中)
+- **`tests/test_ml_predictor_new_features.py`**(20 test):FEATURE_NAMES 順序契約(v3 前綴不變)+ v4 mock model 26 features 不炸 + kill-switch 各值(true/false/0/off/no)+ _aligned_feature_names slice v2/v3/v4 + 真實 extract_features smoke(kill-switch off → v4 全 0、on → momentum > 0)
+
+### Changed
+- `tests/test_ml_features_v3.py::test_aligned_feature_names_new_v3_model_uses_all_16` adjust 為 slice `FEATURE_NAMES[:16]`(v4 升版後 FEATURE_NAMES 26 個)
+- `tests/test_ml_features_v3_structural.py::test_model_version_is_v3` 改名 `..._or_later`,容忍 v3 / v4(`MODEL_VERSION` 升版只升不降)
+
+### 試水溫結果(2026-05-17 walk-forward,row split,大盤 cache 152k+ rows)
+| Model | OLD ROC (v3) | NEW ROC (v4) | Δ | 達 +0.02? |
+|---|---|---|---|---|
+| short_pick | 0.6417 | 0.6472 | +0.0055 | ❌ |
+| **big_holder_inflow** | 0.5952 | 0.6183 | **+0.0231** | ✅ |
+| macd_golden | 0.5882 | 0.5971 | +0.0089 | ❌ |
+
+`big_holder_inflow` 達標 — 籌碼類新 features 直接 hit 該策略訊號源。short_pick / macd_golden Train ROC 顯著升(0.88 → 0.93)但 WF ROC 邊際 — v3 base 已抓主要 signal,v4 新 features 對非籌碼策略邊際貢獻有限。
+
+### Notes
+- 不重訓全 17 model — 會 timeout。weekly cron(`ml-weekly-retrain.yml` 週日 03:00 TW)有 walk-forward A/B gate,下次自然吃 v4 features;失敗 model 自動 rollback `.pre_retrain.bak`,production 不會壞。
+- 詳細決策 / Backward-compat / kill-switch 說明見 `docs/ml-features-upgrade-2026-05-17.md`
+
+---
+
 ## 2026-05-17 — 📈 D 績效分析（真實交易 log + 策略組合回測 + 策略 attribution）
 
 ### Added

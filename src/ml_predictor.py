@@ -54,9 +54,11 @@ from src import database as db, indicators as ind
 logger = logging.getLogger(__name__)
 
 
-MODEL_VERSION = "v3"
+MODEL_VERSION = "v4"
 
-# v2 base(11) + v3 高階特徵(5,append 在尾部供 backward-compat slicing)
+# v2 base(11) + v3 高階特徵(5) + v4 籌碼/多時間軸/產業相對強度(10,append 在尾部)
+# 順序契約:任何新 feature 一律 append 尾部,_aligned_feature_names 對舊 model
+# slicing 前 N 欄。動到既有順序 = 破壞所有舊 pkl。
 FEATURE_NAMES = [
     # === v2 base(舊 model n_features_in_=11 仍能用) ===
     "kd_k", "kd_d", "macd_dif", "macd_osc", "ma_alignment",
@@ -68,7 +70,40 @@ FEATURE_NAMES = [
     "regime_dummy",
     "holders_pct_change_4w",
     "is_theme_member",
+    # === v4 新增(2026-05-17,kill-switch ML_NEW_FEATURES_ENABLED=false → 全 0.0) ===
+    # 籌碼
+    "concentration_change_rate",
+    "institutional_continuity",
+    "inst_divergence",
+    # 多時間軸
+    "ma5_above_ma20_pct",
+    "ma20_above_ma60_pct",
+    "momentum_5d",
+    "momentum_20d",
+    "momentum_60d",
+    # 產業相對強度
+    "industry_relative_strength",
+    "industry_rank_pct",
 ]
+
+# v3 base feature count(前 16 欄)— v4 新 features append 在 16 之後
+V3_FEATURE_COUNT = 16
+
+# Kill-switch:ML_NEW_FEATURES_ENABLED=false → v4 features 全 fallback 0.0
+# (但 keys 仍出現,讓 DataFrame shape 不變)。預設 enabled。
+_NEW_FEATURES_ENV_VAR = "ML_NEW_FEATURES_ENABLED"
+
+
+def _new_features_enabled() -> bool:
+    """讀 env ML_NEW_FEATURES_ENABLED;預設 true。
+
+    任何值除了 'false' / '0' / 'off' / 'no'(不分大小寫) → 視為 enabled。
+    """
+    import os as _os
+    val = _os.environ.get(_NEW_FEATURES_ENV_VAR)
+    if val is None or val == "":
+        return True
+    return val.strip().lower() not in ("false", "0", "off", "no")
 
 # regime → ordinal 映射(RandomForest split 對單調 ordinal 友善,不需 one-hot)
 _REGIME_ORDINAL: dict[str, float] = {
@@ -399,6 +434,7 @@ def extract_features(
         inst_10d = 0.0
 
     # === v3 高階特徵(每個獨立 try/except → 0.0 fallback,不 drop row) ===
+    holders_rows: list[dict] = []
     try:
         holders_rows = _load_holders_weeks(
             stock_id, target_date, weeks=5, db_path=db_path,
@@ -449,6 +485,100 @@ def extract_features(
             )
         is_theme_member = 0.0
 
+    # === v4 features(籌碼變化率 / 多時間軸 / 產業相對強度) ===
+    # kill-switch off → 全部 fallback 0.0(維持 dict shape)
+    new_feats: dict[str, float] = {
+        "concentration_change_rate": 0.0,
+        "institutional_continuity": 0.0,
+        "inst_divergence": 0.0,
+        "ma5_above_ma20_pct": 0.0,
+        "ma20_above_ma60_pct": 0.0,
+        "momentum_5d": 0.0,
+        "momentum_20d": 0.0,
+        "momentum_60d": 0.0,
+        "industry_relative_strength": 0.0,
+        "industry_rank_pct": 0.0,
+    }
+    if _new_features_enabled():
+        from src import ml_features as mlf
+
+        # 籌碼:concentration_change_rate 跟 holders_pct_change_4w 共用 holders_rows
+        try:
+            new_feats["concentration_change_rate"] = (
+                mlf.compute_concentration_change_rate(holders_rows)
+            )
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(
+                    f"[ML/extract] {stock_id}@{target_date} "
+                    f"concentration_change_rate fallback:{e}",
+                    flush=True,
+                )
+
+        # institutional_continuity / inst_divergence 共用 inst_df
+        try:
+            new_feats["institutional_continuity"] = (
+                mlf.compute_institutional_continuity(inst_df)
+            )
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(
+                    f"[ML/extract] {stock_id}@{target_date} "
+                    f"inst_continuity fallback:{e}",
+                    flush=True,
+                )
+        try:
+            new_feats["inst_divergence"] = mlf.compute_inst_divergence(inst_df)
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(
+                    f"[ML/extract] {stock_id}@{target_date} "
+                    f"inst_divergence fallback:{e}",
+                    flush=True,
+                )
+
+        # 多時間軸:用 df["close"] asc series
+        try:
+            close_series = df["close"].astype(float)
+            new_feats["ma5_above_ma20_pct"] = mlf.compute_ma_above_pct(
+                close_series, fast=5, slow=20, lookback=60,
+            )
+            new_feats["ma20_above_ma60_pct"] = mlf.compute_ma_above_pct(
+                close_series, fast=20, slow=60, lookback=60,
+            )
+            new_feats["momentum_5d"] = mlf.compute_momentum_n(close_series, 5)
+            new_feats["momentum_20d"] = mlf.compute_momentum_n(close_series, 20)
+            new_feats["momentum_60d"] = mlf.compute_momentum_n(close_series, 60)
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(
+                    f"[ML/extract] {stock_id}@{target_date} "
+                    f"momentum/ma fallback:{e}",
+                    flush=True,
+                )
+
+        # 產業相對強度:撈該股 industry + 同產業 5d 報酬 list(cached)
+        try:
+            industry = mlf._load_industry_for_sid(stock_id, db_path=db_path)
+            if industry:
+                ind_returns = mlf.get_industry_returns_5d_cached(
+                    industry, target_date, db_path=db_path,
+                )
+                sid_5d = mlf.compute_momentum_n(df["close"].astype(float), 5)
+                new_feats["industry_relative_strength"] = (
+                    mlf.compute_industry_relative_strength(sid_5d, ind_returns)
+                )
+                new_feats["industry_rank_pct"] = (
+                    mlf.compute_industry_rank_pct(sid_5d, ind_returns)
+                )
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(
+                    f"[ML/extract] {stock_id}@{target_date} "
+                    f"industry_relative fallback:{e}",
+                    flush=True,
+                )
+
     feats = {
         "kd_k": kd_k, "kd_d": kd_d,
         "macd_dif": macd_dif, "macd_osc": macd_hist,
@@ -465,6 +595,8 @@ def extract_features(
         "regime_dummy": regime_dummy,
         "holders_pct_change_4w": holders_pct_change_4w,
         "is_theme_member": is_theme_member,
+        # v4(全 fallback 0.0 by default + kill-switch off 維持 0.0)
+        **new_feats,
     }
     # v2 base 11 個保持嚴格 NaN/Inf check(歷史行為);v3 5 個內部已 fallback 0.0,
     # 不可能 NaN/Inf,所以只檢 v2 那 11 個
@@ -1047,8 +1179,10 @@ def train_with_calibration(
 
 __all__ = [
     "FEATURE_NAMES",
+    "V3_FEATURE_COUNT",
     "MODEL_VERSION",
     "MIN_HISTORY_DAYS",
+    "_new_features_enabled",
     "extract_features",
     "compute_label",
     "build_training_dataset",

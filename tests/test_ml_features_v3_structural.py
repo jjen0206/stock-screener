@@ -71,9 +71,11 @@ def test_aligned_feature_names_helper_exists():
     )
 
 
-def test_model_version_is_v3():
-    """MODEL_VERSION constant 應為 'v3'(meta.json 升版證據)。"""
-    assert m.MODEL_VERSION == "v3"
+def test_model_version_is_v3_or_later():
+    """MODEL_VERSION constant 應為 v3 / v4(任何 v3+,升版只升不降)。"""
+    assert m.MODEL_VERSION in ("v3", "v4"), (
+        f"MODEL_VERSION 不應降版,目前 {m.MODEL_VERSION}"
+    )
 
 
 def test_predict_paths_use_aligned_feature_names():

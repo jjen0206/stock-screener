@@ -189,12 +189,13 @@ def test_aligned_feature_names_old_v2_model_uses_first_11():
 
 
 def test_aligned_feature_names_new_v3_model_uses_all_16():
-    """新 v3 model n_features_in_=16 → 回完整 FEATURE_NAMES。"""
+    """v3 model n_features_in_=16 → 回 FEATURE_NAMES 前 16 個(v4 升版後 FEATURE_NAMES
+    擴成 26,前 16 仍是 v3 那批)。"""
     class _V3Model:
         n_features_in_ = 16
 
     aligned = m._aligned_feature_names(_V3Model())
-    assert aligned == m.FEATURE_NAMES
+    assert aligned == m.FEATURE_NAMES[:16]
     assert len(aligned) == 16
 
 

@@ -269,6 +269,7 @@ STRATEGY_CONSENSUS_ENABLED=true    # 跨策略共識 ×1.05~1.15
 REGIME_GATING_ENABLED=true         # 大盤 regime 縮量 + ML threshold uplift
 THEME_HEAT_ENABLED=true            # 題材熱度 5 日動能,冷題材 hard exclude
 ML_CALIBRATION_ENABLED=true        # isotonic probability 校正
+ML_NEW_FEATURES_ENABLED=true       # v4 features(籌碼 / 多時間軸 / 產業相對強度)— off 退化 v3
 POSITION_SIZING_ENABLED=true       # Kelly 軍師部位建議行
 RISK_MGMT_ENABLED=true             # ATR 停損停利 + drawdown 警報
 PATTERN_DETECTION_ENABLED=true     # K 線形態判讀(三紅兵 / 槌子 / 吞噬 / 晨星 / 旗形 / 十字星)
@@ -371,6 +372,8 @@ models/
 每週日 03:00 TPE 由 `ml-weekly-retrain.yml` 跑 walk-forward 重訓,ROC AUC < 舊 -0.02 → rollback 不 commit 新 model。
 
 `STRATEGY_ML_THRESHOLDS`(實測 winner):ma_alignment 0.55、bias_convergence 0.65、macd_golden 0.60、bb_lower_rebound 0.50、volume_breakout 0.65。`gap_up` 2026-05-15 下架 ML 過濾(WF ROC 0.4926 ≈ random),改 rule-based `gap_vol_ratio_max=3.0` 收緊到 sweet spot。
+
+**Features**:v4(26 個)= v2 base(11)+ v3 高階(5,籌碼/regime/theme)+ v4 升級(10,籌碼變化率 / 多時間軸動能 / 產業相對強度;見 `src/ml_features.py`)。舊 v2/v3 pkl 透過 `_aligned_feature_names` 前 N 欄 slice 仍能 inference,新模型等 weekly cron 自然吃。詳見 `docs/ml-features-upgrade-2026-05-17.md`。
 
 ---
 
