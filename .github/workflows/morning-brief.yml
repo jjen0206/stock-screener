@@ -1,0 +1,77 @@
+name: Morning Brief (pre-market)
+
+# 盤前快訊:每交易日 08:30 Asia/Taipei(00:30 UTC)推播
+#
+# 目的:主公開盤前 30 分鐘掌握隔夜變動(警示更新 / 重大 news / 推薦變動 / 美股情緒),
+# 不重複推昨晚 22:13 那一輪 — 只推「變動 + 重要警示」,無變動推極簡訊。
+#
+# Kill-switch:MORNING_BRIEF_ENABLED=false → script 自己 exit 0 不推。
+
+on:
+  schedule:
+    # 00:30 UTC = 08:30 Asia/Taipei,週一到週五(台股不開的週末跳過)
+    # 比 daily-notify 22:13 慢 ~10 小時,有時間讓 MOPS 凌晨更新 + 美股收盤
+    - cron: "30 0 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+      date:
+        description: "覆寫比對基準日 YYYY-MM-DD(留空走 daily_prices MAX(date))"
+        required: false
+        default: ""
+
+# 同 group 同時最多 1 個,避免兩輪 cron 重疊
+concurrency:
+  group: morning-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # refetch warnings ~30s + news ~5s + yfinance ~5s + 推播 ~3s
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 雲端 runner 是 fresh container — preload data/twse_snapshot/ CSV 進 SQLite
+      # 確保 compute_top_picks(走 _select_top_picks) 有 daily_prices / daily_picks
+      # 歷史可比對,否則 yesterday_picks 永遠空,diff 永遠是「沒變動」失去意義。
+      - name: Preload snapshots into SQLite
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          counts = db.preload_snapshots()
+          print(f'[MORNING_BRIEF] preload snapshots: {counts}')
+          "
+
+      - name: Run morning brief
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MORNING_BRIEF_ENABLED: "true"
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ inputs.date }}"
+          fi
+          echo "Running: python scripts/morning_brief.py $ARGS"
+          python scripts/morning_brief.py $ARGS

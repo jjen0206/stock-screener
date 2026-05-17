@@ -48,6 +48,43 @@
 
 ---
 
+## 2026-05-17 — 盤前快訊(`scripts/morning_brief.py`)
+
+### Added
+- **`scripts/morning_brief.py`** 新腳本:每交易日 08:30 Asia/Taipei 推播,讓主公開盤前 30 分鐘看到隔夜變動
+  - **重抓 warnings**(包 `fetch_stock_warnings.run`)— 拿 MOPS 凌晨更新
+  - **重抓 news**(`fetch_and_store_news`)— 拿 news_fetcher 每小時 cron 之外的早盤新增
+  - **find_newly_warned_picks**:對昨晚 picks 的 sid 跑 `stock_warnings` active query → ⚠️ 標出
+  - **find_recent_picks_news**:撈昨晚 picks 在 < 12h 內、subject 含 `IMPORTANT_NEWS_KEYWORDS`(重大/違約/裁員/下修/召回/處置/減資/破產 等 30+ 關鍵字)的 news → 📰 標出
+  - **diff_picks**:今晨重跑 `_select_top_picks` vs 昨晚比對 → added / removed / reranked
+  - **fetch_us_market_sentiment**:yfinance 抓 `^DJI` / `^IXIC` / `^GSPC` 平均 → bearish (≤ -1%) / neutral / bullish (≥ +0.5%)
+  - **無變動模式**:三項都空 + sentiment 非 bearish → 推「✅ 盤前無重大變動」一行極簡訊,避免吵主公
+  - **kill-switch**:`MORNING_BRIEF_ENABLED=false` → exit 0 不推
+  - Telegram 走 HTML(`parse_mode="HTML"`)避開 Markdown entity 解析坑(沿用 news_notify 模式);Discord 走 Markdown
+- **`.github/workflows/morning-brief.yml`** 新 workflow
+  - `cron: "30 0 * * 1-5"`(00:30 UTC = 08:30 台北,週一~五)
+  - `concurrency: morning-brief` 避免兩輪 cron 重疊
+  - `timeout-minutes: 15`(refetch ~30s + 推播 ~3s,留 buffer)
+  - 跑前先 `db.preload_snapshots()` — fresh container 必須拿到 `daily_picks.csv` 才能做 diff
+  - 不 commit / 不 push snapshot(快訊只讀不寫)
+- **`tests/test_morning_brief.py`** 25 個 test
+  - kill-switch on/off(預設 on,各種 off 值)
+  - news 關鍵字 filter(命中 / 不命中)+ < 12h 過濾
+  - warning 比對(active hit / 空 / 過期 expired)
+  - diff_picks(added / removed / reranked / 兩邊都空)
+  - has_any_change(警示 → True / bullish → False / bearish → True)
+  - format 訊息(無變動極簡 / 完整 / telegram HTML / discord markdown)
+  - fetch_us_market_sentiment(yfinance 缺失 graceful / fake ticker 跌幅判 bearish)
+  - run_morning_brief 整合(dry_run + skip_refetch + 無 secrets 不 call send)
+  - schema 對齊 production(monkeypatch `config.DATABASE_PATH` + `db.init_db()`)
+
+### Notes
+- 不重複推昨晚 22:13 整套(太吵)— 只推變動
+- 個別查詢失敗(網路 / TWSE / yfinance)全 graceful — 主邏輯不會被單點故障擋住
+- 跟既有 daily_notify(22:13)/ news_notify(每小時)/ stock-warnings 完全獨立,互不影響
+
+---
+
 ## 2026-05-16 — Runtime log 持久化(`logs/`)
 
 ### Added

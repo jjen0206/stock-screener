@@ -108,6 +108,7 @@ Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全
 |---|---|---|
 | `daily-notify.yml` | 週一~五 **22:13 Asia/Taipei** | fetch → precompute → backtest yesterday → push Telegram + Discord(含 ✨ 高信心精選 + 大戶 + 昨日複盤)|
 | `daily-notify-only.yml` | manual | 不重 fetch,只跑推播(快速 dry-run)|
+| `morning-brief.yml` | 平日 08:30 TPE | 開盤前 30 分鐘 — 重抓警示 + news,推「警示更新 / 新增 picks / 美股情緒」變動;無變動推極簡訊。kill-switch `MORNING_BRIEF_ENABLED=false` |
 | `morning-refetch.yml` | 平日 9:00 TPE | 早盤前重抓 TWSE 市場資料 |
 | `news-notify.yml` | 每小時 | 重大訊息掃 + 白名單推播 |
 | `stock-warnings.yml` | 平日 17:13 TPE | TWSE/TPEx 警示股 + MOPS 違約交割 |
