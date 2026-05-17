@@ -999,7 +999,96 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
             lines.append(f"   {''.join(parts)}")
         except (TypeError, ValueError):
             pass  # 任何 cast 失敗 silent skip,不擋整段推播
+
+    # 軍師部位建議(2026-05-17 加;POSITION_SIZING_ENABLED=true 時)
+    # caller 預先注入 pick["position_advice"] dict(由 _enrich_picks_with_position_advice
+    # 算出);沒注入 / 不啟用 → 整行 graceful skip。
+    advice = pick.get("position_advice")
+    if isinstance(advice, dict) and advice.get("position_pct", 0) > 0:
+        try:
+            pct = float(advice["position_pct"]) * 100
+            lots = int(advice.get("suggested_lots", 0))
+            shares_n = int(advice.get("suggested_shares", 0))
+            if lots > 0:
+                size_str = f"~{lots} 張"
+            elif shares_n > 0:
+                size_str = f"~{shares_n} 股"
+            else:
+                size_str = "—"
+            lines.append(f"   💰 軍師建議:投入總部位 {pct:.0f}%({size_str})")
+            # ATR 停損停利
+            sl = advice.get("stop_loss")
+            tp = advice.get("take_profit")
+            if sl and tp:
+                sl_pct = advice.get("stop_loss_pct", 0)
+                tp_pct = advice.get("take_profit_pct", 0)
+                lines.append(
+                    f"   🎯 停損 {float(sl):.0f}({sl_pct:+.1f}%) / "
+                    f"停利 {float(tp):.0f}({tp_pct:+.1f}%)"
+                )
+            # 集中度提示
+            max_pct = float(advice.get("max_single_pct", 0.2)) * 100
+            lines.append(
+                f"   ⚠️ 單檔風險上限 {max_pct:.0f}%,目前合理"
+            )
+        except (TypeError, ValueError, KeyError):
+            pass  # graceful skip,不擋整段推播
     return "\n".join(lines)
+
+
+def _enrich_picks_with_position_advice(
+    picks: list[dict],
+    total_capital: float = 1_000_000.0,
+) -> None:
+    """對 picks list in-place 注入 "position_advice" dict。
+
+    - POSITION_SIZING_ENABLED=false → 全 set None,format_pick_block skip。
+    - RISK_MGMT_ENABLED=false → 停損停利欄不填(format_pick_block 自己 skip 行)。
+    - 任何例外:該 pick 設 None,不擋其他 pick。
+
+    advice dict 包含:
+        - position_pct, suggested_shares, suggested_lots, max_single_pct
+        - stop_loss, take_profit, stop_loss_pct, take_profit_pct
+    """
+    from src import position_sizing as _ps
+    from src import risk_management as _rm
+    ps_on = _ps.is_enabled()
+    rm_on = _rm.is_enabled()
+
+    for p in picks:
+        if not ps_on:
+            p["position_advice"] = None
+            continue
+        sid = p.get("sid")
+        if not sid:
+            p["position_advice"] = None
+            continue
+        try:
+            advice = _ps.suggest_position_size(
+                str(sid),
+                ml_prob=p.get("ml_prob"),
+                confidence=p.get("confidence_tier"),
+                total_capital=float(total_capital),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[NOTIFIER] suggest_position_size 失敗 sid=%s", sid)
+            p["position_advice"] = None
+            continue
+
+        # 停損停利(用 pick["close"] 當 entry 推估;主公推播當下還沒進場)
+        if rm_on and p.get("close"):
+            try:
+                sl_res = _rm.compute_atr_stop_loss(str(sid), float(p["close"]))
+                tp_res = _rm.compute_atr_take_profit(str(sid), float(p["close"]))
+                if sl_res:
+                    advice["stop_loss"] = sl_res["stop_loss"]
+                    advice["stop_loss_pct"] = sl_res["stop_loss_pct"]
+                if tp_res:
+                    advice["take_profit"] = tp_res["take_profit"]
+                    advice["take_profit_pct"] = tp_res["take_profit_pct"]
+            except Exception:  # noqa: BLE001
+                logger.exception("[NOTIFIER] ATR stop/tp 失敗 sid=%s", sid)
+        p["position_advice"] = advice
 
 
 def format_premium_picks_block(
@@ -1293,6 +1382,87 @@ def format_yesterday_recap(
     return "\n".join(lines)
 
 
+def _format_drawdown_alert(channel: str = "telegram") -> str:
+    """組整體 drawdown 警報 section(從 user_positions 撈)。
+
+    流程:
+    - RISK_MGMT_ENABLED=false → 回空字串。
+    - 沒任何 user_positions(open + closed)→ 回空字串。
+    - drawdown >= warn (10%) 黃燈 / >= danger (20%) 紅燈。
+    - 損益是正的(賺錢)→ 不顯。
+
+    每筆 open position 撈 daily_prices 最新 close 算未實現。
+    closed 用 exit_price 算已實現。
+    """
+    from src import risk_management as _rm
+    if not _rm.is_enabled():
+        return ""
+    try:
+        positions = db.get_all_positions(include_closed=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] get_all_positions 失敗,略過 drawdown alert")
+        return ""
+    if not positions:
+        return ""
+
+    # 注入 current_price(open positions 用最新 daily_prices.close)
+    open_sids = [p["stock_id"] for p in positions if int(p.get("is_open", 1) or 0) == 1]
+    px_map: dict[str, float] = {}
+    if open_sids:
+        placeholders = ",".join(["?"] * len(open_sids))
+        try:
+            with db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT stock_id, close FROM daily_prices WHERE stock_id IN "
+                    f"({placeholders}) AND date = ("
+                    "  SELECT MAX(date) FROM daily_prices dp2 "
+                    "  WHERE dp2.stock_id = daily_prices.stock_id"
+                    ")",
+                    open_sids,
+                ).fetchall()
+                for r in rows:
+                    if r["close"] is not None:
+                        px_map[r["stock_id"]] = float(r["close"])
+        except Exception:  # noqa: BLE001
+            logger.exception("[NOTIFIER] 撈 daily_prices for drawdown alert 失敗")
+
+    enriched = []
+    for p in positions:
+        sid = p["stock_id"]
+        enriched.append({
+            **p,
+            "current_price": px_map.get(sid),
+        })
+    dd = _rm.drawdown_pct(enriched)
+
+    sev = dd["severity"]
+    if sev == "ok":
+        return ""
+
+    b = _bold
+    dd_pct = dd["drawdown_pct"]
+    if sev == "danger":
+        header = f"🚨 {b('持倉警報', channel)}"
+        body = (
+            f"整體 drawdown {dd_pct:+.2f}% "
+            f"(loss ≥ {_rm.DRAWDOWN_DANGER_PCT:.0f}%)\n"
+            "🛑 軍師建議:停手 + 全面檢視策略"
+        )
+    else:
+        header = f"⚠️ {b('持倉警報', channel)}"
+        body = (
+            f"整體 drawdown {dd_pct:+.2f}% "
+            f"(loss ≥ {_rm.DRAWDOWN_WARN_PCT:.0f}%)\n"
+            "💡 軍師建議:暫停加碼,檢視持倉"
+        )
+    detail = (
+        f"持倉 {dd['n_open']} 檔 open / {dd['n_closed']} closed,"
+        f"總投入 ${dd['total_invested']:,.0f},"
+        f"未實現 ${dd['unrealized_pnl']:+,.0f}"
+    )
+    return f"{header}\n{body}\n   {detail}"
+
+
 def _regime_gating_caption(picks: list[dict]) -> str:
     """從 picks[0]["regime_gating"] 取 caption(注入訊息開頭)。
 
@@ -1408,7 +1578,7 @@ def format_top_picks_message(
         logger.exception("[NOTIFIER] 題材熱度 caption 失敗,略過該 section")
         theme_block = ""
 
-    # === 組訊息:header + regime caption + 各 section(空 skip)+ footer ===
+    # === 組訊息:header + regime caption + drawdown alert + 各 section + footer ===
     parts: list[str] = [
         f"🎯 {b(f'短線精選 · {date_label}', channel)}{_weekend_hint(date)}",
     ]
@@ -1417,6 +1587,16 @@ def format_top_picks_message(
     gating_caption = _regime_gating_caption(picks)
     if gating_caption:
         parts.append(gating_caption)
+
+    # Drawdown 警報(2026-05-17 加)— 從 user_positions 撈整體損益,
+    # > 10% 黃燈 / > 20% 紅燈。RISK_MGMT_ENABLED=false 或無持倉 → skip。
+    try:
+        dd_alert = _format_drawdown_alert(channel=channel)
+        if dd_alert:
+            parts.append(dd_alert)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] drawdown alert 失敗,略過該 section")
+
     for block in (
         recap_block, theme_block, short_picks_block, premium_block, movers_block,
     ):
@@ -1635,6 +1815,15 @@ def notify_top_picks(
         logger.exception("[NOTIFIER] SHAP enrich 整體失敗,picks 不帶 SHAP 行")
         for p in picks:
             p.setdefault("shap_reason", "")
+
+    # 軍師部位建議 enrich(2026-05-17 加)— in-place 注入 pick["position_advice"]
+    # 失敗不擋主推播(每筆 graceful skip)。
+    try:
+        _enrich_picks_with_position_advice(picks)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] position advice enrich 整體失敗")
+        for p in picks:
+            p.setdefault("position_advice", None)
 
     # 高信心精選(三維交集:法人連買 ≥3 + 千張戶進場 + ML 過門檻)— 跟 ≥2 共識
     # 並列獨立 section。helper 自己 graceful 空回 []。任何例外不擋主推播。

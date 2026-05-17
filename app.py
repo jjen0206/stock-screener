@@ -112,7 +112,7 @@ PAGES = [
     "🔍 個股", "📊 個股深度",
     "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
-    "💼 交易紀錄", "🧪 實測追蹤", "📊 策略歷史",
+    "💼 交易紀錄", "🛡️ 持倉管理", "🧪 實測追蹤", "📊 策略歷史",
     "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -1019,6 +1019,8 @@ def main() -> None:
         _page_market_sentiment()
     elif page == "💼 交易紀錄":
         _page_trades()
+    elif page == "🛡️ 持倉管理":
+        _page_position_management()
     elif page == "🧪 實測追蹤":
         _page_paper_tracking()
     elif page == "📊 策略歷史":
@@ -5781,6 +5783,293 @@ def _page_trades() -> None:
                 pass
             st.toast(f"已刪除 #{t['id']}", icon="🗑️")
             st.rerun()
+
+
+# === 持倉管理(風險控制)頁 ===
+
+def _page_position_management() -> None:
+    """🛡️ 持倉管理頁 — 主公手動建倉 + drawdown / 集中度告警。
+
+    跟「💼 交易紀錄」不同:這頁是「真倉」+ 停損停利 + 部位建議,
+    交易紀錄是純歷史 ledger。
+    """
+    from src import position_sizing as _ps
+    from src import risk_management as _rm
+    st.header("🛡️ 持倉管理")
+    st.caption(
+        "記錄當前持倉 + 自動算 ATR 停損停利 + 整體 drawdown 監控。"
+        "**這頁是給「真倉」用,『💼 交易紀錄』記完整買賣 ledger。**"
+    )
+    db.init_db()
+
+    rm_on = _rm.is_enabled()
+    ps_on = _ps.is_enabled()
+    if not rm_on:
+        st.warning("⚠️ 風險管理已停用(RISK_MGMT_ENABLED=false),停損停利不會自動算。")
+    if not ps_on:
+        st.warning("⚠️ 部位建議已停用(POSITION_SIZING_ENABLED=false),Kelly 建議不顯。")
+
+    # === 新增持倉表單 ===
+    with st.expander("✚ 新增持倉", expanded=True):
+        with st.form("add_position_form", clear_on_submit=True):
+            cols = st.columns([2, 1.5, 1.5, 1.5])
+            sid_input = cols[0].text_input(
+                "股票代號", placeholder="2330", key="pos_sid",
+            )
+            entry_price = cols[1].number_input(
+                "進場價", min_value=0.01, value=100.0, step=0.5,
+                format="%.2f", key="pos_entry_price",
+            )
+            shares = cols[2].number_input(
+                "股數(整股)", min_value=1, value=1000, step=1000,
+                key="pos_shares",
+                help="1 張 = 1000 股。預設 1 張(1000 股)。",
+            )
+            entry_date = cols[3].date_input(
+                "進場日", value=date.today(), key="pos_entry_date",
+            )
+
+            cols2 = st.columns([2, 2, 2])
+            atr_days = cols2[0].slider(
+                "ATR 平滑天數", 5, 30, 14, key="pos_atr_days",
+            )
+            stop_mult = cols2[1].number_input(
+                "停損 ATR 倍數", 0.5, 5.0, 2.0, 0.5,
+                key="pos_stop_mult",
+                help="停損 = entry − ATR × 倍數。預設 2.0。",
+            )
+            tp_mult = cols2[2].number_input(
+                "停利 ATR 倍數", 0.5, 10.0, 4.0, 0.5,
+                key="pos_tp_mult",
+                help="停利 = entry + ATR × 倍數。預設 4.0(2:1 風報)。",
+            )
+
+            stop_manual = st.number_input(
+                "手動停損(0 = 自動 ATR 算)",
+                min_value=0.0, value=0.0, step=0.5, format="%.2f",
+                key="pos_stop_manual",
+            )
+            tp_manual = st.number_input(
+                "手動停利(0 = 自動 ATR 算)",
+                min_value=0.0, value=0.0, step=0.5, format="%.2f",
+                key="pos_tp_manual",
+            )
+            notes = st.text_input("備註(選填)", key="pos_notes")
+
+            submitted = st.form_submit_button("✚ 新增", type="primary")
+            if submitted:
+                sid_clean = sid_input.strip()
+                if not sid_clean:
+                    st.error("請輸入股票代號")
+                else:
+                    # 算 ATR 停損停利(若 user 沒手動填)
+                    sl = stop_manual if stop_manual > 0 else None
+                    tp = tp_manual if tp_manual > 0 else None
+                    if sl is None and rm_on:
+                        try:
+                            sl_res = _rm.compute_atr_stop_loss(
+                                sid_clean, float(entry_price),
+                                days=int(atr_days),
+                                atr_multiplier=float(stop_mult),
+                            )
+                            if sl_res:
+                                sl = sl_res["stop_loss"]
+                        except Exception:  # noqa: BLE001
+                            sl = None
+                    if tp is None and rm_on:
+                        try:
+                            tp_res = _rm.compute_atr_take_profit(
+                                sid_clean, float(entry_price),
+                                days=int(atr_days),
+                                atr_multiplier=float(tp_mult),
+                            )
+                            if tp_res:
+                                tp = tp_res["take_profit"]
+                        except Exception:  # noqa: BLE001
+                            tp = None
+                    try:
+                        pid = db.add_position(
+                            sid_clean,
+                            entry_date.isoformat(),
+                            float(entry_price),
+                            int(shares),
+                            stop_loss=sl,
+                            take_profit=tp,
+                            notes=notes.strip() if notes.strip() else None,
+                        )
+                        if sl and tp:
+                            msg = (
+                                f"✅ #{pid} {sid_clean} @ {entry_price:.2f} × "
+                                f"{shares} 股 (停損 {sl:.2f} / 停利 {tp:.2f})"
+                            )
+                        else:
+                            msg = (
+                                f"✅ #{pid} {sid_clean} @ {entry_price:.2f} × "
+                                f"{shares} 股"
+                            )
+                        st.success(msg)
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(f"❌ 輸入錯誤:{e}")
+
+    # === 持倉列表 + 整體統計 ===
+    positions = db.get_all_positions(include_closed=False)
+    if not positions:
+        st.info("尚無持倉。從上方表單新增第一筆。")
+        return
+
+    # 撈每檔的 current_price
+    enriched: list[dict] = []
+    with db.get_conn() as conn:
+        for p in positions:
+            sid = p["stock_id"]
+            row = conn.execute(
+                "SELECT close FROM daily_prices WHERE stock_id=? "
+                "ORDER BY date DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+            cur = float(row["close"]) if row and row["close"] is not None else None
+            entry = float(p["entry_price"])
+            shares_n = int(p["shares"])
+            sign = 1.0 if (p.get("side") or "long") == "long" else -1.0
+            pnl = (cur - entry) * shares_n * sign if cur else None
+            pnl_pct = (cur - entry) / entry * 100.0 * sign if cur else None
+            enriched.append({
+                **p,
+                "current_price": cur,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            })
+
+    # 整體 drawdown
+    dd_input = [
+        {**e, "current_price": e["current_price"]}
+        for e in enriched
+    ]
+    # 把已平倉的也撈進來(get_all_positions(include_closed=True))算 realized
+    closed = [
+        p for p in db.get_all_positions(include_closed=True)
+        if int(p.get("is_open", 1) or 0) == 0
+    ]
+    dd_summary = _rm.drawdown_pct(dd_input + closed)
+
+    st.markdown("### 📊 整體統計")
+    mcols = st.columns(4)
+    mcols[0].metric("總投入", f"${dd_summary['total_invested']:,.0f}")
+    mcols[1].metric("當前市值", f"${dd_summary['current_value']:,.0f}")
+    mcols[2].metric(
+        "未實現損益",
+        f"${dd_summary['unrealized_pnl']:+,.0f}",
+        delta=f"{dd_summary['drawdown_pct']:+.2f}%"
+        if dd_summary['total_invested'] > 0 else None,
+    )
+    mcols[3].metric(
+        "已實現損益",
+        f"${dd_summary['realized_pnl']:+,.0f}",
+        help=f"持倉筆數: {dd_summary['n_open']} open / {dd_summary['n_closed']} closed",
+    )
+
+    sev = dd_summary["severity"]
+    dd_pct = dd_summary["drawdown_pct"]
+    if sev == "danger":
+        st.error(
+            f"🚨 整體 drawdown {dd_pct:+.2f}%(loss ≥ {_rm.DRAWDOWN_DANGER_PCT}%)"
+            f" — 軍師建議停手 + 全面檢視策略"
+        )
+    elif sev == "warn":
+        st.warning(
+            f"⚠️ 整體 drawdown {dd_pct:+.2f}%(loss ≥ {_rm.DRAWDOWN_WARN_PCT}%)"
+            f" — 建議暫停加碼,檢視持倉"
+        )
+
+    # 單檔集中度警報
+    over_concentrated = _rm.check_single_concentration(
+        [{**e, "sid": e["stock_id"]} for e in enriched],
+        max_single_pct=0.20,
+    )
+    if over_concentrated:
+        for o in over_concentrated:
+            st.warning(
+                f"⚠️ {o['sid']} 占整體部位 {o['position_pct']*100:.1f}%"
+                f"(> 20%),風險集中"
+            )
+
+    # === 持倉表格 ===
+    st.markdown("### 🎯 當前持倉")
+    table_rows = []
+    for e in enriched:
+        cur = e.get("current_price")
+        sl = e.get("stop_loss")
+        tp = e.get("take_profit")
+        sl_hit = _rm.should_stop_loss(e["entry_price"], cur, sl) if cur else False
+        tp_hit = _rm.should_take_profit(e["entry_price"], cur, tp) if cur else False
+        status = ""
+        if sl_hit:
+            status = "🔴 達停損"
+        elif tp_hit:
+            status = "🟢 達停利"
+        table_rows.append({
+            "ID": e["id"],
+            "代號": e["stock_id"],
+            "進場日": e["entry_date"],
+            "進場價": round(e["entry_price"], 2),
+            "股數": e["shares"],
+            "現價": round(cur, 2) if cur else "—",
+            "損益$": round(e["pnl"]) if e["pnl"] is not None else "—",
+            "損益%": round(e["pnl_pct"], 2) if e["pnl_pct"] is not None else "—",
+            "停損": round(sl, 2) if sl else "—",
+            "停利": round(tp, 2) if tp else "—",
+            "狀態": status or "持有",
+        })
+    st.dataframe(
+        pd.DataFrame(table_rows),
+        use_container_width=True, hide_index=True,
+    )
+
+    # === 平倉操作 ===
+    st.markdown("### 🚪 平倉")
+    with st.expander("選擇要平倉的部位", expanded=False):
+        sids_open = [
+            f"#{e['id']} {e['stock_id']} @ {e['entry_price']:.2f} × {e['shares']}"
+            for e in enriched
+        ]
+        if sids_open:
+            idx = st.selectbox(
+                "持倉", range(len(sids_open)),
+                format_func=lambda i: sids_open[i],
+                key="close_pos_idx",
+            )
+            cols = st.columns([2, 2, 1])
+            exit_price = cols[0].number_input(
+                "出場價", min_value=0.01,
+                value=enriched[idx].get("current_price") or enriched[idx]["entry_price"],
+                step=0.5, format="%.2f", key="close_exit_price",
+            )
+            exit_date_input = cols[1].date_input(
+                "出場日", value=date.today(), key="close_exit_date",
+            )
+            if cols[2].button("✅ 平倉", type="primary", key="btn_close_pos"):
+                pid = int(enriched[idx]["id"])
+                ok = db.close_position(
+                    pid, float(exit_price),
+                    exit_date=exit_date_input.isoformat(),
+                )
+                if ok:
+                    st.success(f"✅ #{pid} 已平倉 @ {exit_price:.2f}")
+                    st.rerun()
+                else:
+                    st.error("❌ 平倉失敗(已平倉或 id 不存在)")
+
+    # === 部位建議區(若 ML / 勝率有可用資料)===
+    if ps_on:
+        st.markdown("### 🧮 軍師部位建議(根據近 30 天歷史)")
+        stats = _ps.get_recent_win_stats()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("樣本數", stats["n"])
+        col2.metric("歷史勝率", f"{stats['win_rate']*100:.0f}%")
+        col3.metric("贏輸比", f"{stats['win_loss_ratio']:.2f}")
+        if stats["is_fallback"]:
+            st.caption("⚠️ 樣本不足,使用 fallback win_rate=50% / R:R=1.5(保守值)")
 
 
 # === 系統健康監控頁 ===

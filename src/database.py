@@ -555,6 +555,32 @@ SCHEMA: list[str] = [
     # 加速 trades 按股號 / 日期查
     "CREATE INDEX IF NOT EXISTS idx_trades_stock_date "
     "ON trades(stock_id, trade_date)",
+    # user_positions:風險管理頁的「主公手動建倉」紀錄(2026-05-17 加)。
+    # 跟既有 paper_trades 區隔:paper_trades 是策略自動 seed 的回測追蹤;
+    # user_positions 是主公自己拍板「真的進場」記錄(含停損停利),Drawdown
+    # 警報 / 部位集中度從這張表算。close_position 後 is_open=0 + 填 exit_*。
+    """
+    CREATE TABLE IF NOT EXISTS user_positions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_id      TEXT NOT NULL,
+        entry_date    TEXT NOT NULL,
+        entry_price   REAL NOT NULL CHECK(entry_price > 0),
+        shares        INTEGER NOT NULL CHECK(shares > 0),
+        side          TEXT NOT NULL DEFAULT 'long' CHECK(side IN ('long', 'short')),
+        stop_loss     REAL,
+        take_profit   REAL,
+        notes         TEXT,
+        is_open       INTEGER NOT NULL DEFAULT 1 CHECK(is_open IN (0, 1)),
+        exit_date     TEXT,
+        exit_price    REAL,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_user_positions_sid_open "
+    "ON user_positions(stock_id, is_open)",
+    "CREATE INDEX IF NOT EXISTS idx_user_positions_open "
+    "ON user_positions(is_open, entry_date DESC)",
 ]
 
 
@@ -1906,6 +1932,239 @@ def get_watchlist(db_path: str | Path | None = None) -> list[dict]:
             "ORDER BY added_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# === user_positions(風險管理:主公手動建倉)===
+
+def add_position(
+    stock_id: str,
+    entry_date: str,
+    entry_price: float,
+    shares: int,
+    side: str = "long",
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    notes: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """新增一筆 user_positions(主公手動建倉)。
+
+    回新 row id。不做 UNIQUE 去重(允許同 sid 不同進場日 / 不同價位多筆建倉,
+    符合「攤平」/「加碼」場景)。
+
+    Args:
+        stock_id: 股號。
+        entry_date: ISO date YYYY-MM-DD。
+        entry_price: > 0。
+        shares: > 0,整股數(非「張數」;1 張 = 1000 股)。
+        side: 'long' 或 'short'(預設 long)。
+        stop_loss / take_profit: 可選,主公自己填或從 risk_management 算。
+        notes: 可選。
+    """
+    if entry_price <= 0:
+        raise ValueError(f"entry_price 必須 > 0,got {entry_price}")
+    if shares <= 0:
+        raise ValueError(f"shares 必須 > 0,got {shares}")
+    if side not in ("long", "short"):
+        raise ValueError(f"side 必須 long/short,got {side!r}")
+    init_db(db_path)
+    now = _now_iso()
+    sid_clean = str(stock_id).strip()
+    if not sid_clean:
+        raise ValueError("stock_id 不可空")
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO user_positions (
+                stock_id, entry_date, entry_price, shares, side,
+                stop_loss, take_profit, notes, is_open, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                sid_clean, str(entry_date), float(entry_price), int(shares), side,
+                (float(stop_loss) if stop_loss is not None else None),
+                (float(take_profit) if take_profit is not None else None),
+                (notes.strip() if notes else None),
+                now, now,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def close_position(
+    position_id: int,
+    exit_price: float,
+    exit_date: str | None = None,
+    db_path: str | Path | None = None,
+) -> bool:
+    """平倉:設 is_open=0 + 填 exit_date/price。
+
+    回 True 表示成功(rowcount=1),False 表示 id 不存在或已平倉。
+    exit_date 預設今日 UTC ISO date。
+    """
+    if exit_price <= 0:
+        raise ValueError(f"exit_price 必須 > 0,got {exit_price}")
+    from datetime import date as _date_cls
+    init_db(db_path)
+    ed = exit_date or _date_cls.today().isoformat()
+    now = _now_iso()
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            """
+            UPDATE user_positions
+            SET is_open=0, exit_price=?, exit_date=?, updated_at=?
+            WHERE id=? AND is_open=1
+            """,
+            (float(exit_price), ed, now, int(position_id)),
+        )
+        return cur.rowcount > 0
+
+
+def update_position(
+    position_id: int,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    notes: str | None = None,
+    db_path: str | Path | None = None,
+) -> bool:
+    """改 stop_loss / take_profit / notes(都 optional,None 表不改)。
+
+    回 True 表示有更新。所有都 None → 不發 SQL,直接回 False。
+    """
+    fields: list[str] = []
+    args: list = []
+    if stop_loss is not None:
+        if stop_loss < 0:
+            raise ValueError(f"stop_loss 必須 >= 0,got {stop_loss}")
+        fields.append("stop_loss=?")
+        args.append(float(stop_loss))
+    if take_profit is not None:
+        if take_profit < 0:
+            raise ValueError(f"take_profit 必須 >= 0,got {take_profit}")
+        fields.append("take_profit=?")
+        args.append(float(take_profit))
+    if notes is not None:
+        fields.append("notes=?")
+        args.append(notes.strip() if notes else None)
+    if not fields:
+        return False
+    fields.append("updated_at=?")
+    args.append(_now_iso())
+    args.append(int(position_id))
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE user_positions SET {', '.join(fields)} WHERE id=?",
+            args,
+        )
+        return cur.rowcount > 0
+
+
+def delete_position(
+    position_id: int,
+    db_path: str | Path | None = None,
+) -> bool:
+    """硬刪除一筆(誤建場景)。回 True 表示有刪。"""
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM user_positions WHERE id=?", (int(position_id),),
+        )
+        return cur.rowcount > 0
+
+
+def get_open_positions(
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """取所有當前持倉(is_open=1),按 entry_date desc 排序。
+
+    回 list[dict] 每筆包含所有欄位(id / stock_id / entry_date / entry_price /
+    shares / side / stop_loss / take_profit / notes / is_open / exit_date /
+    exit_price / created_at / updated_at)。空 → []。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM user_positions WHERE is_open=1 "
+            "ORDER BY entry_date DESC, id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_positions(
+    db_path: str | Path | None = None,
+    include_closed: bool = True,
+    limit: int = 500,
+) -> list[dict]:
+    """取所有持倉(open + closed)— 給 drawdown 算 realized + unrealized。
+
+    include_closed=False → 等同 get_open_positions。
+    """
+    init_db(db_path)
+    sql = "SELECT * FROM user_positions "
+    if not include_closed:
+        sql += "WHERE is_open=1 "
+    sql += "ORDER BY is_open DESC, entry_date DESC, id DESC LIMIT ?"
+    with get_conn(db_path) as conn:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_position_pnl(
+    position_id: int,
+    db_path: str | Path | None = None,
+) -> dict | None:
+    """算單筆部位的 P&L。open → 用最新 daily_prices.close;closed → 用 exit_price。
+
+    回 dict:
+        {id, stock_id, entry_price, shares, side, is_open,
+         current_price, pnl, pnl_pct}
+    or None 若 id 不存在。
+    """
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM user_positions WHERE id=?", (int(position_id),),
+        ).fetchone()
+        if not row:
+            return None
+        rec = dict(row)
+        sign = 1.0 if (rec.get("side") or "long") == "long" else -1.0
+        if int(rec["is_open"]) == 1:
+            px_row = conn.execute(
+                "SELECT close FROM daily_prices WHERE stock_id=? "
+                "ORDER BY date DESC LIMIT 1",
+                (rec["stock_id"],),
+            ).fetchone()
+            current_price = (
+                float(px_row["close"]) if px_row and px_row["close"] is not None
+                else None
+            )
+        else:
+            current_price = (
+                float(rec["exit_price"]) if rec.get("exit_price") is not None
+                else None
+            )
+    pnl = None
+    pnl_pct = None
+    if current_price is not None and current_price > 0:
+        entry = float(rec["entry_price"])
+        shares = int(rec["shares"])
+        pnl = (current_price - entry) * shares * sign
+        pnl_pct = (current_price - entry) / entry * 100.0 * sign
+    return {
+        "id": int(rec["id"]),
+        "stock_id": rec["stock_id"],
+        "entry_price": float(rec["entry_price"]),
+        "shares": int(rec["shares"]),
+        "side": rec.get("side") or "long",
+        "is_open": int(rec["is_open"]),
+        "current_price": current_price,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "stop_loss": rec.get("stop_loss"),
+        "take_profit": rec.get("take_profit"),
+    }
 
 
 # === sync_log helpers(快取核心) ===
@@ -3713,5 +3972,12 @@ __all__ = [
     "upsert_stock_warnings",
     "get_active_warnings_for_sids",
     "get_warning_history_for_sid",
+    "add_position",
+    "close_position",
+    "update_position",
+    "delete_position",
+    "get_open_positions",
+    "get_all_positions",
+    "get_position_pnl",
     "SCHEMA",
 ]

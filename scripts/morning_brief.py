@@ -464,6 +464,79 @@ def format_brief_message(
     )
 
 
+def _build_drawdown_alert_lines(channel: str) -> list[str]:
+    """組整體 drawdown 警報行(從 user_positions 撈)。
+
+    RISK_MGMT_ENABLED=false / 無持倉 / severity=ok → 回 []。
+    severity=warn → 黃燈;danger → 紅燈。
+    """
+    try:
+        from src import risk_management as _rm
+    except Exception:  # noqa: BLE001
+        return []
+    if not _rm.is_enabled():
+        return []
+    try:
+        positions = db.get_all_positions(include_closed=True)
+    except Exception:  # noqa: BLE001
+        return []
+    if not positions:
+        return []
+
+    open_sids = [p["stock_id"] for p in positions if int(p.get("is_open", 1) or 0) == 1]
+    px_map: dict[str, float] = {}
+    if open_sids:
+        placeholders = ",".join(["?"] * len(open_sids))
+        try:
+            with db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT stock_id, close FROM daily_prices WHERE stock_id IN "
+                    f"({placeholders}) AND date = ("
+                    "  SELECT MAX(date) FROM daily_prices dp2 "
+                    "  WHERE dp2.stock_id = daily_prices.stock_id"
+                    ")",
+                    open_sids,
+                ).fetchall()
+                for r in rows:
+                    if r["close"] is not None:
+                        px_map[r["stock_id"]] = float(r["close"])
+        except Exception:  # noqa: BLE001
+            pass
+
+    enriched = [{**p, "current_price": px_map.get(p["stock_id"])} for p in positions]
+    dd = _rm.drawdown_pct(enriched)
+    if dd["severity"] == "ok":
+        return []
+    dd_pct = dd["drawdown_pct"]
+    if channel == "telegram":
+        if dd["severity"] == "danger":
+            header = "🚨 <b>持倉警報</b>"
+            body = (
+                f"整體 drawdown {dd_pct:+.2f}% "
+                f"(loss ≥ {_rm.DRAWDOWN_DANGER_PCT:.0f}%) — 軍師建議停手 + 全面檢視"
+            )
+        else:
+            header = "⚠️ <b>持倉警報</b>"
+            body = (
+                f"整體 drawdown {dd_pct:+.2f}% "
+                f"(loss ≥ {_rm.DRAWDOWN_WARN_PCT:.0f}%) — 暫停加碼,檢視持倉"
+            )
+        return [header, body, ""]
+    if dd["severity"] == "danger":
+        header = "🚨 **持倉警報**"
+        body = (
+            f"整體 drawdown {dd_pct:+.2f}% "
+            f"(loss ≥ {_rm.DRAWDOWN_DANGER_PCT:.0f}%) — 軍師建議停手"
+        )
+    else:
+        header = "⚠️ **持倉警報**"
+        body = (
+            f"整體 drawdown {dd_pct:+.2f}% "
+            f"(loss ≥ {_rm.DRAWDOWN_WARN_PCT:.0f}%) — 暫停加碼"
+        )
+    return [header, body, ""]
+
+
 def _format_no_change(today_iso: str, channel: str) -> str:
     """極簡訊:三項全無變動。"""
     if channel == "telegram":
@@ -487,6 +560,9 @@ def _format_full_telegram(
     sentiment: dict,
 ) -> str:
     lines: list[str] = [f"🌅 <b>盤前快訊 {_h(today_iso)}</b>", ""]
+
+    # 持倉 drawdown 警報(2026-05-17 加)— RISK_MGMT_ENABLED + 有持倉 + severity != ok
+    lines.extend(_build_drawdown_alert_lines("telegram"))
 
     # 警示更新
     if newly_warned:
@@ -575,6 +651,8 @@ def _format_full_discord(
     sentiment: dict,
 ) -> str:
     lines: list[str] = [f"🌅 **盤前快訊 {today_iso}**", ""]
+
+    lines.extend(_build_drawdown_alert_lines("discord"))
 
     if newly_warned:
         lines.append("⚠️ **警示更新 (vs 昨晚)**")
