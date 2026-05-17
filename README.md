@@ -41,6 +41,7 @@
 | 排程 | 時間 | 用途 |
 |---|---|---|
 | **每日 Telegram 推播** | 週一~五 **22:13 Asia/Taipei** | 跑短線/長線 picks → Telegram + Discord，含 ✨ 高信心精選區段 |
+| **盤前快訊** | 週一~五 **08:30 Asia/Taipei** | 開盤前 30 分鐘 — 重抓警示 + news，推「警示更新 / 新增 picks / 美股情緒」變動；無變動推極簡訊。kill-switch `MORNING_BRIEF_ENABLED=false` |
 | **每週六凌晨千張大戶** | 週日 **02:00 Asia/Taipei**（cron `0 18 * * 6` UTC）| 抓 TDCC 集保「股權分散表」上週五公布資料，commit `shareholder_concentration.csv` |
 | **每週日 ML 重訓** | 週一 02:00 台北 | 通用 + per-strategy 模型，accuracy 退化 > 5pp 拒絕 commit |
 | **盤中 news snapshot** | 每小時 | TWSE 重大訊息快照 |
