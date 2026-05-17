@@ -5,6 +5,49 @@
 
 ---
 
+## 2026-05-17 — 健診歷史補齊 backfill(daily-picks 三件套)
+
+### Added
+- **`scripts/backfill_pick_shap.py`** + **`.github/workflows/backfill-pick-shap-once.yml`**(`8497e26`):健診發現 `pick_shap_explanations` 只覆蓋 3 個 pick_date(10 rows),而 `daily_picks` 已有 10 個 trade_date(2026-04-30 ~ 2026-05-15)— daily-notify 沒跑那幾天的 Streamlit / Telegram「為什麼分數高」section 完全空。新 script per (date, sid, strategy) 補算,走 production same routing(per-strategy ML threshold → per-strategy model;否則 general)。默認 skip-existing(idempotent),`--force` 強制覆寫,`--dump-csv` 寫進 snapshot。一次性 dispatch workflow 90 天 backfill ~2 min。9 test:skip-existing / --force / no_model / no_feats / per-strategy routing / general fallback / UPSERT / 空 todo / 日期錯誤 exit 2
+- **`scripts/backfill_financials.py`** + **`.github/workflows/backfill-financials-once.yml`**(`22547c9`):健診發現 `financials.quarterly` 只覆蓋 1073 / 2127 純股(~50%),長線基本面策略在 1054 檔上跑不了。2026-05-06 commit 967905e 刪掉舊 backfill script 的判斷(「daily_market_update 會 cover」)實測不成立 — daily_market_update 對全市場逐一打 FinMind 常因 quota / token / FinMind dataset 不存在而 skip。新 script per-stock loop,走 pure_stock universe,默認跳過已有資料(`--force` 重抓),FinMind 失敗 > 25% 提前中斷避免撞 quota。Workflow 2000 待補檔 × throttle 預估 30-60 min,給 120 min timeout。9 test 覆蓋
+- **`docs/daily-picks-retention-2026-05-16.md`**(`315157e`):健診發現 `daily_picks` 只有 10 個 trade_date。**確認非 bug**:schema 在 2026-05-04 commit 4b4d24f 才加入,table 才 13 天大。沒 retention 政策在清(PK 含 trade_date),後續會自然累積。無需修 code,只 document
+
+---
+
+## 2026-05-16 — Round 2 健診四件套(silent miss + perf + workflow dedupe + watchlist guard)
+
+> 跨 6 個 commit 的健診修復,主公 5 月 16 日針對「資料源 silent miss + workflow 衝撞 + 推播 cold import 慢 + watchlist push 把 19 檔覆蓋成 4 檔」批次處理。
+
+### Added
+- **`feat(warnings): add MOPS default settlement coverage`**(`f461622`):TWSE/TPEx OpenAPI v1 沒對應違約交割 endpoint(`bfigtu.html` 是 SPA),加 MOPS 公開資訊觀測站重大訊息 RSS `mopsrss201001.xml` 過濾「違約」/「違約交割」關鍵字。涵蓋全市場(TWSE+TPEx+興櫃+公開發行),取代 OpenAPI 兩家皆無的缺口。MOPS 0 rows 不在 baseline raise 偵測內(違約事件年數筆,日常 0 rows 屬正常)。Live 驗證 2026-05-16:MOPS 0 rows,total 160 rows,by_type 新增 `default_settlement` 鍵。6 test:parse_filters_by_keyword / extracts_metadata / empty_xml / no_keyword_skip / fallback_date / run_writes_rows / baseline_zero_does_not_raise
+- **`feat(backfill): warm-up script for company_profiles FinMind facts`**(`af5d355`):健診 audit 出「company_profiles 0 rows」 — 該 table 是 lazy on-demand cache,只在 UI 開個股深度頁時填,批次/CI 環境永遠 0 rows。新 `scripts/backfill_company_profiles.py` 對 universe(預設 TW_TOP_50,可切 pure_stock)呼叫 `get_company_profile(sid, llm_call=False)` 填 FinMind facts(industry / market / listing / foreign_limit)— **不打 Gemini**,narrative 仍 lazy load。TW_TOP_50 驗證 ok=50 fail=0
+
+### Fixed
+- **`fix(warnings): replace TWSE bs4 parser with OpenAPI JSON endpoints`**(`490ca35`):TWSE 4 條 HTML 源(punish/notice/disposition/method.html)在健診四件套全 0 rows — 全是 jQuery SPA,bs4 看不到 row,等於警示股 silent miss。改全 TWSE OpenAPI v1 JSON(swagger 143 paths 確認),沿用 TPEx 成熟 JSON 解析:
+  - `/announcement/punish` → disposition(29 rows 進來,原本 0)
+  - `/announcement/notice` → attention(假日 0 rows 正常)
+  - `/announcement/notetrans` → attention(累計次數補充,1 row)
+  - `/exchangeReport/TWT85U` → method_changed(13 rows;欄位陽春無 Date)
+  順便修正原本 bs4 版把 `punish.html` 標 `default_settlement` 的分類錯(punish 在 TWSE 命名是「處置」)。違約交割本身改走 MOPS(見上)。**防呆**:`fetch_and_parse_all()` 結尾偵測 TWSE punish + TWT85U baseline 兩條源同時 0 rows → raise(歷史必有資料,同時 0 = endpoint 整體壞掉,CI exit 1)。notice/notetrans/TPEx 三條允許 0 rows(假日合理)
+- **`fix(watchlist): guard against boot-fallback regression overwriting remote`**(`4b23f86`):主公 2026-05-16 回報關注少幾檔。`git log --all data/twse_snapshot/watchlist.csv` 顯示 watchlist-sync 分支從 19 檔(6639390)在 37 小時內掉到 4 檔(73b4cf0),剩 4 檔時間戳完全等於 main 種子。**根因**:`safe_boot_load` 在 `fetch_watchlist_from_github` 失敗(網路抖動 / 5xx / PAT 暫驗證失敗)會 fallback 載入 main 種子(少數幾檔),SQLite 變殘缺,任一 add/remove 觸發 `_dump_watchlist_snapshot` → push 殘缺狀態覆蓋 watchlist-sync 真實 19 檔。**修法**:`push_watchlist_to_github` GET remote 後 regression guard,若新 push 相比 remote 遺失 ≥ `WATCHLIST_LOSS_THRESHOLD`(預設 3)檔 → 拒推、log error。trades / paper_trades / analyst_targets 是累積式 snapshot,沒接此 guard。**復原**:把 main 種子 watchlist.csv 回到 6639390 的 19 檔狀態。11 條新 `test_github_sync.py` + 2 條 `test_watchlist.py` e2e。調查全文:`docs/watchlist-loss-investigation-2026-05-16.md`
+- **`chore(watchlist): remove invalid sid 9999 from seed CSV`**(`007527a`):seed 內有歷史殘留的測試 sid 9999,趁此次復原一併清掉
+
+### Changed
+- **`perf(notifier): lazy-load pandas + screener_short + skip streamlit when not in runtime`**(`7034b39`):cold import `src.notifier` 1.011s → 0.198s(~80% 減少)。
+  - `src/config.py`:skip `import streamlit` unless streamlit 已在 sys.modules。CLI / pytest / scheduled scripts 無 Streamlit context,`st.secrets` 反正用不到 — 省 ~0.5s
+  - `src/notifier.py`:defer `pandas` + `screen_short` via PEP 562 module `__getattr__`。第一次 attribute access(真實或 monkeypatch)cache 進 module globals 讓內部 LOAD_GLOBAL 找得到。`send_telegram_message` 自己不碰 pandas/screener_short — 只有 `notify_short_picks` 用,所以 caller 像 `data_health_alert.py` / `intraday_alerts.py` / `analyst_target_alerts.py` 付 0.2s 而非 1.0s
+  - 全 1438 test pass(含 137 notifier/wire/regime/theme/consensus + entry_range 涵蓋)
+- **`chore(workflows): retrain-ml.yml → manual-only`**(`a6a50dc`):兩個 workflow 訓相同 model(short_pick + per_strategy)但 gate 嚴鬆不一 — `ml-weekly-retrain` 週日 03:00 walk-forward A/B gate(strict OOS),`retrain-ml` 週日 22:13 random-split accuracy gate(lenient)。22:13 lenient 跑 19 小時後覆蓋 03:00 strict 跑出的 artifacts。Resolution per `docs/workflow-audit-2026-05-15.md` Candidate #1 option (b):
+  - `retrain-ml.yml`:remove `cron`,只留 `workflow_dispatch`,name 改 `ML Retrain (manual emergency, random-split gate)`。Job body 不動
+  - `ml-weekly-retrain.yml`:不動,維持唯一 schedule 重訓
+  - audit doc 同步更新標 Candidate #1 closed
+
+### Notes
+- 本批 6 commit 集中處理「資料 silent miss / cold import 慢 / 模型 artifact 覆蓋 / watchlist push 覆蓋」四類 production 風險,主公拍板優先做完才換 Round 3 寫文檔
+- `docs/twse-warnings-still-broken.md` 改寫成「整體現況 + 剩餘限制」(MOPS 加入後不再是 broken-bug 文件)
+
+---
+
 ## 2026-05-16 — Runtime log 持久化(`logs/`)
 
 ### Added

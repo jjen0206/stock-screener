@@ -1,185 +1,273 @@
-# Stock Screener — 主公的個人台股分析系統
+# Stock Screener — 多策略台股推薦系統
 
-> 個人使用、零成本的台股 Streamlit Dashboard，把短線/長線/籌碼/AI 預測整合在一個頁面裡。
+> 個人使用、零成本的 Streamlit Dashboard。把「短線量價技術 + 中長線基本面 + 籌碼面 + ML 勝率預測 + 警示股風險標註」整合在一個手機 App 般的介面。
 
-不是投資建議工具，是「資料整理 + 訊號掃描」。最終決策還是主公自己判斷。
+**這不是投資建議工具。** 是「資料整理 + 訊號掃描」,最終決策還是主公自己判斷。
 
-## 主要功能（Streamlit pages）
+---
 
-| 頁面 | 用途 |
+## 是什麼 / 為什麼存在
+
+| 問題 | 解法 |
 |---|---|
-| 🎯 **短線推薦** | 11 個量價/技術策略 + ML 勝率過濾，附產業 pre-filter pills + 「📋 顯示全部」escape hatch |
-| 💎 **長線推薦** | 基本面 + 估值 + 殖利率 + 千張大戶集中度 |
-| ⭐ **關注名單** | 手動加的觀察股，自動跑所有策略對位 |
-| 🌡️ **市場熱度** | 漲跌家數、成交額分布、量能榜 |
-| 📈 **大盤** | TAIEX 走勢 + breadth indicators |
-| 👥 **大戶入場** | TDCC 千張大戶當週/連續/加碼排行 3 tabs |
-| 📊 **強者跟蹤** | 4 tabs：強者領先 / 領先轉強 / 反轉訊號 / ✨ 高信心精選；附 regime banner（bull/neutral/bear）|
-| 🔍 **個股** | 單一 sid K 線 + KD/MACD/RSI + 法人 + 千張大戶趨勢 |
-| 📒 **交易紀錄** | 手動記倉位、計算損益、勝率統計 |
-| 📐 **實測追蹤** | 過去 picks 的 N 日報酬回溯 |
-| ⚙️ **系統** | 資料新鮮度、ML 模型狀態、cache hit rate |
-| ⚙️ **設定** | API token、Telegram、ML 門檻 |
+| 17 套策略各跑各的,看不完 | **跨策略共識** + ML 排名,推 Top N |
+| 大盤多空全照同樣強度推 | **TAIEX regime gating**:多頭推 10 檔 / 盤整 5 檔 / 空頭 2 檔 |
+| ML 顯「勝率 70%」實際 50% | **isotonic probability calibration** 校正過 |
+| 違約交割 / 全額股偷偷躺在 picks 裡 | **annotate-only filter**:標 ⚠️ + 軟降權,不替主公做隱藏決定 |
+| 冷題材成分股還在推 | **題材熱度 5 日動能** 算 heat_score,冷題材 hard exclude |
+| 卡片只顯結果不顯原因 | **SHAP 解釋** 每張 pick 列 Top 3 features + 貢獻方向 |
+| 每張卡片都得自己重算指標 | **nightly precompute** → SQLite `daily_picks` 表,App 端 0ms 命中 |
 
-詳細欄位定義見 `docs/PRD.md`。
+目標:打開手機點主畫面圖示,1 秒內看到當日 ✨ 高信心精選 + Top N 推薦。
 
-## 資料源（全部免費）
+---
 
-| 資料 | 來源 |
-|---|---|
-| 日線 OHLC + 法人 | FinMind 免費版 / TWSE OpenAPI |
-| 季 EPS / PE / PB | TWSE OpenAPI（`BWIBBU_d` + `t187ap14_L`）|
-| ROE | PB/PE 反推（Du Pont 簡化）|
-| 配息 | FinMind `TaiwanStockDividend` |
-| 千張大戶集中度 | TDCC opendata + qryStock（per-POST token refresh）|
-| 概念股 universe | `data/themes/*.yaml`（9 主題：AI、台積電供應鏈、矽光子、CoWoS、HBM、機器人、重電、軍工、衛星）|
-
-省掉 FinMind Backer NT$699/月。ROE 反推驗證：TSMC PE=32.99, PB=10.46 → ROE ≈ 31.7%，與市場公認 28-30% 高度吻合。
-
-## 自動化排程（GitHub Actions）
-
-| 排程 | 時間 | 用途 |
-|---|---|---|
-| **每日 Telegram 推播** | 週一~五 **22:13 Asia/Taipei** | 跑短線/長線 picks → Telegram + Discord，含 ✨ 高信心精選區段 |
-| **每週六凌晨千張大戶** | 週日 **02:00 Asia/Taipei**（cron `0 18 * * 6` UTC）| 抓 TDCC 集保「股權分散表」上週五公布資料，commit `shareholder_concentration.csv` |
-| **每週日 ML 重訓** | 週一 02:00 台北 | 通用 + per-strategy 模型，accuracy 退化 > 5pp 拒絕 commit |
-| **盤中 news snapshot** | 每小時 | TWSE 重大訊息快照 |
-
-22:13 那個非整點是故意的——避開 GitHub Actions 全球整點高峰排程延遲。
-
-## 開發前準備
+## Quick Start(本機)
 
 ```bash
-# 安裝相依
-pip install -r requirements.txt
+git clone <repo-url> stock-screener
+cd stock-screener
 
-# .env 填 token（複製 .env.example）
-FINMIND_TOKEN=...           # 留空可走免費 OpenAPI 路徑
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-DISCORD_WEBHOOK_URL=...     # 備援推播
+pip install -r requirements.txt          # production
+pip install -r requirements-dev.txt      # 跑 pytest / ruff 才裝
 
-# 跑起來
+cp .env.example .env                      # 填 FINMIND_TOKEN 等
 streamlit run app.py
 ```
 
-開瀏覽器到 `http://localhost:8501`。手機加到主畫面就當 App 用。
+開瀏覽器到 `http://localhost:8501`。iPhone Safari「加到主畫面」就當 App 用。
 
-## 部署到 Streamlit Community Cloud（免費）
+第一次 boot 會從 `data/twse_snapshot/*.csv` 把 nightly 預跑結果 preload 進 SQLite cache(無需立刻打 API),5 秒內可看推薦。
 
-1. push 到 GitHub（public/private 都行）。
-2. [share.streamlit.io](https://share.streamlit.io) 登入 → Create app → 選 repo → branch `main` → Main file path `app.py`。
-3. **Advanced settings → Python version: 3.11**。
-4. **Settings → Secrets** 貼 `.streamlit/secrets.toml.example` 內容。
-5. Deploy。容器重啟會清空 SQLite cache，首次查詢會重抓。
+---
 
-## Telegram 推播
+## Streamlit Pages(17 個)
 
-1. 找 [@BotFather](https://t.me/BotFather) → `/newbot` → token。
-2. 先傳一句話給 bot → 開 `https://api.telegram.org/bot<token>/getUpdates` 拿 `chat_id`。
-3. Secrets / `.env` 填 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`。
-4. Sidebar 「📲 測試 Telegram」確認通。
+| 分組 | 頁面 | 用途 |
+|---|---|---|
+| **首頁** | 🏠 首頁 | 短線 Top 3 + 長線 Top 3 + 大盤 regime banner |
+| **推薦** | 🔥 短線 | 11 個量價/技術策略 × ML 過濾 × 產業 pre-filter pills |
+|  | 💎 長線 | 基本面 + 估值 + 殖利率 + 千張大戶 |
+|  | ⭐ 關注 | 手動關注的 sid,自動跑所有策略對位 |
+| **個股** | 🔍 個股 | 單 sid K 線 + KD/MACD/RSI + 法人 |
+|  | 📊 個股深度 | + 千張大戶趨勢 + ⚠️ 警示紀錄 + SHAP |
+| **市場** | 🌡️ 市場熱度 | 漲跌家數 / 量能榜 |
+|  | 📊 大盤 | TAIEX 走勢 + breadth indicators |
+|  | 👥 大戶入場 | TDCC 千張大戶 3 tabs |
+|  | 📊 強者跟蹤 | 4 tabs(強者領先/領先轉強/反轉/✨ 高信心)+ regime banner |
+| **回測** | 📈 回測 | 對 picks 跑 d1/d3/d5/d10 模擬 |
+|  | 📊 策略歷史 | 4 sub-tabs,含 vectorbt grid search 結果 |
+| **追蹤** | 💼 交易紀錄 | 手動倉位 + 損益 + 勝率 |
+|  | 🧪 實測追蹤 | paper trades(自動 entry,30 分 cron 觸發進場/停損/突破 alerts)|
+| **系統** | 📋 系統結論 / ⚙️ 系統 / ⚙️ 設定 | 資料新鮮度 / ML 模型狀態 / token 設定 |
 
-Discord 備援同理，把 webhook URL 放進 `DISCORD_WEBHOOK_URL`。`notify_short_picks` 會同時推 Telegram + Discord，任一成功即 exit 0。
+Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全域 CSS 字體放大 1.4×、卡片寬度自適應,警示 badge 在窄屏不被截斷。
 
-## 預跑策略加速（Daily Picks Precompute）
+---
 
-App 開啟跑 `run_all_strategies` 全市場 ~11s。改用 nightly 預跑 + SQLite cache 後，App 端 default 路徑 0ms 命中。
+## 17 套策略
 
-- `.github/workflows/daily-notify.yml` 22:13 跑 `scripts/precompute_strategies.py`
-- 全 11 strategies × 3 universe（pure_stock / with_etf / top_50）寫進 `daily_picks` 表
-- dump `data/twse_snapshot/daily_picks.csv` commit 進 repo
-- 容器 redeploy → git pull → boot preload SQLite
-- App 開頁讀 `daily_picks`，slider 改過才走 runtime
+| 類別 | 策略 |
+|---|---|
+| **趨勢** | `ma_alignment`(多頭排列)、`macd_golden`(MACD 黃金交叉)、`ma_squeeze_breakout`(均線糾結突破)|
+| **反轉** | `bias_convergence`(乖離收斂)、`bb_lower_rebound`(布林下軌反彈)、`rsi_recovery`(RSI 回升)|
+| **籌碼** | `inst_consensus`(三大法人連買)、`inst_silent_accum`(主力默默吸貨)、`inst_oversold_reversal`(法人反轉)、`big_holder_inflow`(千張戶進場)|
+| **動能** | `volume_kd`(量價 KD)、`volume_breakout`(量爆突破)、`gap_up`(跳空缺口)|
+| **基本面** | `eps_acceleration`(EPS 加速)、`revenue_acceleration`(營收加速)|
+| **殖利率** | `high_yield_stable`(高殖利率穩健)|
+| **大盤相對** | `taiex_alpha`(獨立行情)|
 
-手動跑：
-```bash
-python scripts/precompute_strategies.py              # 當日
-python scripts/precompute_strategies.py --date 2026-05-04
-python scripts/precompute_strategies.py --backfill 30
+每套策略獨立 RF + isotonic calibration + per-strategy ML threshold(`STRATEGY_ML_THRESHOLDS` in `src/strategies.py`)。大盤 regime 控制哪些 category 開放(bull 全開 / bear 只剩籌碼+殖利率+大盤)。
+
+詳細策略邏輯與 ML 設計見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+---
+
+## 資料源(全部免費)
+
+| 資料 | 來源 |
+|---|---|
+| 日線 OHLC + 法人 | FinMind 免費版 / TWSE OpenAPI v1 |
+| 季 EPS / PE / PB | TWSE OpenAPI(`BWIBBU_d` + `t187ap14_L`)|
+| ROE | PB/PE 反推(Du Pont 簡化,TSMC 驗證 ROE ≈ 31.7% 對齊市場 28-30%)|
+| 配息 | FinMind `TaiwanStockDividend` |
+| 千張大戶集中度 | TDCC opendata(每週)+ qryStock(12 週 backfill,token-per-POST refresh)|
+| 重大訊息新聞 | TWSE `t187ap04_L` OpenAPI(每小時 cron)|
+| 警示股(處置/注意/變更/全額)| TWSE `/v1/announcement/*` JSON + TPEx `tpex_*` |
+| **違約交割股** | **MOPS RSS** `mopsrss201001.xml`(2026-05-16 加入,關掉 silent miss)|
+| 法人目標價 | yfinance Analyst Estimates(A)+ Gemini news 解析(B fallback)|
+| 概念股 universe | `data/themes/*.yaml`(9 主題:AI、台積電供應鏈、矽光子、CoWoS、HBM、機器人、重電、軍工、衛星)|
+
+省掉 FinMind Backer NT$699/月,所有 endpoint 都走免費路徑。
+
+---
+
+## 自動化(17 個 GitHub Actions cron)
+
+| Workflow | 時間 | 用途 |
+|---|---|---|
+| `daily-notify.yml` | 週一~五 **22:13 Asia/Taipei** | fetch → precompute → backtest yesterday → push Telegram + Discord(含 ✨ 高信心精選 + 大戶 + 昨日複盤)|
+| `daily-notify-only.yml` | manual | 不重 fetch,只跑推播(快速 dry-run)|
+| `morning-refetch.yml` | 平日 9:00 TPE | 早盤前重抓 TWSE 市場資料 |
+| `news-notify.yml` | 每小時 | 重大訊息掃 + 白名單推播 |
+| `stock-warnings.yml` | 平日 17:13 TPE | TWSE/TPEx 警示股 + MOPS 違約交割 |
+| `intraday-alerts.yml` | 每 30 分鐘 | active paper_trades 觸停損/進場/突破 → Telegram |
+| `data-health-alert.yml` | 每日 | 主要 table 新鮮度檢查,超過閾值推警告 |
+| `weekly-shareholder-fetch.yml` | 週日 02:00 TPE | TDCC 千張大戶週快照 |
+| `weekly-targets.yml` | 週日 | 全市場法人目標價 |
+| `weekly-brief.yml` | 週日 | 週度系統 brief |
+| `backtest-weekly.yml` | 週日 | 全策略 d1/d3/d5/d10 回測 |
+| `ml-weekly-retrain.yml` | 週日 03:00 TPE | 通用 + per-strategy 模型 walk-forward A/B gate(ROC < 舊 -0.02 → rollback)|
+| `retrain-ml.yml` | manual only | 緊急 random-split gate(2026-05-16 從 schedule 移除避免覆蓋 weekly)|
+| `backfill-*.yml`(5 條)| manual | history / institutional 22 月 / dividend / revenue / financials / pick_shap 一次性補抓 |
+
+22:13 是故意的非整點 — 避開 GitHub Actions 全球整點高峰排程延遲。
+
+---
+
+## 環境變數(`.env.example`)
+
+```ini
+FINMIND_TOKEN=                # 留空走免費 OpenAPI 路徑
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+DISCORD_WEBHOOK_URL=          # 備援,Telegram 失敗時補
+DATABASE_PATH=data/cache.db
+DEFAULT_MARKET=TW
 ```
 
-## ML 勝率預測（Stage 2B）
+可選 kill-switch(全預設 on):
 
-每張 pick 卡片右上「🤖 N%」AI 勝率。**「高信心模式」toggle**用 per-strategy threshold 過濾低分 pick。
+```ini
+WARNING_ANNOTATE_ENABLED=true      # 警示股標註 + 軟降權
+STRATEGY_CONSENSUS_ENABLED=true    # 跨策略共識 ×1.05~1.15
+REGIME_GATING_ENABLED=true         # 大盤 regime 縮量 + ML threshold uplift
+THEME_HEAT_ENABLED=true            # 題材熱度 5 日動能,冷題材 hard exclude
+ML_CALIBRATION_ENABLED=true        # isotonic probability 校正
+```
 
-兩層模型，inference 優先 per-strategy → fallback 通用：
+每個出事可立刻設 `=false` 退化整個 module。
+
+---
+
+## 部署到 Streamlit Community Cloud(免費)
+
+1. push 到 GitHub(public / private 都行)。
+2. [share.streamlit.io](https://share.streamlit.io) → Create app → 選 repo → branch `main` → Main file `app.py`。
+3. **Advanced settings → Python version: 3.11**。
+4. **Settings → Secrets** 貼 `.streamlit/secrets.toml.example` 內容。
+5. Deploy。容器重啟會清 SQLite cache,boot 時走 `data/twse_snapshot/*.csv` preload 還原。
+
+雲端 IP 被 TWSE 擋,所以資料抓取統一交給 GitHub Actions(Azure IP 不被擋),雲端 App 只讀 commit 進來的 CSV snapshot。
+
+---
+
+## 專案結構
+
+```
+.
+├── app.py                       # Streamlit 入口(17 pages 一個檔)
+├── src/                         # 業務邏輯
+│   ├── data_fetcher.py          # FinMind / TWSE OpenAPI
+│   ├── database.py              # SQLite schema + helpers(3.6k 行,15 表)
+│   ├── strategies.py            # 17 個 screen_* + metadata
+│   ├── ml_predictor.py          # RF + per-strategy routing
+│   ├── ml_calibration.py        # isotonic / platt probability calibration
+│   ├── ml_shap.py               # TreeExplainer SHAP cache
+│   ├── ml_walkforward.py        # expanding-window CV + A/B gate
+│   ├── notifier.py              # Telegram / Discord push orchestration
+│   ├── discord_notifier.py      # Discord webhook sender
+│   ├── warnings_filter.py       # annotate-only 警示股標註
+│   ├── consensus.py             # 跨策略共識 multiplier
+│   ├── theme_heat.py            # 題材熱度 hard exclude
+│   ├── regime_gating.py         # TAIEX bull/range/bear → 推薦數縮量
+│   ├── market_regime.py         # 4-tier regime → strategy category filter
+│   ├── universe.py              # pure_stock / with_etf / TW_TOP_50
+│   ├── indicators.py            # KD / MACD / RSI / BBands
+│   ├── intraday.py              # 即時報價(yfinance fallback)
+│   ├── individual_sections.py   # 個股深度 page 元件
+│   ├── ui_cards.py / ui_format.py
+│   └── ...
+├── scripts/                     # cron 入口 + 一次性 backfill
+│   ├── daily_notify.py          # 推播 main
+│   ├── precompute_strategies.py # nightly 17 策略預跑
+│   ├── daily_market_update.py   # 全市場財報 / TWSE 重抓
+│   ├── backfill_*.py            # history / dividend / financials / institutional / pick_shap
+│   ├── intraday_alerts.py       # 30 分 cron paper_trades 觸發 alerts
+│   ├── eval_walkforward.py      # ML walk-forward CV
+│   ├── vbt_grid_search.py       # vectorbt 策略 grid
+│   └── audit/                   # 校準 / A/B 比較
+├── tests/                       # pytest(1400+ tests)
+├── data/
+│   ├── cache.db                 # SQLite,gitignore
+│   ├── themes/                  # 9 主題 YAML
+│   └── twse_snapshot/           # nightly dump CSV → commit → cloud preload
+├── models/
+│   ├── short_pick.pkl + .meta.json    # 通用 RF
+│   ├── per_strategy/                  # samples ≥ 100 才訓
+│   └── calibrators/                   # isotonic 校正器
+├── .github/workflows/           # 17 cron + 5 backfill
+└── docs/
+    ├── PRD.md
+    ├── TASKS.md
+    ├── ARCHITECTURE.md          # 高階架構 + DB schema + kill switches
+    ├── CHANGELOG.md
+    └── *-audit-*.md             # 健診紀錄
+```
+
+---
+
+## ML 勝率預測(Stage 2B v2 + isotonic calibration)
+
+每張 pick 卡片右上「🤖 N%」是校正後 AI 勝率。**「高信心模式」toggle** 用 per-strategy threshold 過濾低分 pick。
+
+兩層模型,inference 優先 per-strategy → fallback 通用:
 
 ```
 models/
-├── short_pick.pkl              # 通用 RandomForest
+├── short_pick.pkl              # 通用 RF
 ├── short_pick.meta.json
-└── per_strategy/               # samples ≥ 100 才 trained，否則 fallback
-    ├── ma_alignment.pkl + .meta.json
-    ├── bias_convergence.pkl + .meta.json
-    └── ...
+├── per_strategy/               # samples ≥ 100 才 trained
+│   ├── ma_alignment.pkl + .meta.json
+│   └── ...
+└── calibrators/                # 跟 base model 同生命週期
+    └── ma_alignment.pkl
 ```
 
-過濾門檻（`STRATEGY_ML_THRESHOLDS` in `src/strategies.py`）：ma_alignment 0.55、bias_convergence 0.65、macd_golden 0.60、bb_lower_rebound 0.50、volume_breakout 0.65、gap_up 0.60。同時命中多策略取最嚴格。
+每週日 03:00 TPE 由 `ml-weekly-retrain.yml` 跑 walk-forward 重訓,ROC AUC < 舊 -0.02 → rollback 不 commit 新 model。
 
-重新校準：
-```bash
-python scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models
-python scripts/audit/compare_ml_modes.py --lookback 126
-```
+`STRATEGY_ML_THRESHOLDS`(實測 winner):ma_alignment 0.55、bias_convergence 0.65、macd_golden 0.60、bb_lower_rebound 0.50、volume_breakout 0.65。`gap_up` 2026-05-15 下架 ML 過濾(WF ROC 0.4926 ≈ random),改 rule-based `gap_vol_ratio_max=3.0` 收緊到 sweet spot。
 
-手動訓練：
-```bash
-python scripts/train_ml_model.py
-python scripts/train_per_strategy_ml.py --lookback 200
-python scripts/train_per_strategy_ml.py --strategy ma_alignment
-```
-
-## 千張大戶 Pipeline（2026-05 新增）
-
-TDCC 集保提供兩條資料路徑，本系統兩條都用：
-
-- **opendata（每週公布）**：~70 大型股，全市場 level-1~15 + 總計，從 `data/twse_snapshot/shareholder_concentration.csv` 載入。`_LEVEL_TOTAL` 偵測有特別處理 16-level（總計列）。
-- **qryStock（12 週 backfill）**：theme universe 補抓歷史，token-per-POST 刷新避開 throttling，cooldown retry。
-
-DB schema 寫進 `shareholder_concentration` 表，欄位含 sid / week_end / total_holders / top1000_ratio / delta_w（與上週 diff）。長線卡片、`👥 大戶入場` page、`big_holder_inflow` strategy 都吃這份資料。
-
-## vectorbt 策略 grid search（2026-05 新增）
-
-對既有 17 個短線策略做**策略級多參數最佳化**，補位原本「逐 pick 撈 D1/D5/D10 報酬」(`backtest_picks.py`) 看不到的「哪組參數最佳」這個維度。
-
-```bash
-# 對 volume_breakout 跑 16 組合 (4×4) × 全 universe × 過去 6 個月
-python scripts/vbt_grid_search.py --strategy volume_breakout --months 6
-```
-
-結果寫進 `vbt_grid_results` 表（同 `(strategy, params_hash)` UPSERT），Streamlit「📊 策略歷史」頁第 4 個 sub-tab「🎲 參數最佳化」顯示 Top 1 卡 + 完整 dataframe。**不自動覆蓋既有 production default**，主公手動採用。
-
-技術細節：
-- 走 `src/vbt_backtest.py` wrapper：對每組 params 跑既有 `screen_*` 拿 picks → 組 vbt entries 矩陣 → 固定 5 日 hold → `vbt.Portfolio.from_signals` 算指標
-- Sharpe / total_return / max_drawdown / win_rate 用 trade-level returns 算（per-column 對稀疏命中策略會稀釋成 0）
-- 滑點 0.1% + 手續費 0.1425%（單邊）
-
-## 概念股 YAML universe
-
-`data/themes/` 9 主題 YAML mapping：
-- `ai_concept.yaml`, `tsmc_supply.yaml`, `silicon_photonics.yaml`
-- `cowos_advanced_packaging.yaml`, `hbm_memory.yaml`
-- `humanoid_robot.yaml`, `heavy_electric_grid.yaml`
-- `defense_military.yaml`, `low_earth_orbit.yaml`
-
-提供策略 pre-filter universe，避免每次都跑全市場 ~2360 檔。
+---
 
 ## 變更紀錄
 
-詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。架構深度文件:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
 
 ## 常見問題
 
-**Q: Claude Code 改了我不想改的檔案？**
-A: `git diff` 檢查 → `git checkout -- <file>` 還原。全程開 git 追蹤。
+**Q: 雲端開頁要 10 秒?**
+A: 短線頁按執行 > 1s 通常代表 nightly precompute 沒 commit `daily_picks.csv`。檢查 GH Actions `Daily Telegram Push` 是否綠燈、`data/twse_snapshot/daily_picks.csv` 最後 commit 日期。
 
-**Q: 想加更多策略？**
-A: 在 `src/strategies/` 加新 strategy（參考 `big_holder_inflow.py`），register 到 `STRATEGY_REGISTRY`。
+**Q: 想加新策略?**
+A: 在 `src/strategies.py` 加 `screen_xxx(...)` → 補進 `STRATEGY_LABELS` / `STRATEGY_CATEGORY` / 必要時 `STRATEGY_RR_PARAMS` / `STRATEGY_ML_THRESHOLDS`。`tests/test_strategies.py` 加 case。
 
-**Q: 雲端 cache miss？**
-A: 短線頁按執行 > 1s = miss。檢查 nightly workflow 是否 commit `daily_picks.csv`、params 是否 default、universe 是否在預跑清單（pure_stock / with_etf / top_50）。
+**Q: Claude Code 改了我不想改的檔案?**
+A: `git diff` 檢查 → `git checkout -- <file>` 還原。全程 git 追蹤。
+
+**Q: 違約股保護到底擋不擋?**
+A: **不擋,只標註**。SEVERE(違約/全額)走 `ml_prob × 0.3` 沉到末段但仍顯;SOFT(注意/處置/變更)走 `× 0.7`。理由:主公規矩「主動提示風險,但不替主公做隱藏決定」。
+
+---
 
 ## 風險警語
 
-本工具僅為**個人研究與資料整理**用途，**不構成任何投資建議**。歷史資料和回測表現不保證未來獲利，投資請自行評估風險。
+本工具僅為**個人研究與資料整理**用途,**不構成任何投資建議**。歷史資料和回測表現不保證未來獲利,投資請自行評估風險。
+
+---
+
+## License / Contact
+
+個人專案,不對外發佈。
