@@ -58,6 +58,12 @@ FINMIND_TOKEN: str = _get("FINMIND_TOKEN")
 TELEGRAM_BOT_TOKEN: str = _get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID: str = _get("TELEGRAM_CHAT_ID")
 DISCORD_WEBHOOK_URL: str = _get("DISCORD_WEBHOOK_URL")
+# Discord Slash Commands(C 互動命令,2026-05-17 加):需要 application_id +
+# bot_token(register 用)+ public_key(interactions endpoint 驗章用)。
+# 缺任何一個都會讓 src/discord_bot.py 走 disabled 模式,不影響 webhook 推播。
+DISCORD_APPLICATION_ID: str = _get("DISCORD_APPLICATION_ID")
+DISCORD_BOT_TOKEN: str = _get("DISCORD_BOT_TOKEN")
+DISCORD_PUBLIC_KEY: str = _get("DISCORD_PUBLIC_KEY")
 GEMINI_API_KEY: str = _get("GEMINI_API_KEY")
 DATABASE_PATH: str = _get("DATABASE_PATH", "data/cache.db")
 DEFAULT_MARKET: str = _get("DEFAULT_MARKET", "TW").upper()
@@ -92,6 +98,9 @@ __all__ = [
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "DISCORD_WEBHOOK_URL",
+    "DISCORD_APPLICATION_ID",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_PUBLIC_KEY",
     "GEMINI_API_KEY",
     "DATABASE_PATH",
     "DEFAULT_MARKET",

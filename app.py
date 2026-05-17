@@ -113,7 +113,7 @@ PAGES = [
     "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
     "💼 交易紀錄", "🛡️ 持倉管理", "🚨 警報設定", "🧪 實測追蹤", "📊 策略歷史",
-    "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
+    "📋 系統結論", "💬 問軍師", "⚙️ 系統", "⚙️ 設定",
 ]
 
 _CACHE_TABLES = [
@@ -1029,6 +1029,8 @@ def main() -> None:
         _page_strategy_history()
     elif page == "📋 系統結論":
         _page_system_brief()
+    elif page == "💬 問軍師":
+        _page_ai_assistant()
     elif page == "⚙️ 系統":
         _page_system()
     elif page == "⚙️ 設定":
@@ -4070,9 +4072,44 @@ def _page_stock_detail() -> None:
     # K 線形態 section(B 進場時機強化,2026-05-17)— 近 30 日各形態統計。
     _render_detail_patterns_section(sid)
 
+    # 💬 問軍師 — Gemini 對該 sid 做綜合判讀(C,2026-05-17)
+    _render_detail_ask_ai_section(sid)
+
     st.markdown("---")
     st.markdown("#### 🧪 實測倉位")
     _render_detail_paper_trade_status(sid)
+
+
+def _render_detail_ask_ai_section(sid: str) -> None:
+    """個股深度頁:💬 問軍師(Gemini 對該 sid 綜合判讀)。"""
+    from src import ai_assistant
+    st.markdown("---")
+    st.markdown("#### 💬 問軍師(AI)")
+    if not ai_assistant.is_enabled():
+        st.caption("💤 軍師目前停用(env AI_ASSISTANT_ENABLED=false)")
+        return
+    if not config.GEMINI_API_KEY:
+        st.caption("⚠️ 缺 GEMINI_API_KEY,軍師無法工作")
+        return
+    q = st.text_input(
+        "問題(留空 → 自動綜合判讀)",
+        value="",
+        key=f"detail_ai_q_{sid}",
+        placeholder="例:技術面如何?要不要進場?",
+    )
+    if st.button(
+        "🧙 問軍師",
+        key=f"detail_ai_btn_{sid}",
+        help="拉該股全部資料給 Gemini 做綜合判讀",
+    ):
+        with st.spinner("軍師思考中..."):
+            res = ai_assistant.ask_about_stock(sid, q.strip())
+        if not res.get("ok"):
+            st.warning(res.get("answer") or "(無回應)")
+        else:
+            st.markdown(res["answer"])
+            if res.get("context_summary"):
+                st.caption(f"📊 軍師用的資料:{res['context_summary']}")
 
 
 def _render_detail_patterns_section(sid: str) -> None:
@@ -7668,6 +7705,85 @@ def _page_system_brief() -> None:
         st.dataframe(df_wl, use_container_width=True, hide_index=True)
 
     st.caption(f"產生時間：{brief.get('generated_at', '—')}")
+
+
+def _page_ai_assistant() -> None:
+    """C 問軍師頁(2026-05-17 加):Gemini 對「今天所有資料」做綜合判讀。
+
+    主公在這頁可:
+    - 問「2330 怎麼樣」/「今天大盤怎麼樣」之類自然語言問題
+    - 看軍師用什麼資料下結論(context_summary)
+    - 受 env AI_ASSISTANT_ENABLED kill-switch 管制
+    """
+    st.header("💬 問軍師")
+    st.caption(
+        "Gemini AI 幫你綜合 picks / 法人 / 千張戶 / 警示 / 新聞 / SHAP / 持倉 → "
+        "給結論 + 風險提示。**僅供研究,不做投資決策。**"
+    )
+
+    from src import ai_assistant
+
+    if not ai_assistant.is_enabled():
+        st.warning(
+            "💤 軍師目前停用 — 設 env `AI_ASSISTANT_ENABLED=true` 並提供 "
+            "`GEMINI_API_KEY` 後重啟。"
+        )
+        return
+
+    if not config.GEMINI_API_KEY:
+        st.error(
+            "❌ 缺 `GEMINI_API_KEY`。請至 https://aistudio.google.com 申請 "
+            "(免費 tier 夠用),然後寫進 .env 或 Streamlit Secrets。"
+        )
+        return
+
+    # 兩種問法:個股 / 大盤
+    mode = st.radio(
+        "問什麼?",
+        ["個股", "大盤"],
+        horizontal=True,
+        key="ai_assistant_mode",
+    )
+
+    if mode == "個股":
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            sid = st.text_input("股票代號", value="2330", key="ai_assistant_sid")
+        with col2:
+            q = st.text_input(
+                "你的問題(可留空 → 軍師會自己判讀)",
+                value="",
+                placeholder="例:技術面如何?要不要進場?",
+                key="ai_assistant_q_stock",
+            )
+        if st.button("🧙 問軍師", type="primary", key="ai_assistant_btn_stock"):
+            with st.spinner("軍師思考中..."):
+                res = ai_assistant.ask_about_stock(sid.strip(), q.strip())
+            _render_ai_answer(res)
+    else:
+        q = st.text_input(
+            "你的問題",
+            value="",
+            placeholder="例:今天適合進場嗎?要不要減碼?",
+            key="ai_assistant_q_market",
+        )
+        if st.button("🧙 問軍師", type="primary", key="ai_assistant_btn_market"):
+            with st.spinner("軍師思考中..."):
+                res = ai_assistant.ask_about_market(q.strip())
+            _render_ai_answer(res)
+
+
+def _render_ai_answer(res: dict) -> None:
+    """渲染 ai_assistant.ask_about_* 回的 dict。"""
+    if not res.get("ok"):
+        st.warning(res.get("answer") or "(無回應)")
+        if res.get("error"):
+            st.caption(f"debug: {res['error']}")
+        return
+    st.markdown(res["answer"])
+    if res.get("context_summary"):
+        st.caption(f"📊 軍師用的資料:{res['context_summary']}")
+    st.caption(f"模型:{res.get('model', '?')}")
 
 
 def _page_system() -> None:

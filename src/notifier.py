@@ -2457,8 +2457,191 @@ def notify_manual_picks(
     return results
 
 
+# =====================================================================
+# C 互動命令 — Telegram inline keyboard 支援(2026-05-17 加)
+# =====================================================================
+# daily_notify / morning_brief 推播 picks 時帶 inline button,讓主公在 Telegram
+# 內直接「📊 看 K 線 / ⭐ 加入關注 / 🚨 設警報 / 💬 問軍師」,不必跳 Streamlit。
+#
+# 按鈕的 callback_data 格式:`<action>:<sid>`(<= 64 byte Telegram 限制)
+#   chart:2330   / watch:2330  / alert:2330  / ask:2330
+# 對應 handler 由 scripts/telegram_bot_serve.py 在 Bot API getUpdates / webhook
+# loop 內 dispatch — 此模組只負責 build keyboard + send + 提供 dispatch 函式。
+
+CB_PREFIX_CHART = "chart"
+CB_PREFIX_WATCH = "watch"
+CB_PREFIX_ALERT = "alert"
+CB_PREFIX_ASK = "ask"
+
+
+def build_stock_inline_keyboard(sid: str) -> dict:
+    """build Telegram InlineKeyboardMarkup 給單一 sid 的快捷操作。
+
+    回 dict 直接塞進 reply_markup 即可。Telegram callback_data 最長 64 byte,
+    所以 prefix:sid(< 20 byte)安全。
+    """
+    sid = str(sid).strip()
+    return {
+        "inline_keyboard": [[
+            {"text": "📊 K 線", "callback_data": f"{CB_PREFIX_CHART}:{sid}"},
+            {"text": "⭐ 加關注", "callback_data": f"{CB_PREFIX_WATCH}:{sid}"},
+            {"text": "🚨 設警報", "callback_data": f"{CB_PREFIX_ALERT}:{sid}"},
+            {"text": "💬 問軍師", "callback_data": f"{CB_PREFIX_ASK}:{sid}"},
+        ]]
+    }
+
+
+def send_telegram_message_with_keyboard(
+    text: str,
+    keyboard: dict | None,
+    bot_token: str | None = None,
+    chat_id: str | None = None,
+    parse_mode: str = "Markdown",
+) -> bool:
+    """send_telegram_message 的姊妹函式,帶 reply_markup。
+
+    keyboard 必須是 build_stock_inline_keyboard 回的 dict(或 Telegram 規格的
+    InlineKeyboardMarkup);None / {} 等同無 keyboard,行為跟 send_telegram_message 一樣。
+    """
+    token = bot_token or config.TELEGRAM_BOT_TOKEN
+    cid = chat_id or config.TELEGRAM_CHAT_ID
+    if not token or not cid:
+        logger.warning(
+            "[NOTIFIER] 缺 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID,跳過推播"
+        )
+        return False
+
+    url = TELEGRAM_API_URL.format(token=token)
+    payload: dict = {"chat_id": cid, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if keyboard:
+        payload["reply_markup"] = keyboard
+
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+        except requests.RequestException as ex:
+            logger.warning(
+                "[NOTIFIER] 網路錯誤 (attempt %d/%d): %s",
+                attempt + 1, _MAX_ATTEMPTS, ex,
+            )
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_RETRY_DELAY_SECS)
+                continue
+            return False
+        if r.status_code == 200:
+            return True
+        if r.status_code < 500:
+            logger.error(
+                "[NOTIFIER] Telegram API client error %d: %s",
+                r.status_code, r.text[:200],
+            )
+            return False
+        logger.warning(
+            "[NOTIFIER] Telegram API %d (attempt %d/%d),retry...",
+            r.status_code, attempt + 1, _MAX_ATTEMPTS,
+        )
+        if attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_RETRY_DELAY_SECS)
+    return False
+
+
+def answer_callback_query(
+    callback_query_id: str,
+    text: str = "",
+    bot_token: str | None = None,
+    show_alert: bool = False,
+) -> bool:
+    """Telegram Bot API answerCallbackQuery — 點按鈕後回 toast / popup。
+
+    Telegram 規定 callback_query 必須在 30s 內被 answer,否則 client 會一直
+    轉圈。show_alert=False 走 toast(預設),True 走 modal popup。
+    """
+    token = bot_token or config.TELEGRAM_BOT_TOKEN
+    if not token:
+        return False
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:200]
+    if show_alert:
+        payload["show_alert"] = True
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
+    except requests.RequestException as e:
+        logger.warning("[NOTIFIER] answerCallbackQuery 網路錯誤: %s", e)
+        return False
+
+
+def handle_callback_query(update: dict) -> dict:
+    """處理 Telegram callback_query — 主公點 inline button 後的 dispatch。
+
+    回 dict:{"ok": bool, "action": str, "sid": str, "reply_text": str}
+    caller(scripts/telegram_bot_serve.py)負責拿 reply_text 再呼叫
+    send_telegram_message_with_keyboard 推回去。
+
+    支援 action:chart / watch / alert / ask
+    """
+    cb = update.get("callback_query") or {}
+    data = cb.get("data") or ""
+    cb_id = cb.get("id") or ""
+    if not data or ":" not in data:
+        return {
+            "ok": False, "action": "", "sid": "",
+            "reply_text": "❌ 無效 callback",
+            "callback_query_id": cb_id,
+        }
+    action, _, sid = data.partition(":")
+    sid = sid.strip()
+
+    reply = ""
+    if action == CB_PREFIX_WATCH:
+        try:
+            from src import database as _db
+            _db.add_to_watchlist(sid)
+            reply = f"⭐ {sid} 已加入關注列表"
+        except Exception as e:  # noqa: BLE001
+            reply = f"❌ 加入失敗: {type(e).__name__}"
+    elif action == CB_PREFIX_CHART:
+        # 走 discord_bot 的 ASCII sparkline(reuse 邏輯,channel-agnostic)
+        try:
+            from src.discord_bot import _cmd_chart  # type: ignore
+            resp = _cmd_chart(sid)
+            reply = (resp.get("data") or {}).get("content", "(無資料)")
+        except Exception as e:  # noqa: BLE001
+            reply = f"❌ K 線讀取失敗: {type(e).__name__}"
+    elif action == CB_PREFIX_ALERT:
+        reply = (
+            f"🚨 {sid} 設警報 — 請開 Streamlit「🚨 警報設定」頁,"
+            f"或在 Discord 用 `/alert {sid} price_above <價>`"
+        )
+    elif action == CB_PREFIX_ASK:
+        try:
+            from src import ai_assistant
+            res = ai_assistant.ask_about_stock(sid, "")
+            reply = f"💬 軍師 — {sid}\n{res.get('answer', '(無回應)')}"
+        except Exception as e:  # noqa: BLE001
+            reply = f"❌ 軍師失敗: {type(e).__name__}"
+    else:
+        reply = f"❓ 未知 action: {action}"
+
+    return {
+        "ok": True,
+        "action": action,
+        "sid": sid,
+        "reply_text": reply,
+        "callback_query_id": cb_id,
+    }
+
+
 __all__ = [
     "send_telegram_message",
+    "send_telegram_message_with_keyboard",
+    "build_stock_inline_keyboard",
+    "answer_callback_query",
+    "handle_callback_query",
     "format_short_picks",
     "format_multi_strategy_picks",
     "format_manual_picks",
@@ -2469,4 +2652,8 @@ __all__ = [
     "notify_multi_strategy",
     "notify_manual_picks",
     "notify_top_picks",
+    "CB_PREFIX_CHART",
+    "CB_PREFIX_WATCH",
+    "CB_PREFIX_ALERT",
+    "CB_PREFIX_ASK",
 ]
