@@ -5,6 +5,22 @@
 
 ---
 
+## 2026-05-17 — Company profiles LLM 預生 backfill(GH Actions 分批跑 + release dump)
+
+### Added
+- **`scripts/backfill_company_profiles.py` LLM 模式**:之前只跑 warm-up(僅填 FinMind facts),description/uniqueness/moat 全靠使用者點個股詳情頁 lazy on-demand,結果常常 NULL。新增 `--llm-call true|false`(預設 false 保留 warm-up 向後相容)+ `--regenerate` + `--batch-start/--batch-end` + `--max-stocks` + `--dump-format {csv,parquet}` + `--upload-release`(模式對齊 backfill_financials)+ `--universe watchlist` 新選項。LLM 模式撞 Gemini 429 → 看 `narrative_status='quota_exceeded'` 立即 fail-fast 整批中斷(模式對齊 financials 對 FinMindQuotaError 的處理)。沒設 `GEMINI_API_KEY` 在 LLM 模式 → 前置檢查 exit 1 不浪費 batch
+- **`.github/workflows/backfill-company-profiles-llm-once.yml`**:workflow_dispatch 觸發,inputs(`universe`/`batch_start`/`batch_end`/`llm_call`/`sleep`/`regenerate`/`dump_format`/`upload_release`),timeout 120 min。`pip install google-generativeai`(雲端 Streamlit 沒裝這個輕量化),`GEMINI_API_KEY` 從 secrets 拉。跑完 parquet 上傳到 GH Release `snapshot-company-profiles-YYYY-MM-DD`,commit `.snapshot_releases.json` manifest(不 commit cache.db / parquet 本體)。**主公在 GH UI 分批跑 6 次,每批 500 檔避過 Gemini 1500 RPD free tier**
+- **`src/database.py::preload_snapshots`** company_profiles section:走 `_ensure_snapshot_present('company-profiles', 'company_profiles')` 3-tier fallback(本地 parquet → release parquet → CSV),`ON CONFLICT(stock_id) DO UPDATE SET ... COALESCE(...)` 跟 `_upsert_profile` 同 partial-update 語意,雲端容器 boot 自動拉 release parquet → 個股頁 cache-hit 0 LLM call
+- **`tests/test_backfill_company_profiles_llm.py`**(14 test):warm-up 不打 LLM / LLM 模式打 / 缺 API key fail / Gemini 429 fail-fast / 個別失敗不中斷 / batch-range / max-stocks / batch-start 越界 / batch-start >= batch-end / unknown universe / watchlist universe / dump CSV schema 對齊 production / 空表不 dump / regenerate 強制重打
+- **`docs/backfill-company-profiles-llm-howto.md`**:主公觸發指引(GH UI 步驟、6 批分批表、Gemini 配額限制、429 / timeout / release upload fail 三種失敗 recovery、rollback 流程、token 用量估算)
+
+### Notes
+- 主公接下來怎麼 trigger:GH UI > Actions > **Backfill Company Profiles LLM (one-shot manual)** > Run workflow → 留 default(universe=pure_stock, batch_start=0, batch_end=500, llm_call=true, dump_format=parquet)→ 20-40 min 完成第一批。隔天再跑 500-1000,以此類推 6 批跑完全市場
+- Token 用量:單檔 ~230 tokens,500 檔 ~115K tokens,全 2715 檔 ~625K tokens(Gemini 2.5 Flash Lite 免費月度額度的小頭)
+- Rollback:`gh release download snapshot-company-profiles-{舊日期} --pattern company_profiles.parquet --dir data/twse_snapshot/`
+
+---
+
 ## 2026-05-17 — GH Releases as bulk-snapshot storage(根治 100MB 上限)
 
 ### Added

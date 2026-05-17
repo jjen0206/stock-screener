@@ -2472,6 +2472,48 @@ def preload_snapshots(
                 )
             counts["strategy_backtest"] = len(records)
 
+    # 9b. company_profiles(LLM 預生 description/uniqueness/moat + FinMind facts)
+    # 從 backfill-company-profiles-llm-once.yml 跑完 dump 進 GH Release 的
+    # parquet / 本地 fallback CSV。雲端容器 boot 拉回來,個股詳情頁 cache-hit
+    # 0 LLM call(沒 preload 仍走 lazy on-demand,只是慢)。
+    cp_path, cp_fmt = _ensure_snapshot_present(
+        snapshot_dir, "company-profiles", "company_profiles",
+    )
+    if cp_path is not None:
+        df = _read_snapshot(cp_path, cp_fmt, dtype={"stock_id": str})
+        records = df.to_dict("records")
+        for r in records:
+            for k, v in list(r.items()):
+                if pd.isna(v):
+                    r[k] = None
+        if records:
+            with get_conn(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO company_profiles (
+                        stock_id, industry, market, listing_date, foreign_limit,
+                        description, uniqueness, moat,
+                        finmind_updated_at, llm_updated_at
+                    ) VALUES (
+                        :stock_id, :industry, :market, :listing_date, :foreign_limit,
+                        :description, :uniqueness, :moat,
+                        :finmind_updated_at, :llm_updated_at
+                    )
+                    ON CONFLICT(stock_id) DO UPDATE SET
+                        industry           = COALESCE(excluded.industry, industry),
+                        market             = COALESCE(excluded.market, market),
+                        listing_date       = COALESCE(excluded.listing_date, listing_date),
+                        foreign_limit      = COALESCE(excluded.foreign_limit, foreign_limit),
+                        description        = COALESCE(excluded.description, description),
+                        uniqueness         = COALESCE(excluded.uniqueness, uniqueness),
+                        moat               = COALESCE(excluded.moat, moat),
+                        finmind_updated_at = COALESCE(excluded.finmind_updated_at, finmind_updated_at),
+                        llm_updated_at     = COALESCE(excluded.llm_updated_at, llm_updated_at)
+                    """,
+                    records,
+                )
+            counts["company_profiles"] = len(records)
+
     # 10. pick_outcomes(weekly backtest_picks.py 跑後 dump CSV)— daily-notify
     # 的「昨日複盤」section 從這撈昨天的 picks 實際報酬。
     po_csv = snapshot_dir / "pick_outcomes.csv"

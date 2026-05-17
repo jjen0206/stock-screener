@@ -1,0 +1,197 @@
+name: Backfill Company Profiles LLM (one-shot manual)
+
+# 預先用 Gemini LLM 補滿 company_profiles 表的 description/uniqueness/moat,
+# 雲端容器 boot 拉 parquet snapshot 後 0 LLM call 即可顯示個股敘述。
+#
+# 2026-05-17 設計:之前 backfill_company_profiles.py 只跑 warm-up(FinMind facts),
+# LLM 敘述靠使用者點個股詳情頁 lazy on-demand。結果常常是 NULL。
+# 跑全 2715 檔 × Gemini 5-10s/call ≈ 30 min - 1 hr,**不能在 streamlit dispatch
+# task 跑(會 timeout / 不穩)**,改放 GH Actions workflow_dispatch:
+#   - 背景跑,主公 GH UI 看 log
+#   - 撞 Gemini 429 quota 自動 fail-fast(類似 backfill_financials)
+#   - 分批跑(--batch-start --batch-end,每批 500 檔)避過 Gemini 1500 RPD free tier
+#   - 跑完 dump parquet 上 GH Release(snapshot-company-profiles-YYYY-MM-DD),
+#     Streamlit Cloud 下次 boot 自動 preload
+#
+# **不 commit cache.db** — 個資 / 大檔,只走 GH Release artifact channel。
+#
+# 預估 runtime(500 檔 batch × 2-5 s/call avg):20-40 min,留 120 min timeout 寬裕。
+
+on:
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: "要跑哪個 universe (pure_stock / tw_top_50 / watchlist)"
+        required: false
+        default: "pure_stock"
+      batch_start:
+        description: "從 universe 的第 N 檔開始(0-based,inclusive)"
+        required: false
+        default: "0"
+      batch_end:
+        description: "跑到第 N 檔結束(0-based,exclusive,0 = 跑到底)"
+        required: false
+        default: "500"
+      llm_call:
+        description: "true = 跑 Gemini LLM 生敘述 / false = 只補 FinMind facts"
+        required: false
+        default: "true"
+      sleep:
+        description: "每檔 sleep 秒數(Gemini 15 RPM free,建議 ≥ 1.0)"
+        required: false
+        default: "1.0"
+      regenerate:
+        description: "強制重打 Gemini(忽略 cache 已有 narrative)"
+        required: false
+        default: "false"
+      dump_format:
+        description: "Dump 格式 parquet / csv"
+        required: false
+        default: "parquet"
+      upload_release:
+        description: "Dump 完上傳到 GH Release"
+        required: false
+        default: "true"
+
+concurrency:
+  group: backfill-company-profiles
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # google-generativeai 不在 requirements.txt(雲端版輕量),這裡裝
+          pip install "google-generativeai>=0.7,<1.0"
+
+      - name: Init universe + preload company_profiles snapshot
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/daily_fetch.py || true
+          python -c "
+          from src import database as db
+          db.init_db()
+          n = db.preload_snapshots()
+          print(f'[PRELOAD] {n}')
+          "
+
+      - name: Run company_profiles backfill (LLM mode)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          ARGS="--universe ${{ inputs.universe }}"
+          ARGS="$ARGS --llm-call ${{ inputs.llm_call }}"
+          ARGS="$ARGS --batch-start ${{ inputs.batch_start }}"
+          ARGS="$ARGS --batch-end ${{ inputs.batch_end }}"
+          ARGS="$ARGS --sleep ${{ inputs.sleep }}"
+          if [ "${{ inputs.regenerate }}" = "true" ]; then
+            ARGS="$ARGS --regenerate"
+          fi
+          ARGS="$ARGS --dump-format ${{ inputs.dump_format }}"
+          echo "Running: python scripts/backfill_company_profiles.py $ARGS"
+          python scripts/backfill_company_profiles.py $ARGS
+
+      - name: Verify backfilled rows
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          with db.get_conn() as c:
+              row = c.execute('SELECT COUNT(*), COUNT(description), COUNT(industry) FROM company_profiles').fetchone()
+              print(f'[VERIFY] company_profiles: {row[0]} 列 / 有 description {row[1]} / 有 industry {row[2]}')
+          "
+
+      - name: Upload snapshot to GitHub Release
+        if: inputs.upload_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FMT="${{ inputs.dump_format }}"
+          if [ "$FMT" = "parquet" ]; then
+            FILE="data/twse_snapshot/company_profiles.parquet"
+          else
+            FILE="data/twse_snapshot/company_profiles.csv"
+          fi
+          if [ ! -f "$FILE" ]; then
+            echo "[RELEASE] $FILE 不存在(可能 backfill 失敗或表空),skip upload"
+            exit 0
+          fi
+          TAG="snapshot-company-profiles-$(date +%Y-%m-%d)"
+          NOTES="Backfill company_profiles $(stat -c%s "$FILE") bytes (batch ${{ inputs.batch_start }}:${{ inputs.batch_end }} universe=${{ inputs.universe }})"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "[RELEASE] tag $TAG 已存在,直接 upload --clobber"
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" "$FILE" \
+            --repo "${{ github.repository }}" \
+            --clobber
+          python -c "
+          from pathlib import Path
+          from src import snapshot_release as sr
+          f = Path('$FILE')
+          sr.update_release_cache(
+              snapshot_dir='data/twse_snapshot',
+              tag='$TAG',
+              assets=[{'name': f.name, 'size': f.stat().st_size, 'sha256': sr.compute_sha256(f)}],
+              notes='company_profiles backfill',
+          )
+          "
+          echo "[RELEASE] uploaded $FILE to $TAG"
+
+      - name: Commit .snapshot_releases.json (manifest only)
+        if: inputs.upload_release == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/.snapshot_releases.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "[COMMIT] no manifest changes"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): update company_profiles release manifest [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || {
+              git rebase --abort || true
+              exit 1
+            }
+            if git push origin HEAD:main; then
+              echo "[COMMIT] push OK on attempt $i"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          exit 1
+
+      - name: Upload backfill log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-company-profiles-log
+          path: logs/*-backfill_company_profiles.log
+          retention-days: 14
