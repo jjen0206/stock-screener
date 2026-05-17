@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-05-17 — 📈 個股深度頁 K 線視覺化(plotly 互動 chart + 標記層)
+
+### Added
+- **`src/chart_renderer.py`** — 互動 plotly K 線渲染模組:
+  - `render_candlestick_chart(sid, days=120, indicators=[...], *, db_path, df)` — 主圖 OHLC + MA20(藍)/ MA60(橘)/ Bollinger(灰虛線),副圖動態 row 配置(Volume / RSI 14 含 30/70 線 / MACD 含 DIF/DEA/HIST / KD 9-3-3 / Stoch 14-3-3),主圖 60% / 副圖均分 40%,iPhone 友善高度自適應
+  - `mark_pick_dates(fig, sid, ...)` — 從 `daily_picks` 撈該 sid 命中日期,範圍內標 ⭐ annotation,dedup by date(同日多策略只標一次)
+  - `mark_position_levels(fig, sid, ...)` — 從 `user_positions` 撈該 sid open position,加 entry(綠虛線)/ stop_loss(紅虛線)/ take_profit(藍虛線)三條 hline,右端 annotation 顯數值
+  - `mark_pattern_signals(fig, sid, days, ...)` — 軟相依 `src.candlestick_patterns`(B task PR),try/except graceful skip,API 對不上 / 模組沒 merge 不炸
+  - `compute_bollinger(close, period, num_std)` / `compute_kd(df, period)` / `compute_stoch(df, period, smooth_k, smooth_d)` 三個 helper(Stoch 補 indicators 缺,用 SMA 平滑差於 KD 的 EMA-like)
+- **App「📈 K 線」tab(個股深度頁)**(`app.py::_render_detail_kline_tab`):從原本 60 天靜態圖進化成互動 plotly chart:
+  - lookback 滑桿(60 / 120 / 180 / 360 天)
+  - 指標 multiselect(MA20 / MA60 / Bollinger / Volume / RSI / MACD / KD / Stoch)
+  - 標記 toggle:⭐ picks 歷史 / 🎯 持倉價位 / 🕯️ K 線形態
+  - mobile-first plotly responsive,iPhone 直接 swipe / pinch zoom,hover 模式 `x unified` 一次看完所有指標
+- **「⚠️ 警示」第 5 tab**:個股深度頁 4 tabs → 5 tabs(K線 / 籌碼 / ML 解釋 / 新聞 / 警示),警示紀錄 section 從 tabs 上方移進獨立 tab。乾淨股 tab 內補「✅ 此股近 90 天無警示紀錄」正向訊息,有警示時保留原色塊
+- **`tests/test_chart_renderer.py`**(16 test):empty DB fallback / Candlestick trace 存在 / dynamic subplot row 數(只 Volume → 2 row,Volume+RSI+MACD+KD → 5 row)/ 主圖類指標只 1 row / caller-supplied df / Bollinger upper>mid>lower + insufficient → NaN / KD/Stoch 都在 0–100 範圍 + insufficient → NaN / mark_pick_dates 標星 + dedup + 範圍外排除 + 無 pick no-op / mark_position_levels 三條 hline + 別檔 no-op + 無 open no-op / mark_pattern_signals 模組缺 graceful
+- **`tests/test_page_stock_detail_chart_tab.py`**(5 test):K 線 tab call chart_renderer 4 API / 個股深度頁 5 tabs(含 ⚠️ 警示)/ K 線 tab 控制項 key prefix 都在 / chart_renderer public API export / AppTest smoke(灌 120 天 OHLCV + render plotly tab 0 exception)
+
+### Notes
+- 主圖 +130 px per 副圖,5 副圖全開時總高 ~970 px(iPhone 12 寬度看 OK,桌機更舒服)
+- 不依賴 `src.candlestick_patterns`(B task 還沒 merge)— mark_pattern_signals 走 try/except import,API 名稱 detect_patterns / detect 都試,都失敗就 silently return fig
+- ⭐ pick annotation 用 `yref="y domain"` + `y=1.0` + `yanchor="bottom"` 浮在主圖上緣,不擋 OHLC
+
+---
+
 ## 2026-05-17 — Company profiles LLM 預生 backfill(GH Actions 分批跑 + release dump)
 
 ### Added

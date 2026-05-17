@@ -3760,8 +3760,54 @@ def _render_detail_paper_trade_status(sid: str) -> None:
 
 
 def _render_detail_kline_tab(sid: str) -> None:
-    """K 線 tab:近 60 天日 K + MA20/60 + BB + Volume。"""
-    df = db.get_stock_kline_with_indicators(sid, days=60)
+    """K 線 tab:互動 plotly chart + 指標 multiselect + lookback slider + markers。
+
+    控制項:
+    - lookback 滑桿(60/120/180/360 days)
+    - 指標 multiselect(MA20 / MA60 / Bollinger / Volume / RSI / MACD / KD / Stoch)
+    - 標記 toggle:⭐ picks 歷史 / 🎯 持倉價位 / 🕯️ K 線形態
+
+    Mobile-first:plotly responsive,iPhone 直接 swipe / pinch zoom。
+    """
+    from src.chart_renderer import (
+        mark_pattern_signals,
+        mark_pick_dates,
+        mark_position_levels,
+        render_candlestick_chart,
+    )
+
+    cols = st.columns([2, 3])
+    with cols[0]:
+        days = st.select_slider(
+            "回看天數",
+            options=[60, 120, 180, 360],
+            value=120,
+            key=f"detail_kline_lookback_{sid}",
+        )
+    with cols[1]:
+        indicators = st.multiselect(
+            "指標",
+            options=[
+                "MA20", "MA60", "Bollinger",
+                "Volume", "RSI", "MACD", "KD", "Stoch",
+            ],
+            default=["MA20", "MA60", "Volume", "RSI", "MACD"],
+            key=f"detail_kline_inds_{sid}",
+        )
+
+    mark_cols = st.columns(3)
+    show_picks = mark_cols[0].toggle(
+        "⭐ picks 歷史", value=True, key=f"detail_kline_picks_{sid}",
+    )
+    show_positions = mark_cols[1].toggle(
+        "🎯 持倉價位", value=True, key=f"detail_kline_pos_{sid}",
+    )
+    show_patterns = mark_cols[2].toggle(
+        "🕯️ K 線形態", value=False, key=f"detail_kline_pat_{sid}",
+        help="需 candlestick_patterns 模組(B task);未上線時 toggle 不生效",
+    )
+
+    df = db.get_stock_kline_with_indicators(sid, days=int(days))
     if df.empty:
         st.info(
             f"📭 找不到 **{sid}** 的歷史日線。"
@@ -3771,7 +3817,15 @@ def _render_detail_kline_tab(sid: str) -> None:
     st.caption(
         f"近 {len(df)} 個交易日 · {df['date'].iloc[0]} ~ {df['date'].iloc[-1]}"
     )
-    fig = _make_detail_kline_chart(df)
+    fig = render_candlestick_chart(
+        sid, days=int(days), indicators=indicators, df=df,
+    )
+    if show_picks:
+        mark_pick_dates(fig, sid)
+    if show_positions:
+        mark_position_levels(fig, sid)
+    if show_patterns:
+        mark_pattern_signals(fig, sid, days=int(days))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -3986,11 +4040,8 @@ def _page_stock_detail() -> None:
 
     _render_detail_header(sid)
 
-    # ⚠️ 警示紀錄 section(乾淨股 graceful skip 不顯,有警示時顯眼提示)
-    _render_detail_warnings_section(sid)
-
-    tab_k, tab_chip, tab_ml, tab_news = st.tabs([
-        "📈 K 線", "🚦 籌碼", "🧠 ML 解釋", "📰 新聞",
+    tab_k, tab_chip, tab_ml, tab_news, tab_warn = st.tabs([
+        "📈 K 線", "🚦 籌碼", "🧠 ML 解釋", "📰 新聞", "⚠️ 警示",
     ])
     with tab_k:
         _render_detail_kline_tab(sid)
@@ -4000,6 +4051,19 @@ def _page_stock_detail() -> None:
         _render_detail_ml_tab(sid)
     with tab_news:
         _render_detail_news_tab(sid)
+    with tab_warn:
+        # graceful skip 仍守在 _render_detail_warnings_section 內(乾淨股 early
+        # return)。tab 內若空,補一個正向訊息避免空白 tab。
+        try:
+            _has_warnings = bool(
+                db.get_warning_history_for_sid(sid, days=90)
+            )
+        except Exception:  # noqa: BLE001
+            _has_warnings = False
+        if _has_warnings:
+            _render_detail_warnings_section(sid)
+        else:
+            st.success("✅ 此股近 90 天無警示紀錄")
 
     st.markdown("---")
     st.markdown("#### 🧪 實測倉位")

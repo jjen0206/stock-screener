@@ -50,7 +50,7 @@ streamlit run app.py
 |  | 💎 長線 | 基本面 + 估值 + 殖利率 + 千張大戶 |
 |  | ⭐ 關注 | 手動關注的 sid,自動跑所有策略對位 |
 | **個股** | 🔍 個股 | 單 sid K 線 + KD/MACD/RSI + 法人 |
-|  | 📊 個股深度 | + 千張大戶趨勢 + ⚠️ 警示紀錄 + SHAP |
+|  | 📊 個股深度 | **互動 plotly K 線**(MA20/60 + Volume + RSI/MACD/KD/Stoch + BB) + ⭐ picks 標記 / 🎯 持倉價位 / 千張大戶趨勢 + ⚠️ 警示紀錄 + SHAP |
 | **市場** | 🌡️ 市場熱度 | 漲跌家數 / 量能榜 |
 |  | 📊 大盤 | TAIEX 走勢 + breadth indicators |
 |  | 👥 大戶入場 | TDCC 千張大戶 3 tabs |
