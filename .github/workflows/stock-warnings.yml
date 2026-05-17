@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write  # commit data/cache.db
+      contents: write  # commit data/twse_snapshot/*.csv
 
     steps:
       - name: Checkout repo
@@ -32,16 +32,50 @@ jobs:
       - name: Fetch TWSE/TPEx stock warnings
         run: python scripts/fetch_stock_warnings.py
 
-      # push race retry:跟 weekly-shareholder-fetch / daily-fetch 同 pattern,
+      # 把 SQLite stock_warnings + default_settlement_daily 兩張表 dump 成 CSV 進 repo。
+      # data/cache.db 被 .gitignore (`data/*.db`),雲端 Streamlit 看不到 → 必須走
+      # snapshot CSV 路徑(類似 news-notify.yml dump news.csv 進 data/twse_snapshot/)。
+      # preload_snapshots() 在 streamlit boot + GH Actions runner 都會讀這兩個 CSV。
+      - name: Dump stock_warnings + default_settlement_daily snapshots
+        continue-on-error: true
+        run: |
+          python -c "
+          import pandas as pd
+          from pathlib import Path
+          from src import database as db
+          db.init_db()
+          out_dir = Path('data/twse_snapshot')
+          out_dir.mkdir(parents=True, exist_ok=True)
+          with db.get_conn() as conn:
+              df_w = pd.read_sql(
+                  'SELECT stock_id, warning_type, announced_date, effective_from, '
+                  'effective_to, reason, source_url, fetched_at FROM stock_warnings '
+                  'ORDER BY announced_date DESC, stock_id, warning_type',
+                  conn,
+              )
+              df_d = pd.read_sql(
+                  'SELECT market, report_date, gross_amount, net_amount, '
+                  'source_url, fetched_at FROM default_settlement_daily '
+                  'ORDER BY report_date DESC, market',
+                  conn,
+              )
+          df_w.to_csv(out_dir / 'stock_warnings.csv', index=False)
+          df_d.to_csv(out_dir / 'default_settlement_daily.csv', index=False)
+          print(f'wrote stock_warnings.csv: {len(df_w)} rows')
+          print(f'wrote default_settlement_daily.csv: {len(df_d)} rows')
+          "
+
+      # push race retry:跟 weekly-shareholder-fetch / daily-fetch / news-notify 同 pattern,
       # 跨 workflow 同時段推 main 用 rebase + retry 5 次避免 [rejected]。
-      - name: Commit cache.db if changed
+      - name: Commit & push snapshot CSVs if changed
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/cache.db || true
+          git add data/twse_snapshot/stock_warnings.csv \
+                  data/twse_snapshot/default_settlement_daily.csv 2>/dev/null || true
           if git diff --quiet --staged; then
-            echo "No stock_warnings changes to commit"
+            echo "[WARNINGS] no snapshot changes to commit"
             exit 0
           fi
           git commit -m "chore(warnings): TWSE/TPEx stock warnings snapshot [skip ci]"

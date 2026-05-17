@@ -2966,6 +2966,93 @@ def preload_snapshots(
                 )
             counts["company_profiles"] = len(records)
 
+    # 9c. stock_warnings + default_settlement_daily(2026-05-18 加,違約交割教訓 R4)
+    # stock-warnings.yml workflow 每交易日 17:13 TW dump 進 repo。雲端容器重啟讀進
+    # SQLite 還原警示紀錄,讓個股深度頁的「⚠️ 警示紀錄」section 看到 3105 等違約股。
+    # 不走 cache.db commit 因為 data/*.db 被 .gitignore(同 news.csv pattern)。
+    sw_csv = snapshot_dir / "stock_warnings.csv"
+    if sw_csv.exists():
+        try:
+            df = pd.read_csv(sw_csv, dtype={"stock_id": str})
+        except pd.errors.EmptyDataError:
+            df = pd.DataFrame()
+        if not df.empty:
+            rows = []
+            for _, r in df.iterrows():
+                sid_v = r.get("stock_id")
+                wt_v = r.get("warning_type")
+                ann_v = r.get("announced_date")
+                if (
+                    not sid_v or pd.isna(sid_v)
+                    or not wt_v or pd.isna(wt_v)
+                    or not ann_v or pd.isna(ann_v)
+                ):
+                    continue
+                rows.append({
+                    "stock_id": str(sid_v),
+                    "warning_type": str(wt_v),
+                    "announced_date": str(ann_v),
+                    "effective_from": (
+                        str(r["effective_from"])
+                        if pd.notna(r.get("effective_from")) else None
+                    ),
+                    "effective_to": (
+                        str(r["effective_to"])
+                        if pd.notna(r.get("effective_to")) else None
+                    ),
+                    "reason": (
+                        str(r["reason"]) if pd.notna(r.get("reason")) else None
+                    ),
+                    "source_url": (
+                        str(r["source_url"])
+                        if pd.notna(r.get("source_url")) else None
+                    ),
+                    "fetched_at": (
+                        str(r["fetched_at"])
+                        if pd.notna(r.get("fetched_at")) else None
+                    ),
+                })
+            if rows:
+                upsert_stock_warnings(rows, db_path=db_path)
+                counts["stock_warnings"] = len(rows)
+
+    dsd_csv = snapshot_dir / "default_settlement_daily.csv"
+    if dsd_csv.exists():
+        try:
+            df = pd.read_csv(dsd_csv)
+        except pd.errors.EmptyDataError:
+            df = pd.DataFrame()
+        if not df.empty:
+            rows = []
+            for _, r in df.iterrows():
+                m_v = r.get("market")
+                d_v = r.get("report_date")
+                g_v = r.get("gross_amount")
+                n_v = r.get("net_amount")
+                if (
+                    not m_v or pd.isna(m_v)
+                    or not d_v or pd.isna(d_v)
+                    or pd.isna(g_v) or pd.isna(n_v)
+                ):
+                    continue
+                rows.append({
+                    "market": str(m_v),
+                    "report_date": str(d_v),
+                    "gross_amount": int(g_v),
+                    "net_amount": int(n_v),
+                    "source_url": (
+                        str(r["source_url"])
+                        if pd.notna(r.get("source_url")) else None
+                    ),
+                    "fetched_at": (
+                        str(r["fetched_at"])
+                        if pd.notna(r.get("fetched_at")) else None
+                    ),
+                })
+            if rows:
+                upsert_default_settlement_daily(rows, db_path=db_path)
+                counts["default_settlement_daily"] = len(rows)
+
     # 10. pick_outcomes(weekly backtest_picks.py 跑後 dump CSV)— daily-notify
     # 的「昨日複盤」section 從這撈昨天的 picks 實際報酬。
     po_csv = snapshot_dir / "pick_outcomes.csv"
