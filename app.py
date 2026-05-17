@@ -4047,6 +4047,17 @@ def _page_stock_detail() -> None:
 
     _render_detail_header(sid)
 
+    # 🎯 軍師判讀 — 主公看一眼就知道結論(2026-05-18)。優先於 tabs,
+    # 整合 K 線形態 + 警示 + 大盤 + ML + 共識 + 題材 + 持倉 給 verdict。
+    try:
+        from src import individual_stock_verdict as _isv
+        if _isv.is_enabled():
+            st.markdown("---")
+            _isv.render_stock_verdict(sid)
+            st.markdown("---")
+    except Exception as e:  # noqa: BLE001
+        print(f"[VERDICT] render 失敗 sid={sid}: {type(e).__name__}: {e}", flush=True)
+
     tab_k, tab_chip, tab_ml, tab_news, tab_warn = st.tabs([
         "📈 K 線", "🚦 籌碼", "🧠 ML 解釋", "📰 新聞", "⚠️ 警示",
     ])
@@ -4153,21 +4164,31 @@ def _render_detail_patterns_section(sid: str) -> None:
             n = h.get("name", "")
             counts[n] = counts.get(n, 0) + 1
             labels[n] = h.get("label", n)
-    # 最近一根的命中形態
+    # 最近一根的命中形態 — 用白話呈現(主公看不懂術語)
+    from src import individual_stock_verdict as _isv
     last_hits = _cp.detect_all_patterns(sid, df_bars)
+    phrase = _isv.latest_pattern_phrase(last_hits or [])
     if last_hits:
-        cur_str = " · ".join(
-            f"{h.get('label')}({'★' * int(h.get('confidence', 1))})"
-            for h in last_hits
-        )
-        st.success(f"最近一根命中:{cur_str}")
+        st.success(f"**最近一根**:{phrase}")
     else:
-        st.caption("最近一根:未命中任何形態")
+        st.info(f"**最近一根**:{phrase}")
     if counts:
-        df_counts = pd.DataFrame([
-            {"形態": labels[n], "近 30 日次數": c}
-            for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
-        ])
+        # 白話表(每形態附主公看懂的一句解釋)
+        rows_view: list[dict] = []
+        for n, c in sorted(counts.items(), key=lambda kv: -kv[1]):
+            meaning = _isv.PATTERN_MEANINGS.get(n)
+            if meaning:
+                emoji_label, color_emoji, phrase = meaning
+                row_label = f"{color_emoji} {emoji_label}"
+            else:
+                row_label = labels.get(n, n)
+                phrase = ""
+            rows_view.append({
+                "形態": row_label,
+                "白話解釋": phrase,
+                "近 30 日次數": c,
+            })
+        df_counts = pd.DataFrame(rows_view)
         st.dataframe(df_counts, use_container_width=True, hide_index=True)
     else:
         st.caption("近 30 日無任何形態命中")
