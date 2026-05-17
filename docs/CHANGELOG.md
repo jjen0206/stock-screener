@@ -21,6 +21,43 @@
 
 ---
 
+## 2026-05-17 — 🛡️ 風險管理 / 部位管理系統
+
+### Added
+- **`src/position_sizing.py`** — Kelly criterion 倉位建議模組:
+  - `kelly_fraction(win_rate, win_loss_ratio, kelly_multiplier=0.25)` — 預設 1/4 Kelly 防過估
+  - `suggest_position_size(sid, ml_prob, confidence, total_capital, max_single_pct=0.20)` — 把 ml_prob 視為 calibrated win_rate proxy,× Kelly × 上限(預設 20%)→ 建議 % + 股數 + 張數,confidence='weak' 額外打 0.5 折
+  - `get_recent_win_stats(days=30)` — 從 pick_outcomes 最近 30 天歷史 win_rate + win/loss ratio
+  - Kill-switch `POSITION_SIZING_ENABLED=true`
+- **`src/risk_management.py`** — 停損 / 停利 / drawdown 模組:
+  - `compute_atr_stop_loss(sid, entry_price, days=14, atr_multiplier=2.0)` — ATR(14) × 2 停損
+  - `compute_atr_take_profit(sid, entry_price, atr_multiplier=4.0)` — ATR(14) × 4 停利(2:1 R:R)
+  - `compute_support_resistance(sid, lookback=60)` — 60 日 swing low/high
+  - `drawdown_pct(positions)` — 整體 P&L vs 總 invested(open + closed 合算),> 10% warn / > 20% danger
+  - `check_single_concentration(positions, max_single_pct=0.20)` — 單檔超 20% 警告
+  - Kill-switch `RISK_MGMT_ENABLED=true`
+- **`user_positions` table**(`src/database.py`):主公手動建倉 ledger(跟 paper_trades 區隔)。schema:`id / stock_id / entry_date / entry_price / shares / side / stop_loss / take_profit / notes / is_open / exit_date / exit_price / created_at / updated_at`,加 `idx_user_positions_sid_open` + `idx_user_positions_open` 兩個 index。CRUD helpers:`add_position / close_position / update_position / delete_position / get_open_positions / get_all_positions / get_position_pnl`
+- **App 新頁「🛡️ 持倉管理」**(`app.py::_page_position_management`):新增持倉表單(自動 ATR 算停損停利,可手動覆寫) → 整體統計 metrics(總投入 / 市值 / 未實現 / 已實現)→ drawdown 警報(黃燈 / 紅燈)→ 單檔集中度警告(> 20%)→ 持倉表格(現價 / 損益 / 停損停利 / 達標狀態)→ 平倉表單 → 軍師部位建議區
+- **`src/notifier.py::format_pick_block`** 加軍師建議行:`💰 軍師建議:投入總部位 X%(~N 張)` + `🎯 停損 X / 停利 Y` + `⚠️ 單檔風險上限 20%`(POSITION_SIZING_ENABLED + RISK_MGMT_ENABLED on)
+- **`src/notifier.py::_enrich_picks_with_position_advice`** — notify_top_picks pipeline 加 enrich step,in-place 注入 `pick["position_advice"]` dict,失敗 graceful skip 不擋主推播
+- **`src/notifier.py::_format_drawdown_alert`** + **`scripts/morning_brief.py::_build_drawdown_alert_lines`** — 整體 drawdown > 10% 黃燈 / > 20% 紅燈,daily_notify + morning_brief 都檢查並推播警報
+- **6 個新 test 檔**(共 88 個 test cases):
+  - `test_position_sizing.py` — Kelly 公式 / 邊界 / 上限 / weak discount / fallback 共 16 test
+  - `test_risk_management.py` — ATR stop/tp / S-R / drawdown ok/warn/danger / 集中度 共 22 test
+  - `test_user_positions.py` — schema + CRUD + side=short / closed PnL 共 20 test
+  - `test_page_position_management.py` — page 註冊 / dispatch / wire 結構守住 共 8 test
+  - `test_notifier_position_advice_wire.py` — wire + kill-switch + format 渲染 共 9 test
+  - `test_notifier_drawdown_alert.py` — wire daily-notify + morning_brief + 各 severity 共 13 test
+
+### Notes
+- 個人 repo,持倉表 schema 走 SQLite CREATE TABLE IF NOT EXISTS,新欄位後續走 migration helper pattern
+- mobile-first 設計:持倉頁 `st.dataframe` + `st.metric` 排版,iPhone 加到主畫面後可滑動看
+- 推播口徑:「軍師」式建議(不自動下單),所有警報文案標明「軍師建議 ...」讓主公知道是建議不是命令
+- Drawdown 算法:realized(closed 部位用 exit_price)+ unrealized(open 部位撈 daily_prices 最新 close)合算
+- 不破壞既有 daily_notify pipeline:position advice 是 incremental enrich(失敗回 None,format 端 graceful skip)
+
+---
+
 ## 2026-05-17 — GH Releases as bulk-snapshot storage(根治 100MB 上限)
 
 ### Added

@@ -41,7 +41,7 @@ streamlit run app.py
 
 ---
 
-## Streamlit Pages(17 個)
+## Streamlit Pages(18 個)
 
 | 分組 | 頁面 | 用途 |
 |---|---|---|
@@ -58,10 +58,38 @@ streamlit run app.py
 | **回測** | 📈 回測 | 對 picks 跑 d1/d3/d5/d10 模擬 |
 |  | 📊 策略歷史 | 4 sub-tabs,含 vectorbt grid search 結果 |
 | **追蹤** | 💼 交易紀錄 | 手動倉位 + 損益 + 勝率 |
+|  | 🛡️ 持倉管理 | **真倉風險管理:ATR 停損停利 + drawdown 警報 + Kelly 部位建議** |
 |  | 🧪 實測追蹤 | paper trades(自動 entry,30 分 cron 觸發進場/停損/突破 alerts)|
 | **系統** | 📋 系統結論 / ⚙️ 系統 / ⚙️ 設定 | 資料新鮮度 / ML 模型狀態 / token 設定 |
 
 Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全域 CSS 字體放大 1.4×、卡片寬度自適應,警示 badge 在窄屏不被截斷。
+
+---
+
+## 🛡️ 風險管理 / 部位管理
+
+主公拍板「不只挑股,更要管錢」(2026-05-17)— 推播 / 持倉頁加軍師建議。
+
+**Kelly 部位建議**(`src/position_sizing.py`):
+- 把 ml_prob(經 isotonic calibration 後)當 win_rate proxy + 最近 30 天歷史 win/loss ratio 算 Kelly
+- 1/4 Kelly(`kelly_multiplier=0.25`)— 業界共識,full Kelly 估錯參數就翻車
+- 單檔上限 20%(`max_single_pct`)— 不重押 + 弱訊號 weak 再 × 0.5
+- 推播每檔 pick 加 `💰 軍師建議:投入總部位 X%(~N 張)`
+
+**ATR 停損停利**(`src/risk_management.py`):
+- 停損 = entry − ATR(14) × 2.0(預設)
+- 停利 = entry + ATR(14) × 4.0(預設,2:1 R:R)
+- 持倉頁建倉 form 自動算,主公可手動覆寫
+- 推播每檔 pick 加 `🎯 停損 X / 停利 Y`
+
+**Drawdown 警報**:
+- 整體 P&L(realized + unrealized)vs 總 invested
+- > 10% loss 黃燈(警告暫停加碼)/ > 20% loss 紅燈(軍師建議停手 + 全面檢視)
+- daily-notify(22:13)+ morning-brief(08:30)都檢查並推播
+
+**Kill-switch**:
+- `POSITION_SIZING_ENABLED=false` → 軍師建議行不出現
+- `RISK_MGMT_ENABLED=false` → 停損停利不自動算 + drawdown 警報關閉
 
 ---
 
@@ -145,6 +173,8 @@ STRATEGY_CONSENSUS_ENABLED=true    # 跨策略共識 ×1.05~1.15
 REGIME_GATING_ENABLED=true         # 大盤 regime 縮量 + ML threshold uplift
 THEME_HEAT_ENABLED=true            # 題材熱度 5 日動能,冷題材 hard exclude
 ML_CALIBRATION_ENABLED=true        # isotonic probability 校正
+POSITION_SIZING_ENABLED=true       # Kelly 軍師部位建議行
+RISK_MGMT_ENABLED=true             # ATR 停損停利 + drawdown 警報
 ```
 
 每個出事可立刻設 `=false` 退化整個 module。
