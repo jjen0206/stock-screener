@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-05-17 — GH Releases as bulk-snapshot storage(根治 100MB 上限)
+
+### Added
+- **`src/snapshot_release.py`** + **`tests/test_snapshot_release.py`** + **`tests/test_preload_snapshots_release.py`**:institutional 22 月 backfill 累積 ~150MB,撞 GitHub 單檔 100MB git push 上限。LFS 月流量 1GB / 額外計費,不採用。**改走 GH Releases**:單個 asset 上限 2GB、repo 總量無限、不污染 git history(clone 不會帶)、匿名 download 60/hr 對個人專案綽綽。新模組三件 API:
+  - `upload_snapshot_to_release(tag, files, notes)` — gh CLI 包一層,`--clobber` idempotent overwrite
+  - `download_snapshot_from_release(tag, asset, dest)` — gh CLI 優先,REST API fallback(Streamlit Cloud 沒 gh CLI 走這條)+ SHA cache idempotent skip
+  - `get_latest_snapshot_tag(prefix)` — `snapshot-institutional-*` newest first
+  Kill-switch `SNAPSHOT_USE_RELEASES_ENABLED=false`,預設 on。Manifest `data/twse_snapshot/.snapshot_releases.json`(tag, asset, size, sha256 對照)入 git。**38 test**(snapshot_release 25 + preload 3-tier fallback 9 + kill-switch 4):upload skip / create / clobber / asset partial failure / download idempotent SHA cache / REST fallback / SHA mismatch reject / kill-switch off / latest tag via gh+REST / make_snapshot_tag format
+- **`pyarrow>=15.0.0,<22.0.0`** in requirements.txt:parquet IO(zstd 壓縮,~1/5 CSV 大小)
+- **`.gitignore`** 加 `data/twse_snapshot/*.parquet` — parquet 走 release 不入 git
+
+### Changed
+- **`scripts/backfill_institutional.py`**:加 `--dump-format {csv,parquet}` + `--upload-release` flag。`--dump-csv` 保留 back-compat(等同 `--dump-format csv`)。`dump_snapshot_csv` 改 thin shim 包 `dump_snapshot(fmt=...)`,後者 parquet 路徑用 `to_parquet(compression='zstd', fallback='snappy')`。Release upload 失敗只 log warning,不 raise(snapshot 仍在 SQLite + 本地檔)
+- **`scripts/backfill_financials.py`**:同上,`_dump_csv` 改 thin shim 包 `_dump_snapshot(fmt=...)`
+- **`.github/workflows/backfill-institutional-once.yml`** + **`.github/workflows/backfill-financials-once.yml`**:
+  - 預設 `dump_format=parquet`(避開 100MB 上限)+ `upload_release=true`
+  - 移除「commit parquet → push」step,改 `gh release upload --clobber` + commit `.snapshot_releases.json` manifest
+  - Tag 命名:`snapshot-{kind}-{YYYY-MM-DD}`(institutional / financials)
+  - Preload step 改先試從 release 拉最新 parquet,失敗再 fallback CSV
+- **`src/database.py::preload_snapshots`**:institutional + financials section 改走新 `_ensure_snapshot_present()` helper 3-tier fallback(本地 parquet → release parquet → CSV)。CSV 路徑完全保留,向後相容。release lookup 例外不爆 preload,silently 降級
+- **`docs/ARCHITECTURE.md`**:加 §5.10b storage 架構小節 + kill-switch table 補 `SNAPSHOT_USE_RELEASES_ENABLED` + module map 加 `snapshot_release.py`
+
+### Notes
+- 主公接下來怎麼 trigger backfill:
+  - **Institutional**:GH UI > Actions > **Backfill Institutional (one-shot manual)** > Run workflow → 留 default(`start=2024-01-02, end=2025-11-03, dump_format=parquet, upload_release=true`)→ 30-60 min 完成後到 Releases 頁看 `snapshot-institutional-2026-05-17` asset
+  - **Financials**:同上,**Backfill Financials (one-shot manual)** → 30-60 min → `snapshot-financials-2026-05-17`
+  - 雲端 Streamlit 下次 boot(redeploy 或定期重啟)自動 download parquet,看 `[PRELOAD] institutional pulled from release ...` log
+- Tag 命名約定 `snapshot-{kind}-{YYYY-MM-DD}`,同日多次跑同 kind → 直接 `--clobber` 覆寫,不開新 tag
+- Rollback:雲端容器手動跑 `gh release download snapshot-institutional-{舊日期} --pattern institutional.parquet --dir data/twse_snapshot/` 即可回到舊版
+
+---
+
 ## 2026-05-17 — 健診歷史補齊 backfill(daily-picks 三件套)
 
 ### Added

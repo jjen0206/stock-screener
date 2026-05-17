@@ -16,6 +16,7 @@ requests>=2.31.0,<3.0.0  # data_fetcher / notifier / github_sync 等多處直接
 # 資料處理
 pandas>=2.2.0,<3.0.0
 numpy>=1.26.0,<3.0.0  # numpy 2.x 已被 pandas 2.x 支援
+pyarrow>=15.0.0,<22.0.0  # parquet IO — 大型 snapshot(institutional / financials)走 GH Release,避開 100MB git push 上限
 
 # 視覺化
 plotly>=5.20.0,<7.0.0

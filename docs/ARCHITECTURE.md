@@ -79,6 +79,7 @@ flowchart TD
 | `company_profile.py` | FinMind facts(industry / market / listing date / foreign_limit) + LLM(Gemini)narrative cache |
 | `cache_utils.py` / `_bulk_load.py` / `_retry.py` | TTL cache / bulk preload / retry decorator |
 | `github_sync.py` | watchlist push to `watchlist-sync` branch + **regression guard**(2026-05-16 加,防 boot fallback 覆蓋 remote)|
+| `snapshot_release.py` | 大型 snapshot 走 GH Releases(2026-05-17 加)— upload/download/SHA cache/kill-switch,根治 100MB git push 上限 |
 
 ### 2.2 策略 + ML
 
@@ -181,6 +182,7 @@ flowchart TD
 
 | Env Var | Module | 預設 | 關掉效果 |
 |---|---|---|---|
+| `SNAPSHOT_USE_RELEASES_ENABLED` | `snapshot_release.py` | true | 完全關閉 GH Release 路徑(只走本地 CSV legacy preload),雲端容器啟動時跳過 download |
 | `WARNING_ANNOTATE_ENABLED` | `warnings_filter.py` | true | annotate_warned_stocks no-op,picks 不標警示 badge,排序不降權 |
 | `STRATEGY_CONSENSUS_ENABLED` | `consensus.py` | true | 共識 multiplier 永遠 1.0,跨策略命中沒加分 |
 | `REGIME_GATING_ENABLED` | `regime_gating.py` | true | 永遠回 bull params(max=10、threshold uplift=0)|
@@ -239,6 +241,24 @@ flowchart TD
 **改動**:daily-notify.yml step 順序 fetch → precompute → backtest → **推播** → market_update → commit。
 
 **為什麼**:daily_market_update 跑全市場財報 ~15 min,撞 120 min timeout 會把先前 step 全 cancel,主公手機收不到推播。先推完再更新財報。
+
+### 5.10b 大型 snapshot 走 GitHub Releases(2026-05-17)
+**改動**:institutional 22 月 backfill 撞 GitHub 100MB single-file push 上限。新 `src/snapshot_release.py` + `--dump-format parquet --upload-release` flag。GH workflow dump parquet → `gh release upload snapshot-{kind}-{YYYY-MM-DD}`,**不 commit parquet 進 git**。雲端 `preload_snapshots` 找不到本地 parquet → 自動從 latest release 拉(SHA cache idempotent skip 二次 download)。
+
+**Storage 層架**:
+| Layer | Path / Location | 用途 |
+|---|---|---|
+| 本地 parquet | `data/twse_snapshot/*.parquet`(.gitignore) | Boot 0 IO,雲端容器啟動後 cache |
+| GH Release asset | `https://github.com/{repo}/releases/download/snapshot-{kind}-{date}/{file}.parquet` | 真實 source-of-truth,2GB / asset,公開 repo 匿名可下載 |
+| Manifest | `data/twse_snapshot/.snapshot_releases.json`(入 git) | (tag, asset, size, sha256) 對照,讓 boot 知道哪個 tag 對應哪個 SHA |
+| CSV(legacy) | `data/twse_snapshot/*.csv`(入 git) | 向後相容 — 小型 backfill 仍可用,3-tier fallback 最後一層 |
+
+**Loader 三層 fallback**(`_ensure_snapshot_present`):
+1. 本地 `{name}.parquet` 存在 → 用(零 IO)
+2. release enabled + 找到 `snapshot-{kind}-*` latest tag → download parquet → 用
+3. 本地 `{name}.csv` 存在(legacy)→ 用
+
+**為什麼**:LFS 月流量 1GB / 額外計費,Release 完全免費 + asset 2GB 上限 + 不污染 git history(`git clone` 不會帶 parquet)+ versioned 天然(每次 backfill 一個 tag,rollback 容易)。Kill-switch:`SNAPSHOT_USE_RELEASES_ENABLED=false` 退回純 CSV 路徑。
 
 ### 5.10 retrain-ml.yml 改 manual-only(2026-05-16)
 **改動**:retrain-ml.yml 拿掉 `cron`,只留 `workflow_dispatch`。ml-weekly-retrain.yml 是唯一 schedule 重訓。

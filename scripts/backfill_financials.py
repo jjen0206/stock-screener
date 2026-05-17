@@ -39,6 +39,12 @@ CLI
     # 跑完 dump 進 financials_quarterly.csv(GH workflow 用,讓雲端 reload)
     python scripts/backfill_financials.py --dump-csv
 
+    # 改用 parquet(較大型 batch 用,避開 100MB 上限)
+    python scripts/backfill_financials.py --dump-format parquet
+
+    # Dump 完上傳到 GH Release(tag=snapshot-financials-YYYY-MM-DD)
+    python scripts/backfill_financials.py --dump-format parquet --upload-release
+
 Exit code
 ---------
 - 0  成功(全部 OK 或失敗 < 25%)
@@ -131,7 +137,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--dump-csv", action="store_true",
-        help="跑完後 dump 進 data/twse_snapshot/financials_quarterly.csv",
+        help="跑完後 dump 進 data/twse_snapshot/financials_quarterly.csv(向後相容,等同 --dump-format csv)",
+    )
+    parser.add_argument(
+        "--dump-format", choices=["csv", "parquet"], default=None,
+        help=(
+            "Snapshot 格式 — csv (default) / parquet (~1/5 大小,給 GH Release 用)"
+        ),
+    )
+    parser.add_argument(
+        "--upload-release", action="store_true",
+        help=(
+            "Dump 完上傳到 GH Release(tag=snapshot-financials-YYYY-MM-DD)。"
+            "需要 `gh` CLI + GITHUB_TOKEN/GITHUB_PAT"
+        ),
+    )
+    parser.add_argument(
+        "--release-tag", default=None,
+        help="覆寫 release tag(預設 snapshot-financials-{YYYY-MM-DD})",
     )
     args = parser.parse_args(argv)
 
@@ -172,10 +195,15 @@ def main(argv: list[str] | None = None) -> int:
         len(universe), len(todo), start, today,
     )
 
+    dump_fmt = args.dump_format
+    if args.dump_csv and dump_fmt is None:
+        dump_fmt = "csv"
+
     if not todo:
         print("[BACKFILL-FIN] nothing to do", flush=True)
-        if args.dump_csv:
-            _dump_csv()
+        if dump_fmt:
+            _dump_snapshot(fmt=dump_fmt, upload_release=args.upload_release,
+                           release_tag=args.release_tag)
         return 0
 
     n = len(todo)
@@ -224,8 +252,9 @@ def main(argv: list[str] | None = None) -> int:
         elapsed / 60, ok, empty, fail, n,
     )
 
-    if args.dump_csv:
-        _dump_csv()
+    if dump_fmt:
+        _dump_snapshot(fmt=dump_fmt, upload_release=args.upload_release,
+                       release_tag=args.release_tag)
 
     # exit code:失敗 > 25% 視為整體失敗
     if fail > 0 and fail > n // 4:
@@ -233,11 +262,17 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _dump_csv() -> int:
-    """Dump financials.quarterly 進 financials_quarterly.csv。
+def _dump_snapshot(
+    fmt: str = "csv",
+    *,
+    upload_release: bool = False,
+    release_tag: str | None = None,
+) -> tuple[Path | None, int]:
+    """Dump financials.quarterly 進 snapshot 檔(CSV 或 Parquet)。
 
-    跟 daily_market_update.main 內 step 2 同邏輯(stock_id, period_type='quarterly')。
-    回 row count。
+    Returns (out_path, row_count) — DB 空回 (None, 0)。
+
+    Parquet 路徑供 `--upload-release` 用,直接走 GH Release 避開 100MB 上限。
     """
     import pandas as pd
 
@@ -251,14 +286,51 @@ def _dump_csv() -> int:
         )
     if df.empty:
         print(
-            "[BACKFILL-FIN] financials.quarterly 表空,不 dump CSV",
+            "[BACKFILL-FIN] financials.quarterly 表空,不 dump",
             flush=True,
         )
-        return 0
-    out = SNAPSHOT_DIR / "financials_quarterly.csv"
-    df.to_csv(out, index=False)
-    print(f"[BACKFILL-FIN] 寫 {out.name}: {len(df)} 行", flush=True)
-    return len(df)
+        return None, 0
+
+    if fmt == "parquet":
+        out = SNAPSHOT_DIR / "financials_quarterly.parquet"
+        try:
+            df.to_parquet(out, index=False, compression="zstd")
+        except (ImportError, ValueError):
+            df.to_parquet(out, index=False, compression="snappy")
+    else:
+        out = SNAPSHOT_DIR / "financials_quarterly.csv"
+        df.to_csv(out, index=False)
+
+    size_mb = out.stat().st_size / (1024 * 1024)
+    print(
+        f"[BACKFILL-FIN] 寫 {out.name}: {len(df)} 行 ({size_mb:.1f} MB)",
+        flush=True,
+    )
+
+    if upload_release and out:
+        from src.snapshot_release import (
+            upload_snapshot_to_release, make_snapshot_tag,
+        )
+        tag = release_tag or make_snapshot_tag("financials")
+        notes = f"Backfill financials.quarterly {len(df)} rows ({out.name})"
+        ok = upload_snapshot_to_release(
+            tag, [out], notes=notes, snapshot_dir=SNAPSHOT_DIR,
+        )
+        if ok:
+            print(f"[BACKFILL-FIN] uploaded → release {tag}", flush=True)
+        else:
+            print(
+                "[BACKFILL-FIN] release upload failed(snapshot 仍在 SQLite + 本地檔)",
+                flush=True,
+            )
+
+    return out, len(df)
+
+
+def _dump_csv() -> int:
+    """Back-compat shim: legacy callers / tests still use `_dump_csv()`."""
+    _, n = _dump_snapshot(fmt="csv")
+    return n
 
 
 if __name__ == "__main__":

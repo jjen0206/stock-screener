@@ -18,6 +18,11 @@ env/
 data/*.db
 data/*.sqlite
 
+# 大型 snapshot 走 GH Release(2026-05-17,根治 100MB git push 上限)
+# parquet 從 GH Release CDN 拉,不入 git;.snapshot_releases.json 是 manifest,要入 git
+data/twse_snapshot/*.parquet
+data/twse_snapshot/*.parquet.partial
+
 # IDE
 .vscode/
 .idea/
