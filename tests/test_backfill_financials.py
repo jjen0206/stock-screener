@@ -205,3 +205,172 @@ def test_main_high_failure_returns_1(tmp_db, monkeypatch):
     rc = bf.main(["--sleep", "0", "--progress-every", "100"])
     # 25 檔全 fail > max(20, 25//4=6)=20 → exit 1
     assert rc == 1
+
+
+# === 402 fail-fast(quota 爆)===
+
+def test_backfill_one_propagates_quota_error(tmp_db):
+    """fetch_fn 拋 FinMindQuotaError → backfill_one 不該 swallow,該 raise 給上層。"""
+    from src.data_fetcher import FinMindQuotaError
+
+    def quota(sid, s, e):
+        raise FinMindQuotaError("status=402 quota exhausted")
+
+    with pytest.raises(FinMindQuotaError):
+        bf.backfill_one("2330", "2021-01-01", "2026-05-16", fetch_fn=quota)
+
+
+def test_main_quota_error_aborts_immediately(tmp_db, monkeypatch, capsys):
+    """第 1 檔就撞 quota → 整批中斷,不繼續打剩下的檔,exit 1。"""
+    from src.data_fetcher import FinMindQuotaError
+
+    sids = [f"{1000 + i:04d}" for i in range(10)]
+    _seed_stocks_with_history(sids)
+
+    calls: list[str] = []
+
+    def quota_first(sid, s, e):
+        calls.append(sid)
+        if len(calls) >= 3:  # 第 3 檔開始 quota 爆(模擬中途撞)
+            raise FinMindQuotaError(
+                "status=402 quota — 改日再跑或加 token"
+            )
+        return pd.DataFrame([{
+            "stock_id": sid, "period_type": "quarterly", "period": "2026-Q1",
+            "revenue": None, "revenue_yoy": None, "eps": 1.0, "roe": 5.0,
+        }])
+
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_quarterly_financials", quota_first,
+    )
+
+    rc = bf.main(["--sleep", "0", "--progress-every", "100"])
+    # 第 3 檔 raise → 第 4 ~ 10 檔不該被打
+    assert len(calls) == 3
+    assert rc == 1
+    err = capsys.readouterr().err
+    # 警告 message 該提到 quota
+    assert "quota" in err.lower()
+
+
+def test_with_retry_no_retry_on_quota_error(monkeypatch):
+    """with_retry 對 no_retry_exceptions 該 fail-fast(0 retry / 0 sleep)。
+
+    驗 long-backoff schedule 對 FinMindQuotaError 不生效 — 不會耗 60+120+300+...s
+    sleep 卡住 batch。
+    """
+    import time as _time
+    from src._retry import with_retry
+    from src.data_fetcher import FinMindQuotaError
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(_time, "sleep", lambda s: sleep_calls.append(s))
+
+    call_count = {"n": 0}
+
+    def attempt():
+        call_count["n"] += 1
+        raise FinMindQuotaError("status=402 quota")
+
+    with pytest.raises(FinMindQuotaError):
+        with_retry(
+            attempt, delays=[60, 120, 300, 600, 900],
+            label="test", no_retry_exceptions=(FinMindQuotaError,),
+        )
+    # 一次嘗試 → fail-fast → 不該 retry / 不該 sleep
+    assert call_count["n"] == 1
+    assert sleep_calls == []
+
+
+# === Batch range / max-stocks ===
+
+def test_main_batch_range_subsets_universe(tmp_db, monkeypatch):
+    """--batch-start / --batch-end 該切 universe 視窗,只打範圍內的 sid。"""
+    sids = [f"{1000 + i:04d}" for i in range(10)]
+    _seed_stocks_with_history(sids)
+
+    calls: list[str] = []
+
+    def fake_fetch(sid, s, e):
+        calls.append(sid)
+        return pd.DataFrame([{
+            "stock_id": sid, "period_type": "quarterly", "period": "2026-Q1",
+            "revenue": None, "revenue_yoy": None, "eps": 1.0, "roe": 5.0,
+        }])
+
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_quarterly_financials", fake_fetch,
+    )
+
+    rc = bf.main([
+        "--batch-start", "2", "--batch-end", "5",
+        "--sleep", "0", "--progress-every", "100",
+    ])
+    assert rc == 0
+    # universe 排序 = 1000, 1001, ..., 1009;[2:5] = 1002, 1003, 1004
+    assert set(calls) == {"1002", "1003", "1004"}
+
+
+def test_main_max_stocks_caps_run(tmp_db, monkeypatch):
+    """--max-stocks 限單次 run 上限,避免一次燒光 quota。"""
+    sids = [f"{1000 + i:04d}" for i in range(20)]
+    _seed_stocks_with_history(sids)
+
+    calls: list[str] = []
+
+    def fake_fetch(sid, s, e):
+        calls.append(sid)
+        return pd.DataFrame([{
+            "stock_id": sid, "period_type": "quarterly", "period": "2026-Q1",
+            "revenue": None, "revenue_yoy": None, "eps": 1.0, "roe": 5.0,
+        }])
+
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_quarterly_financials", fake_fetch,
+    )
+
+    rc = bf.main([
+        "--max-stocks", "5",
+        "--sleep", "0", "--progress-every", "100",
+    ])
+    assert rc == 0
+    # 20 待補但 max-stocks=5 → 只打 5 檔
+    assert len(calls) == 5
+
+
+def test_main_batch_start_beyond_universe_exits_0(tmp_db, monkeypatch, capsys):
+    """--batch-start 超過 universe size → 沒事可做,exit 0(不算錯)。"""
+    sids = [f"{1000 + i:04d}" for i in range(3)]
+    _seed_stocks_with_history(sids)
+
+    calls: list[str] = []
+
+    def fake_fetch(sid, s, e):
+        calls.append(sid)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_quarterly_financials", fake_fetch,
+    )
+
+    rc = bf.main([
+        "--batch-start", "100", "--batch-end", "200",
+        "--sleep", "0",
+    ])
+    assert rc == 0
+    assert calls == []
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_main_batch_start_ge_end_exits_2(tmp_db, monkeypatch, capsys):
+    """--batch-start >= --batch-end 該回 exit 2(參數錯)。"""
+    sids = [f"{1000 + i:04d}" for i in range(5)]
+    _seed_stocks_with_history(sids)
+
+    rc = bf.main([
+        "--batch-start", "3", "--batch-end", "3",
+        "--sleep", "0",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "區間空" in err

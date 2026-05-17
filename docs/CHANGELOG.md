@@ -5,6 +5,14 @@
 
 ---
 
+## 2026-05-17 — Backfill workflow 儲存/配額硬問題(parquet + fail-fast + 分批)
+
+### Fixed
+- **`fix(backfill-inst): 改 parquet+zstd 避過 GitHub 100MB 上限`**:`scripts/backfill_institutional.py --dump-format parquet`(預設)寫 `institutional.parquet` 用 zstd lvl 9 — 22 月全市場 ~280MB CSV 壓到 ~30MB,不再撞 GitHub single-file 上限。`--dump-csv` legacy alias 保留向後相容,workflow 同步加 `dump_format` input,`.gitignore` 新增 `data/twse_snapshot/institutional.csv`(parquet 為新 source of truth)。`src/database.py::preload_snapshots` 對 institutional 優先讀 `.parquet`,fallback `.csv`,既有部署不破。新增 `pyarrow>=15.0.0` 進 requirements。8 test 覆蓋:parquet dump / merge / csv fallback / preload parquet 優先 / preload csv fallback / dump-format CLI / legacy --dump-csv / bad format
+- **`fix(backfill-fin): 402 quota 爆 fail-fast + 分批 dispatch`**:`scripts/backfill_financials.py` 加 `--batch-start N --batch-end N` + `--max-stocks N`(default 200)讓主公手動跑多批(0-200 / 200-400 / ... / 1800-2000)避過 FinMind quota 撞牆。`src/data_fetcher.py` 新 `FinMindQuotaError(FinMindAPIError)` — `_api_call` 偵測 status=402 不再走 long-backoff 60+120+300+600+900s,直接 raise;`fetch_quarterly_financials` 對 quota 特例 propagate(非 quota 仍 swallow 回空 DF)。`src/_retry.py::with_retry` 加 `no_retry_exceptions` param 跳過特定 exception 的重試。Backfill 中途撞 quota 立刻中斷整批 exit 1,workflow 看到紅燈。9 test:quota propagation / quota abort / with_retry no-retry / batch range / max-stocks cap / batch beyond universe / batch_start >= batch_end + 既有 6 test 不破
+
+---
+
 ## 2026-05-17 — 健診歷史補齊 backfill(daily-picks 三件套)
 
 ### Added

@@ -30,10 +30,30 @@ on:
         description: "每檔 sleep 秒數(預設 0.5,FinMind 友善)"
         required: false
         default: "0.5"
+      batch_start:
+        description: "從 universe 第 N 檔開始(0-based, inclusive,預設 0)"
+        required: false
+        default: "0"
+      batch_end:
+        description: "跑到 universe 第 N 檔結束(0-based, exclusive,預設 200)。0 = 跑到末尾"
+        required: false
+        default: "200"
+      max_stocks:
+        description: "單次 run 上限檔數(預設 200,避免 FinMind quota 撞牆)"
+        required: false
+        default: "200"
       dump_csv:
         description: "結束後 dump financials_quarterly.csv 並 commit(預設 true)"
         required: false
         default: "true"
+
+# 主公手動跑多次的範例(2000 檔 universe → 10 批):
+#   batch_start=0    batch_end=200
+#   batch_start=200  batch_end=400
+#   batch_start=400  batch_end=600
+#   ...
+#   batch_start=1800 batch_end=2000
+# 每批 30-60 min(視 FinMind throttle),quota 重置(免費 token 1 小時/600 calls)。
 
 concurrency:
   group: backfill-financials
@@ -76,10 +96,15 @@ jobs:
       - name: Run financials backfill
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          # FINMIND_LONG_BACKOFF 不再對 402 生效(_api_call 對 quota error 直接 fail-fast)
+          # 留著讓非 quota 的暫時錯誤吃長 backoff(網路抖動 / 5xx)
           FINMIND_LONG_BACKOFF: "1"
         run: |
           ARGS="--years ${{ inputs.years || '5' }}"
           ARGS="$ARGS --sleep ${{ inputs.sleep || '0.5' }}"
+          ARGS="$ARGS --batch-start ${{ inputs.batch_start || '0' }}"
+          ARGS="$ARGS --batch-end ${{ inputs.batch_end || '200' }}"
+          ARGS="$ARGS --max-stocks ${{ inputs.max_stocks || '200' }}"
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           if [ "${{ inputs.dump_csv }}" = "true" ]; then ARGS="$ARGS --dump-csv"; fi

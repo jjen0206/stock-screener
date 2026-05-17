@@ -525,6 +525,176 @@ def test_dump_snapshot_csv_merges_with_existing(tmp_db, monkeypatch, tmp_path):
     assert len(new) == 1
 
 
+def test_dump_snapshot_parquet_writes_compressed_file(tmp_db, monkeypatch, tmp_path):
+    """dump_snapshot(fmt='parquet') 寫 parquet + zstd,讀回 row count / schema 對。"""
+    snapshot_dir = tmp_path / "snapshot"
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", snapshot_dir)
+    snapshot_dir.mkdir()
+
+    db.upsert_institutional([
+        {"stock_id": "2330", "date": "2025-11-03",
+         "foreign_buy_sell": 100, "trust_buy_sell": 50,
+         "dealer_buy_sell": -10, "total_buy_sell": 140},
+        {"stock_id": "2454", "date": "2025-11-03",
+         "foreign_buy_sell": -5, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": -5},
+    ])
+
+    n = bi.dump_snapshot("2025-11-01", "2025-11-30", fmt="parquet")
+    assert n == 2
+
+    out = snapshot_dir / "institutional.parquet"
+    assert out.exists()
+    # csv 不該被產出(parquet-only mode)
+    assert not (snapshot_dir / "institutional.csv").exists()
+
+    import pandas as pd
+    df = pd.read_parquet(out)
+    assert len(df) == 2
+    assert set(df.columns) >= {
+        "stock_id", "date", "foreign_buy_sell", "trust_buy_sell",
+        "dealer_buy_sell", "total_buy_sell",
+    }
+    # stock_id 該是 str
+    sids = sorted(df["stock_id"].astype(str).tolist())
+    assert sids == ["2330", "2454"]
+
+
+def test_dump_snapshot_parquet_merges_with_existing_parquet(
+    tmp_db, monkeypatch, tmp_path,
+):
+    """既有 parquet 該被讀進來 merge,同 (sid, date) 用 DB 蓋掉。"""
+    import pandas as pd
+    snapshot_dir = tmp_path / "snapshot"
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", snapshot_dir)
+    snapshot_dir.mkdir()
+
+    # 既有 parquet: 2025-11-04 兩檔
+    existing = pd.DataFrame([
+        {"stock_id": "1326", "date": "2025-11-04",
+         "foreign_buy_sell": 918159, "trust_buy_sell": 0,
+         "dealer_buy_sell": -87423, "total_buy_sell": 830736},
+        {"stock_id": "2330", "date": "2025-11-04",
+         "foreign_buy_sell": 100, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": 100},
+    ])
+    existing.to_parquet(
+        snapshot_dir / "institutional.parquet",
+        compression="zstd", compression_level=9, index=False,
+    )
+
+    # DB: 2330/2025-11-04 不同值(該蓋掉)+ 2330/2025-11-03 新增
+    db.upsert_institutional([
+        {"stock_id": "2330", "date": "2025-11-03",
+         "foreign_buy_sell": 500, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": 500},
+        {"stock_id": "2330", "date": "2025-11-04",
+         "foreign_buy_sell": 999, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": 999},
+    ])
+
+    n = bi.dump_snapshot("2025-11-03", "2025-11-04", fmt="parquet")
+    assert n >= 3
+
+    df = pd.read_parquet(snapshot_dir / "institutional.parquet")
+    df["stock_id"] = df["stock_id"].astype(str)
+
+    # 2330/2025-11-04 該被 999 蓋掉
+    row = df[(df["stock_id"] == "2330") & (df["date"] == "2025-11-04")]
+    assert len(row) == 1
+    assert int(row.iloc[0]["foreign_buy_sell"]) == 999
+    # 1326/2025-11-04 該保留
+    assert len(df[(df["stock_id"] == "1326") & (df["date"] == "2025-11-04")]) == 1
+    # 2330/2025-11-03 該新增
+    assert len(df[(df["stock_id"] == "2330") & (df["date"] == "2025-11-03")]) == 1
+
+
+def test_dump_snapshot_parquet_reads_legacy_csv_as_fallback(
+    tmp_db, monkeypatch, tmp_path,
+):
+    """無 parquet 但有 csv → 該讀進 csv merge,後輸出 parquet。"""
+    import pandas as pd
+    snapshot_dir = tmp_path / "snapshot"
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", snapshot_dir)
+    snapshot_dir.mkdir()
+
+    # 既有 csv 但無 parquet — fallback 該觸發
+    (snapshot_dir / "institutional.csv").write_text(
+        "stock_id,date,foreign_buy_sell,trust_buy_sell,"
+        "dealer_buy_sell,total_buy_sell\n"
+        "1101,2025-11-04,1,2,3,6\n",
+        encoding="utf-8",
+    )
+    db.upsert_institutional([
+        {"stock_id": "2330", "date": "2025-11-04",
+         "foreign_buy_sell": 999, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": 999},
+    ])
+    bi.dump_snapshot("2025-11-04", "2025-11-04", fmt="parquet")
+
+    df = pd.read_parquet(snapshot_dir / "institutional.parquet")
+    df["stock_id"] = df["stock_id"].astype(str)
+    # 兩檔都該在(csv 1101 + DB 2330)
+    assert set(df["stock_id"].tolist()) == {"1101", "2330"}
+
+
+def test_main_dump_format_parquet_default(
+    tmp_db, monkeypatch, tmp_path, fake_twse_payload, fake_tpex_payload,
+):
+    """main([--dump-format parquet]) 該寫 .parquet 不寫 .csv。"""
+    snapshot_dir = tmp_path / "snapshot"
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", snapshot_dir)
+    snapshot_dir.mkdir()
+
+    responses = [{"json": fake_twse_payload}, {"json": fake_tpex_payload}]
+    fake_get, _ = _mock_session_with_responses(monkeypatch, responses)
+    fake_session = MagicMock()
+    fake_session.get.side_effect = fake_get
+    fake_session.headers = {}
+    monkeypatch.setattr(bi.requests, "Session", lambda: fake_session)
+    monkeypatch.setattr(bi.time, "sleep", lambda _: None)
+
+    code = bi.main([
+        "--start", "2025-11-03", "--end", "2025-11-03",
+        "--no-finmind-fallback", "--sleep", "0",
+        "--dump-format", "parquet",
+    ])
+    assert code == 0
+    assert (snapshot_dir / "institutional.parquet").exists()
+    assert not (snapshot_dir / "institutional.csv").exists()
+
+
+def test_main_legacy_dump_csv_flag_still_writes_csv(
+    tmp_db, monkeypatch, tmp_path, fake_twse_payload, fake_tpex_payload,
+):
+    """--dump-csv (legacy) 該等同 --dump-format csv,留向後相容。"""
+    snapshot_dir = tmp_path / "snapshot"
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", snapshot_dir)
+    snapshot_dir.mkdir()
+
+    responses = [{"json": fake_twse_payload}, {"json": fake_tpex_payload}]
+    fake_get, _ = _mock_session_with_responses(monkeypatch, responses)
+    fake_session = MagicMock()
+    fake_session.get.side_effect = fake_get
+    fake_session.headers = {}
+    monkeypatch.setattr(bi.requests, "Session", lambda: fake_session)
+    monkeypatch.setattr(bi.time, "sleep", lambda _: None)
+
+    code = bi.main([
+        "--start", "2025-11-03", "--end", "2025-11-03",
+        "--no-finmind-fallback", "--sleep", "0",
+        "--dump-csv",
+    ])
+    assert code == 0
+    assert (snapshot_dir / "institutional.csv").exists()
+
+
+def test_dump_snapshot_rejects_bad_format(tmp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(bi, "SNAPSHOT_DIR", tmp_path / "snap")
+    with pytest.raises(ValueError):
+        bi.dump_snapshot("2025-11-01", "2025-11-30", fmt="json")
+
+
 def test_main_bad_date_args_returns_2():
     code = bi.main(["--start", "not-a-date", "--end", "2025-11-03"])
     assert code == 2

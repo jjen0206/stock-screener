@@ -35,10 +35,12 @@ def with_retry(
     label: str = "fetch",
     quiet: bool = False,
     delays: Sequence[float] | None = None,
+    no_retry_exceptions: tuple[type[BaseException], ...] = (),
 ) -> T:
     """重試指定函式。
 
-    任何 exception 觸發 retry。全部失敗重新 raise 最後的 exception。
+    任何 exception 觸發 retry,除非 type 落在 `no_retry_exceptions`。
+    全部失敗(或遇到不可重試 exception)重新 raise。
 
     參數:
         max_attempts: 嘗試次數(僅 delays=None 時生效)。預設 3。
@@ -48,6 +50,8 @@ def with_retry(
             - 第 i 次失敗後 sleep delays[i-1] 秒,例 [60, 120, 300] = 4 次嘗試
             - 用於 IP / token ban 場景:長等比短等成功率高(等限額窗口 reset)
         label, quiet: 同前。
+        no_retry_exceptions: 不該重試的 exception type tuple。例如 FinMind 402
+            quota 爆,retry 沒意義(quota window 是小時級才 reset)— 直接 fail-fast。
     """
     if delays is not None:
         sleep_schedule = list(delays)
@@ -60,6 +64,9 @@ def with_retry(
     for attempt in range(1, attempts + 1):
         try:
             return fn()
+        except no_retry_exceptions:
+            # fail-fast:特定例外(e.g. 配額爆)等再久也沒用,立刻 propagate
+            raise
         except Exception as e:  # noqa: BLE001
             last_exc = e
             if attempt < attempts:

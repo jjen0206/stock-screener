@@ -559,6 +559,61 @@ def test_daily_picks_roundtrip_without_ml_prob_returns_none(tmp_db):
     assert loaded["2317"]["ml_prob"] is None
 
 
+def test_preload_institutional_prefers_parquet_over_csv(tmp_db, tmp_path):
+    """institutional.parquet 跟 institutional.csv 都在 → parquet 優先 load。"""
+    import pandas as pd
+
+    # parquet:2 筆,新值
+    pq = pd.DataFrame([
+        {"stock_id": "2330", "date": "2025-11-03",
+         "foreign_buy_sell": 999, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": 999},
+        {"stock_id": "2454", "date": "2025-11-03",
+         "foreign_buy_sell": -5, "trust_buy_sell": 0,
+         "dealer_buy_sell": 0, "total_buy_sell": -5},
+    ])
+    pq.to_parquet(
+        tmp_path / "institutional.parquet",
+        compression="zstd", compression_level=9, index=False,
+    )
+    # csv:含舊值(同 (sid,date) 不同 foreign_buy_sell)
+    (tmp_path / "institutional.csv").write_text(
+        "stock_id,date,foreign_buy_sell,trust_buy_sell,"
+        "dealer_buy_sell,total_buy_sell\n"
+        "2330,2025-11-03,1,0,0,1\n",
+        encoding="utf-8",
+    )
+
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("institutional") == 2  # parquet 兩筆,不是 csv 一筆
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT foreign_buy_sell FROM institutional "
+            "WHERE stock_id='2330' AND date='2025-11-03'"
+        ).fetchone()
+    assert row["foreign_buy_sell"] == 999  # parquet 的值,不是 csv 的 1
+
+
+def test_preload_institutional_fallback_to_csv_when_no_parquet(tmp_db, tmp_path):
+    """沒 parquet 但有 csv → fallback 讀 csv(向後相容)。"""
+    (tmp_path / "institutional.csv").write_text(
+        "stock_id,date,foreign_buy_sell,trust_buy_sell,"
+        "dealer_buy_sell,total_buy_sell\n"
+        "2330,2025-11-03,123,0,0,123\n",
+        encoding="utf-8",
+    )
+
+    counts = db.preload_snapshots(snapshot_dir=tmp_path)
+    assert counts.get("institutional") == 1
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT foreign_buy_sell FROM institutional WHERE stock_id='2330'"
+        ).fetchone()
+    assert row["foreign_buy_sell"] == 123
+
+
 def test_preload_daily_picks_csv_without_ml_prob_column(tmp_db, tmp_path):
     """舊 daily_picks.csv 沒 ml_prob 欄(Stage 1 之前的 commit) → preload 不
     噴錯,DB 內 ml_prob 補 NULL。給雲端 git pull 拿到舊 CSV 但 schema 已更

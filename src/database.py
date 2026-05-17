@@ -2010,7 +2010,7 @@ def preload_snapshots(
 
     Loads(順序保留依賴關係:stocks 先行,daily_prices/institutional 後續):
       stocks.csv / daily_metrics.csv / financials_quarterly.csv /
-      daily_prices.csv / institutional.csv / taiex.csv /
+      daily_prices.csv / institutional.{parquet,csv} / taiex.csv /
       watchlist.csv(2026-05-07 加,讓 actions runner 看到主公的關注股
       → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)/
       pick_outcomes.csv(weekly backtest_picks.py dump,讓 daily-notify
@@ -2130,10 +2130,21 @@ def preload_snapshots(
             upsert_daily_prices(records, db_path=db_path)
             counts["daily_prices"] = len(records)
 
-    # 5. institutional
+    # 5. institutional — parquet(zstd,~30MB)優先,fallback csv(~280MB,可能撞 GH 100MB 上限)
+    inst_parquet = snapshot_dir / "institutional.parquet"
     inst_csv = snapshot_dir / "institutional.csv"
-    if inst_csv.exists():
-        df = pd.read_csv(inst_csv, dtype={"stock_id": str})
+    inst_path: Path | None = None
+    inst_reader = None
+    if inst_parquet.exists():
+        inst_path = inst_parquet
+        inst_reader = lambda p: pd.read_parquet(p)  # noqa: E731
+    elif inst_csv.exists():
+        inst_path = inst_csv
+        inst_reader = lambda p: pd.read_csv(p, dtype={"stock_id": str})  # noqa: E731
+    if inst_path is not None and inst_reader is not None:
+        df = inst_reader(inst_path)
+        if "stock_id" in df.columns:
+            df["stock_id"] = df["stock_id"].astype(str)
         records = df.to_dict("records")
         for r in records:
             for k, v in list(r.items()):

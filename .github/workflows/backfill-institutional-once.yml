@@ -27,10 +27,14 @@ on:
         description: "每個日期間 sleep 秒數 (預設 2.5,別調太低會被 ban)"
         required: false
         default: "2.5"
-      dump_csv:
-        description: "結束後 dump CSV 進 snapshot 並 commit (預設 true)"
+      dump_format:
+        description: "snapshot 輸出格式: parquet (預設,zstd ~30MB) / csv (~280MB,撞 100MB 上限) / none"
         required: false
-        default: "true"
+        default: "parquet"
+      dump_csv:
+        description: "[DEPRECATED] 等同 dump_format=csv,保留相容,預設 false"
+        required: false
+        default: "false"
 
 concurrency:
   group: backfill-institutional
@@ -58,38 +62,48 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Preload existing institutional.csv → SQLite (skip already-fetched dates)
+      - name: Preload existing institutional snapshot → SQLite (skip already-fetched dates)
         run: |
           python -c "
           import pandas as pd
           from pathlib import Path
           from src import database as db
           db.init_db()
-          p = Path('data/twse_snapshot/institutional.csv')
-          if p.exists():
-              df = pd.read_csv(p, dtype={'stock_id': str})
-              if not df.empty:
-                  records = df.to_dict('records')
-                  for r in records:
-                      for k, v in list(r.items()):
-                          if pd.isna(v): r[k] = None
-                  db.upsert_institutional(records)
-                  print(f'[PRELOAD] {len(records)} rows from CSV → SQLite')
+          pq = Path('data/twse_snapshot/institutional.parquet')
+          csv = Path('data/twse_snapshot/institutional.csv')
+          src_path = None
+          if pq.exists():
+              df = pd.read_parquet(pq); src_path = 'parquet'
+              if 'stock_id' in df.columns: df['stock_id'] = df['stock_id'].astype(str)
+          elif csv.exists():
+              df = pd.read_csv(csv, dtype={'stock_id': str}); src_path = 'csv'
           else:
-              print('[PRELOAD] no existing institutional.csv')
+              df = None
+          if df is not None and not df.empty:
+              records = df.to_dict('records')
+              for r in records:
+                  for k, v in list(r.items()):
+                      if pd.isna(v): r[k] = None
+              db.upsert_institutional(records)
+              print(f'[PRELOAD] {len(records)} rows from {src_path} → SQLite')
+          else:
+              print('[PRELOAD] no existing institutional.parquet/csv')
           "
 
       - name: Run backfill (TWSE + TPEx, FinMind fallback)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
+          # dump_csv=true 為 legacy alias → 強制覆寫 dump_format
+          DUMP_FMT="${{ inputs.dump_format }}"
+          if [ "${{ inputs.dump_csv }}" = "true" ]; then DUMP_FMT="csv"; fi
           python scripts/backfill_institutional.py \
             --start "${{ inputs.start }}" \
             --end "${{ inputs.end }}" \
             --sleep "${{ inputs.sleep }}" \
             --max-retries 3 \
             --progress-every 25 \
-            $([ "${{ inputs.dump_csv }}" = "true" ] && echo "--dump-csv")
+            --dump-format "$DUMP_FMT"
 
       - name: Verify backfilled rows
         run: |
@@ -104,17 +118,26 @@ jobs:
               print(f'[VERIFY] institutional 覆蓋區間: {row[0]} ~ {row[1]}')
           "
 
-      - name: Commit & push updated institutional.csv
-        if: inputs.dump_csv == 'true'
+      - name: Commit & push updated institutional snapshot
+        if: inputs.dump_format != 'none'
         run: |
+          # parquet 進 git(預設,~30MB),csv 已被 .gitignore 阻擋 → workflow 用 csv mode
+          # 只能跑 dry-run 看大小,推不上去
+          DUMP_FMT="${{ inputs.dump_format }}"
+          if [ "${{ inputs.dump_csv }}" = "true" ]; then DUMP_FMT="csv"; fi
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/twse_snapshot/institutional.csv
+          if [ "$DUMP_FMT" = "parquet" ]; then
+            git add data/twse_snapshot/institutional.parquet
+          else
+            # csv 路徑(legacy)— .gitignore 會阻擋,需 -f 強制 add
+            git add -f data/twse_snapshot/institutional.csv
+          fi
           if git diff --staged --quiet; then
-            echo "No changes to institutional.csv"
+            echo "No changes to institutional.$DUMP_FMT"
             exit 0
           fi
-          git commit -m "chore(snapshot): backfill institutional ${{ inputs.start }} ~ ${{ inputs.end }} [skip ci]"
+          git commit -m "chore(snapshot): backfill institutional ${{ inputs.start }} ~ ${{ inputs.end }} ($DUMP_FMT) [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main || {
               echo "rebase failed — abort and bail"
