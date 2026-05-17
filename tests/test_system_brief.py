@@ -247,7 +247,7 @@ def test_build_system_brief_dict_shape(tmp_db):
     expected_keys = {
         "generated_at", "health", "strategy_performance",
         "ml_performance", "market_state", "watchlist_today",
-        "recommendations",
+        "real_performance", "recommendations",
     }
     assert set(brief.keys()) == expected_keys
     # recommendations 至少 1 條(fallback)

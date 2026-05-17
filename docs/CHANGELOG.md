@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-05-17 — 📈 D 績效分析（真實交易 log + 策略組合回測 + 策略 attribution）
+
+### Added
+- **`src/performance_analysis.py`** — 主公真實平倉損益引擎(讀 `user_positions` is_open=0):
+  - `compute_user_pnl(conn, start_date, end_date)` — 每筆已平倉 P&L df(含 long/short side、holding_days、pnl_pct)
+  - `compute_user_win_rate(conn, window_days=30)` — 真實滾動勝率（跟 pick_outcomes 系統推薦勝率分開)
+  - `compute_attribution(conn, window_days_before=5, after=5)` — 對每筆平倉找對應 daily_picks(同 sid + entry_date ± 5 天)→ 歸因到觸發策略;一筆命中 N 策略 → P&L 平均分 1/N 避免雙計
+  - `compute_drawdown_curve(conn)` — equity / peak / drawdown / drawdown_pct 時序 df
+  - `compute_summary_metrics(conn)` — total_pnl / win_rate / sharpe(× √252)/ max_drawdown / median_holding_days
+  - `best_strategy_by_pnl(attribution, min_count=1)` — 軍師判讀「主公真實表現最好的策略」(排除 _unknown bucket)
+  - Kill-switch `PERFORMANCE_ENABLED=true`(預設 on)
+- **`src/strategy_backtest.py`** — 策略組合回測 + 命中相關性(走 daily_picks,不重算 screener):
+  - `backtest_combination(conn, strategies, start_date, end_date, holding_days=5, mode='union'/'intersect')` — 任一/全部命中,從 daily_prices 算 entry(pick_date close)→ holding_days 個交易日後 close,回 n_trades / win_rate / total_return_pct / max_drawdown_pct / sharpe(× √(252/holding_days))/ trades list
+  - `compute_strategy_correlation(conn, strategies, days=180)` — Jaccard `|A ∩ B| / |A ∪ B|` heatmap df(對角 1.0)
+- **App「📈 績效分析」分頁**(`app.py::_page_performance`,4 tab):
+  - Tab 1「💰 真實交易」:4 metric(總損益 / 勝率 / Sharpe / Max DD)+ equity curve plotly + drawdown plotly + 每筆平倉 df(進場/出場日、價、股數、P&L、持有天數)
+  - Tab 2「🎯 策略 attribution」:bar chart 每策略貢獻 P&L(綠正紅負)+ 表格(勝率/平均報酬/筆數)+ 軍師判讀「主公真實表現最好的策略是 X,建議多看 X 類推薦」
+  - Tab 3「🔬 策略組合回測」:multiselect 策略 + 聯集/交集 toggle + holding_days 滑桿(1~30)+ 開始/結束日 + Run 按鈕 → 5 metric + 交易明細(matched 策略中文標籤)
+  - Tab 4「🧭 策略相關性」:Jaccard heatmap(Viridis,0~1)+ 區間天數滑桿
+- **Weekly brief 整合**:
+  - `src/system_brief.py::_build_real_performance(conn)` 新 helper,build_system_brief() 加 `real_performance` key
+  - `format_brief_for_telegram` 加「📈 *本週真實績效*」section:本週平倉筆數 / P&L / WR / 表現最佳策略
+- **`tests/test_performance_analysis.py`**(22 test):empty df / long+short winner / 排除 open / date range filter / kill-switch / win_rate 滾動窗 / attribution 單策略歸因 + 多策略平均分 + _unknown bucket / drawdown peak/dd 計算 / summary_metrics sharpe / best_strategy 排除 unknown + min_count + None
+- **`tests/test_strategy_backtest.py`**(14 test):union/intersect mode / entry+exit 價算 P&L / holding_days / kill-switch / 無策略 / 錯 mode / 錯 holding_days / 缺 exit price skip / Jaccard 對角 1 + disjoint 0 + 完全重疊 1
+- **`tests/test_page_performance.py`**(11 test):page function 存在 + callable / PAGES 含「📈 績效分析」+ 位置 / dispatch / page source 引用兩個 module + 四個 tab + STRATEGY_LABELS + drawdown_curve + best_strategy_by_pnl + kill-switch
+
+### Notes
+- 跟既有「📈 簡易回測」/「🧪 實測追蹤」區隔清楚 — 簡易回測重跑 screener(慢但 fresh)、實測追蹤是 ML 過濾驗證(系統 seed),績效分析純讀 user_positions + daily_picks(主公拍板真倉 + 預跑命中)
+- mobile-first:plotly responsive,4 column metric 在 iPhone 直接疊
+- 沒實際平倉資料時 Tab 1 顯「尚無已平倉交易,先到🛡️ 持倉管理新增/平倉」,不擋畫面
+- 整合 weekly brief 後主公週日 10:00 收到 Telegram 同時看到「系統推薦勝率 + 自己真實買賣勝率」,差距大就表示主公手感跟系統推薦脫鉤
+
+---
+
 ## 2026-05-17 — 📈 個股深度頁 K 線視覺化(plotly 互動 chart + 標記層)
 
 ### Added
