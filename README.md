@@ -91,6 +91,29 @@ Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全
 - `POSITION_SIZING_ENABLED=false` → 軍師建議行不出現
 - `RISK_MGMT_ENABLED=false` → 停損停利不自動算 + drawdown 警報關閉
 
+### B 進場 / 出場時機強化(2026-05-17)
+
+**K 線形態判讀(`src/candlestick_patterns.py`)** — 6 形態:三紅兵、槌子線、看漲吞噬、晨星、旗形、十字星。
+- 每形態回 `{label, bias (bull/bear/neutral), confidence (★/★★/★★★)}`
+- 推播 pick block 顯 top-2 bull bias:`📊 形態: 三紅兵(★★) · 槌子線(★)`
+- App「📊 個股深度」加 K 線形態 section,掃近 30 日各形態出現次數
+
+**動態停損(`src/trailing_stop.py`)**:
+- 規則:`new_stop = max(原 stop, HWM − ATR × multiplier)`(only-up 永遠不下移)
+- 觸發門檻:`current_price ≥ entry + 1×ATR` 才上移(避免進場馬上拉緊停損)
+- `daily_notify` 結尾 batch update 所有 open positions → 推播「📈 動態停損已上移」section
+- 持倉管理頁可手動觸發 / 自動觸發 toggle
+
+**獲利了結警報(`src/take_profit_alerts.py`)**:
+- 達 take_profit / stop_loss / trailing_stop → 強警報(分 severity)
+- 分批了結建議:+5% 建議賣 1/3,+10% 再賣 1/3,留 1/3 跑趨勢
+- `morning_brief` 開頭強警報 section(TP/SL 達標主公看到就要處理)
+
+**Kill-switch**:
+- `PATTERN_DETECTION_ENABLED=false` → K 線形態行 + 個股深度頁 section 都不顯
+- `TRAILING_STOP_ENABLED=false` → 動態停損不自動更新
+- `TAKE_PROFIT_ALERT_ENABLED=false` → 達標警報 section 不發
+
 ---
 
 ## 17 套策略
@@ -175,6 +198,9 @@ THEME_HEAT_ENABLED=true            # 題材熱度 5 日動能,冷題材 hard exc
 ML_CALIBRATION_ENABLED=true        # isotonic probability 校正
 POSITION_SIZING_ENABLED=true       # Kelly 軍師部位建議行
 RISK_MGMT_ENABLED=true             # ATR 停損停利 + drawdown 警報
+PATTERN_DETECTION_ENABLED=true     # K 線形態判讀(三紅兵 / 槌子 / 吞噬 / 晨星 / 旗形 / 十字星)
+TRAILING_STOP_ENABLED=true         # 動態停損(only-up)+ daily-notify batch update
+TAKE_PROFIT_ALERT_ENABLED=true     # TP/SL/trailing 達標警報 + 分批了結建議(+5%/+10%)
 ```
 
 每個出事可立刻設 `=false` 退化整個 module。

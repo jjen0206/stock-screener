@@ -30,6 +30,51 @@
 
 ---
 
+## 2026-05-17 — 📈 B 進場 / 出場時機強化(K 線形態 + 動態停損 + 獲利了結警報)
+
+### Added
+- **`src/candlestick_patterns.py`** — K 線形態判讀(純幾何 + ratio,不依賴 ta lib):
+  - `detect_three_white_soldiers(df, lookback=3)` — 三紅兵
+  - `detect_hammer(df)` — 槌子線(下影 ≥ 2× 實體,實體在 K 棒上端)
+  - `detect_engulfing(df)` — 看漲吞噬
+  - `detect_morning_star(df)` — 晨星(三日反轉)
+  - `detect_flag(df, lookback=10)` — 旗形(高震盪 base + 突破)
+  - `detect_doji(df)` — 十字星(body / range ≤ 5%)
+  - `detect_all_patterns(sid, df) -> list[dict]` — 全 detector 聚合,每個 dict 帶 `name / label / bias (bull|bear|neutral) / confidence (1-3 ★) / sid`
+  - Kill-switch `PATTERN_DETECTION_ENABLED=true`(預設 on)
+- **`src/trailing_stop.py`** — 動態停損(only-up,不會鬆動原停損):
+  - `compute_trailing_stop(entry, current, atr, multiplier=2.0, high_water_mark=None, current_stop=None, side='long')` — 純算式,回 `{new_stop, high_water_mark, raised, rationale}`
+  - 觸發門檻:current_price ≥ entry + 1×ATR 才啟動上移(避免進場馬上拉緊停損)
+  - `update_position_trailing_stop(position_id)` — 撈 user_positions + 最新 daily_prices + ATR,UPSERT 回 DB(同時若 raised 則 stop_loss 也更新)
+  - `batch_update_trailing_stops()` — 對所有 open user_positions 跑一輪,回 summary dict(`checked / updated / skipped_no_data / raised_positions`)
+  - 新欄位 `user_positions.high_water_mark / trailing_stop`(migration helper `_migrate_user_positions_add_trailing`)
+  - Kill-switch `TRAILING_STOP_ENABLED=true`(預設 on)
+- **`src/take_profit_alerts.py`** — 達標警報 + 分批了結建議:
+  - `check_take_profit_hit() -> list[dict]` — 掃 open positions,回 stop_loss / take_profit / trailing_stop / partial_exit_5 / partial_exit_10 alerts(severity: danger / warn / info)
+  - `partial_exit_suggestion(pnl_pct)` — +5% 賣 1/3,+10% 再賣 1/3,留 1/3 跑趨勢
+  - Kill-switch `TAKE_PROFIT_ALERT_ENABLED=true`(預設 on)
+- **`src/notifier.py`** wire 進主推播:
+  - `_enrich_picks_with_patterns(picks)` — in-place 注入 `pick["patterns"]` list,format_pick_block 顯 bull bias top-2 形態行 `📊 形態: 三紅兵(★★) · 槌子線(★)`
+  - `_format_trailing_stop_update(...)` + `_format_take_profit_alerts(...)` — daily_notify 結尾 section,顯所有上移的停損 / 達標 alert
+  - `notify_top_picks` pipeline 加 pattern enrich step,失敗 graceful skip 不擋主推播
+- **`scripts/morning_brief.py`** wire 進盤前快訊:
+  - `_build_take_profit_alert_lines(channel)` — 放最前面強警報(TP/SL 達標主公看到就要處理)
+  - `has_any_change(...)` 加 TP alert 觸發條件
+- **App `📊 個股深度`** 新「K 線形態」section(`_render_detail_patterns_section`):掃近 30 日各形態出現次數 + 最近一根命中標示
+- **App `🛡️ 持倉管理`** 加 trailing stop 控制 expander:`🔄 每次開頁自動更新 trailing stop` toggle + `📈 立即更新` 按鈕 + raised 詳情;TP/SL 達標警報 section;持倉表格加 `Trail` 欄
+- **5 個新 test 檔**(共 65 個 test cases):
+  - `test_candlestick_patterns.py` — 6 detector × 各 fixture(★/★★/★★★ + 失敗條件)共 24 test
+  - `test_trailing_stop.py` — compute only-up / hwm 不下移 / safety / short / DB write back / batch summary / kill-switch 共 13 test
+  - `test_take_profit_alerts.py` — partial exit tier / SL/TP hit / trailing distinct / kill-switch 共 12 test
+  - `test_notifier_pattern_wire.py` — wire enrich + format pick block 形態行 + trailing/TP section + structural 守住 daily_notify 結尾呼叫 共 16 test
+
+### Notes
+- mobile-first:形態行 1 行(top-2),trailing / TP alert 採「• 一行 + → 動作」格式,iPhone 加到主畫面後不擠
+- 不破壞既有 pipeline:全部 incremental enrich + graceful skip,kill-switch 全 on,任何模組關掉只是該 section 不顯
+- 主公規矩:不下單,只給「軍師建議」式提示;trailing stop 永遠 only-up(避免「我幫你鬆停損」這種破紀律操作)
+
+---
+
 ## 2026-05-17 — Company profiles LLM 預生 backfill(GH Actions 分批跑 + release dump)
 
 ### Added

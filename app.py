@@ -4065,9 +4065,70 @@ def _page_stock_detail() -> None:
         else:
             st.success("✅ 此股近 90 天無警示紀錄")
 
+    # K 線形態 section(B 進場時機強化,2026-05-17)— 近 30 日各形態統計。
+    _render_detail_patterns_section(sid)
+
     st.markdown("---")
     st.markdown("#### 🧪 實測倉位")
     _render_detail_paper_trade_status(sid)
+
+
+def _render_detail_patterns_section(sid: str) -> None:
+    """個股深度頁:K 線形態 section — 近 30 日掃描各形態出現次數 + 最近一根命中。
+
+    PATTERN_DETECTION_ENABLED=false → 顯停用提示。
+    """
+    from src import candlestick_patterns as _cp
+    st.markdown("---")
+    st.markdown("#### 📊 K 線形態(近 30 日)")
+    if not _cp.is_enabled():
+        st.caption("⚠️ K 線形態偵測已停用(PATTERN_DETECTION_ENABLED=false)")
+        return
+    try:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT date, open, high, low, close FROM daily_prices "
+                "WHERE stock_id=? AND open IS NOT NULL AND high IS NOT NULL "
+                "AND low IS NOT NULL AND close IS NOT NULL "
+                "ORDER BY date DESC LIMIT 30",
+                (sid,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        st.warning("⚠️ 撈 daily_prices 失敗")
+        return
+    if not rows or len(rows) < 3:
+        st.caption("⚠️ 歷史不足 3 日,無法判讀形態")
+        return
+    bars = [dict(r) for r in reversed(rows)]
+    df_bars = pd.DataFrame(bars)
+    # 逐根掃描(滑窗 last-3 ~ last-1)— 統計近 30 日各形態出現次數
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for end in range(3, len(df_bars) + 1):
+        window = df_bars.iloc[:end]
+        hits = _cp.detect_all_patterns(sid, window)
+        for h in hits:
+            n = h.get("name", "")
+            counts[n] = counts.get(n, 0) + 1
+            labels[n] = h.get("label", n)
+    # 最近一根的命中形態
+    last_hits = _cp.detect_all_patterns(sid, df_bars)
+    if last_hits:
+        cur_str = " · ".join(
+            f"{h.get('label')}({'★' * int(h.get('confidence', 1))})"
+            for h in last_hits
+        )
+        st.success(f"最近一根命中:{cur_str}")
+    else:
+        st.caption("最近一根:未命中任何形態")
+    if counts:
+        df_counts = pd.DataFrame([
+            {"形態": labels[n], "近 30 日次數": c}
+            for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ])
+        st.dataframe(df_counts, use_container_width=True, hide_index=True)
+    else:
+        st.caption("近 30 日無任何形態命中")
 
 
 # === 回測頁 ===
@@ -6005,6 +6066,68 @@ def _page_position_management() -> None:
                 "pnl_pct": pnl_pct,
             })
 
+    # === Trailing Stop 控制(B 進場時機強化,2026-05-17)===
+    from src import trailing_stop as _ts
+    from src import take_profit_alerts as _tp_alerts
+    ts_on = _ts.is_enabled()
+    with st.expander("📈 動態停損(Trailing Stop)設定", expanded=False):
+        if not ts_on:
+            st.warning(
+                "⚠️ Trailing Stop 已停用(TRAILING_STOP_ENABLED=false),"
+                "停損不會自動上移。"
+            )
+        else:
+            st.caption(
+                "Trailing Stop 規則:當價格漲超 entry+ATR,停損自動上移到 "
+                "(HWM − ATR × 倍數)。永遠 only-up,不會鬆動。"
+            )
+        ts_auto = st.checkbox(
+            "🔄 每次開頁自動更新 trailing stop",
+            value=False, key="ts_auto_update",
+            help="勾選後每次切回本頁會跑一次 batch update。"
+                 "未勾選可手動按下方按鈕。",
+        )
+        if ts_on and (ts_auto or st.button("📈 立即更新所有持倉 trailing stop")):
+            with st.spinner("更新中..."):
+                summary = _ts.batch_update_trailing_stops()
+            n_up = summary.get("updated", 0)
+            n_skip = summary.get("skipped_no_data", 0)
+            if n_up > 0:
+                st.success(
+                    f"✅ {n_up} 筆停損已上移 "
+                    f"(checked={summary.get('checked', 0)}, "
+                    f"skipped={n_skip})"
+                )
+                for r in summary.get("raised_positions") or []:
+                    st.info(
+                        f"• #{r['position_id']} {r['sid']}: "
+                        f"{r['old_stop']:.2f} → {r['new_stop']:.2f}"
+                        f"(HWM {r['hwm']:.2f})"
+                    )
+                st.rerun()
+            else:
+                st.caption(
+                    f"無持倉達上移條件 "
+                    f"(checked={summary.get('checked', 0)}, skipped={n_skip})"
+                )
+
+    # === TP/SL 達標警報(B 進場時機強化,2026-05-17)===
+    if _tp_alerts.is_enabled():
+        alerts = _tp_alerts.check_take_profit_hit()
+        if alerts:
+            st.markdown("### 🚨 達標警報")
+            for a in alerts:
+                sev = a.get("severity", "info")
+                msg = a.get("message", "")
+                action = a.get("suggested_action", "")
+                full = f"{msg}\n→ {action}" if action else msg
+                if sev == "danger":
+                    st.error(full)
+                elif sev == "warn":
+                    st.warning(full)
+                else:
+                    st.info(full)
+
     # 整體 drawdown
     dd_input = [
         {**e, "current_price": e["current_price"]}
@@ -6065,6 +6188,7 @@ def _page_position_management() -> None:
         cur = e.get("current_price")
         sl = e.get("stop_loss")
         tp = e.get("take_profit")
+        trail = e.get("trailing_stop")
         sl_hit = _rm.should_stop_loss(e["entry_price"], cur, sl) if cur else False
         tp_hit = _rm.should_take_profit(e["entry_price"], cur, tp) if cur else False
         status = ""
@@ -6083,6 +6207,7 @@ def _page_position_management() -> None:
             "損益%": round(e["pnl_pct"], 2) if e["pnl_pct"] is not None else "—",
             "停損": round(sl, 2) if sl else "—",
             "停利": round(tp, 2) if tp else "—",
+            "Trail": round(trail, 2) if trail else "—",
             "狀態": status or "持有",
         })
     st.dataframe(

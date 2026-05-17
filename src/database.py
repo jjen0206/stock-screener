@@ -594,6 +594,30 @@ def init_db(db_path: str | Path | None = None) -> None:
         _migrate_analyst_targets_add_previous(conn)
         _migrate_ml_walkforward_add_split_method(conn)
         _migrate_vbt_grid_add_sharpe_daily(conn)
+        _migrate_user_positions_add_trailing(conn)
+
+
+def _migrate_user_positions_add_trailing(conn) -> None:
+    """B 進場時機強化(2026-05-17):加 high_water_mark / trailing_stop 欄。
+
+      high_water_mark REAL  open 後曾達的最高(long)/ 最低(short)收盤
+      trailing_stop   REAL  動態停損(永遠 >= 原 stop_loss 對 long;<= 對 short)
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS,自己檢查冪等。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(user_positions)"
+        ).fetchall()
+    }
+    if "high_water_mark" not in cols:
+        conn.execute(
+            "ALTER TABLE user_positions ADD COLUMN high_water_mark REAL"
+        )
+    if "trailing_stop" not in cols:
+        conn.execute(
+            "ALTER TABLE user_positions ADD COLUMN trailing_stop REAL"
+        )
 
 
 def _migrate_vbt_grid_add_sharpe_daily(conn) -> None:

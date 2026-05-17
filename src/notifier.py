@@ -923,6 +923,23 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
     shap_reason = pick.get("shap_reason")
     if shap_reason:
         lines.append(f"   {_md_escape(shap_reason, channel)}")
+    # K 線形態(B 進場時機強化,2026-05-17)— bull bias 才顯;neutral/bear skip。
+    # 多個形態同時命中 → 取前 2 強(confidence desc),拼成 "三紅兵(★★) · 槌子(★)"。
+    # 沒命中 / 整段空 → 整行 graceful skip。
+    patterns = pick.get("patterns") or []
+    if patterns:
+        bull_patterns = [
+            pp for pp in patterns
+            if isinstance(pp, dict) and pp.get("bias") == "bull"
+        ]
+        if bull_patterns:
+            bull_patterns.sort(key=lambda x: -int(x.get("confidence", 1)))
+            top = bull_patterns[:2]
+            parts = []
+            for pp in top:
+                stars = "★" * int(pp.get("confidence", 1))
+                parts.append(f"{pp.get('label', pp.get('name', ''))}({stars})")
+            lines.append(f"   📊 形態: {' · '.join(parts)}")
     # 法人共識目標價(yfinance / Gemini news)— 在勝率之前
     # 加 Δ 標示(主公 2026-05-08 拍板):跟 previous_target_mean 比 |Δ| ≥ 1%
     # 才顯示「(↑ +5.1%)」/「(↓ -3.2%)」,小變動省略避免雜訊。
@@ -1034,6 +1051,49 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         except (TypeError, ValueError, KeyError):
             pass  # graceful skip,不擋整段推播
     return "\n".join(lines)
+
+
+def _enrich_picks_with_patterns(picks: list[dict]) -> None:
+    """對 picks list in-place 注入 "patterns" (list[dict]) — K 線形態判讀。
+
+    從 daily_prices 撈最近 30 日 OHLC 跑 detect_all_patterns。
+    PATTERN_DETECTION_ENABLED=false → 全 set [],format_pick_block skip。
+    每 pick 例外 silent skip,不擋整體。
+    """
+    from src import candlestick_patterns as _cp
+    if not _cp.is_enabled():
+        for p in picks:
+            p["patterns"] = []
+        return
+    try:
+        import pandas as _pd  # noqa: F401
+    except ImportError:
+        for p in picks:
+            p["patterns"] = []
+        return
+    for p in picks:
+        sid = p.get("sid")
+        if not sid:
+            p["patterns"] = []
+            continue
+        try:
+            with db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT date, open, high, low, close FROM daily_prices "
+                    "WHERE stock_id=? AND open IS NOT NULL AND high IS NOT NULL "
+                    "AND low IS NOT NULL AND close IS NOT NULL "
+                    "ORDER BY date DESC LIMIT 30",
+                    (str(sid).strip(),),
+                ).fetchall()
+            if not rows or len(rows) < 3:
+                p["patterns"] = []
+                continue
+            import pandas as _pd
+            df = _pd.DataFrame([dict(r) for r in reversed(rows)])
+            p["patterns"] = _cp.detect_all_patterns(str(sid), df)
+        except Exception:  # noqa: BLE001
+            logger.exception("[NOTIFIER] pattern detect 失敗 sid=%s", sid)
+            p["patterns"] = []
 
 
 def _enrich_picks_with_position_advice(
@@ -1463,6 +1523,79 @@ def _format_drawdown_alert(channel: str = "telegram") -> str:
     return f"{header}\n{body}\n   {detail}"
 
 
+def _format_trailing_stop_update(
+    summary: dict | None = None,
+    channel: str = "telegram",
+) -> str:
+    """組「動態停損更新」section。
+
+    summary 為 trailing_stop.batch_update_trailing_stops 回傳;沒給 → 自己跑一次。
+    TRAILING_STOP_ENABLED=false / 無更新 → 回空字串。
+    """
+    from src import trailing_stop as _ts
+    if not _ts.is_enabled():
+        return ""
+    if summary is None:
+        try:
+            summary = _ts.batch_update_trailing_stops()
+        except Exception:  # noqa: BLE001
+            logger.exception("[NOTIFIER] batch trailing update 失敗")
+            return ""
+    raised = (summary or {}).get("raised_positions") or []
+    if not raised:
+        return ""
+    b = _bold
+    lines = [f"📈 {b('動態停損已上移', channel)}"]
+    for r in raised[:8]:
+        sid = str(r.get("sid", ""))
+        old_s = float(r.get("old_stop") or 0)
+        new_s = float(r.get("new_stop") or 0)
+        hwm = float(r.get("hwm") or 0)
+        if old_s > 0:
+            lines.append(
+                f"• {sid}: 停損 {old_s:.2f} → {new_s:.2f}(HWM {hwm:.2f})"
+            )
+        else:
+            lines.append(
+                f"• {sid}: 初始 trailing {new_s:.2f}(HWM {hwm:.2f})"
+            )
+    return "\n".join(lines)
+
+
+def _format_take_profit_alerts(
+    alerts: list[dict] | None = None,
+    channel: str = "telegram",
+) -> str:
+    """組「停損 / 停利 / 部分了結」section。
+
+    alerts 為 take_profit_alerts.check_take_profit_hit 回傳;沒給 → 自己撈一次。
+    TAKE_PROFIT_ALERT_ENABLED=false / 空 → 回空字串。
+    """
+    from src import take_profit_alerts as _tp
+    if not _tp.is_enabled():
+        return ""
+    if alerts is None:
+        try:
+            alerts = _tp.check_take_profit_hit()
+        except Exception:  # noqa: BLE001
+            logger.exception("[NOTIFIER] check_take_profit_hit 失敗")
+            return ""
+    if not alerts:
+        return ""
+    b = _bold
+    has_danger = any(a.get("severity") == "danger" for a in alerts)
+    header = f"🚨 {b('持倉警報', channel)}" if has_danger else f"💰 {b('獲利了結提醒', channel)}"
+    lines = [header]
+    for a in alerts[:10]:
+        msg = str(a.get("message", "")).strip()
+        action = str(a.get("suggested_action", "")).strip()
+        if msg:
+            lines.append(f"• {msg}")
+            if action:
+                lines.append(f"    → {action}")
+    return "\n".join(lines)
+
+
 def _regime_gating_caption(picks: list[dict]) -> str:
     """從 picks[0]["regime_gating"] 取 caption(注入訊息開頭)。
 
@@ -1602,6 +1735,22 @@ def format_top_picks_message(
     ):
         if block:
             parts.append(block)
+
+    # B 進場時機強化(2026-05-17):trailing stop batch update + take profit alerts。
+    # daily_notify 結尾跑一輪 trailing stop 對所有 open positions 上移停損,
+    # 加上 TP/SL 達標警報(分批了結建議)。任何例外 silent skip,不擋主訊息。
+    try:
+        ts_block = _format_trailing_stop_update(channel=channel)
+        if ts_block:
+            parts.append(ts_block)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] trailing stop update section 失敗,略過")
+    try:
+        tp_block = _format_take_profit_alerts(channel=channel)
+        if tp_block:
+            parts.append(tp_block)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] take profit alerts section 失敗,略過")
 
     # Footer(picks 空時走 empty fallback / 有 picks 走統計)
     parts.append(_format_footer_block(picks, is_fallback=is_fallback, channel=channel))
@@ -1824,6 +1973,15 @@ def notify_top_picks(
         logger.exception("[NOTIFIER] position advice enrich 整體失敗")
         for p in picks:
             p.setdefault("position_advice", None)
+
+    # K 線形態 enrich(B 進場時機強化,2026-05-17)— 注入 pick["patterns"] list。
+    # PATTERN_DETECTION_ENABLED=false → 全 [],format_pick_block skip。
+    try:
+        _enrich_picks_with_patterns(picks)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] pattern enrich 整體失敗")
+        for p in picks:
+            p.setdefault("patterns", [])
 
     # 高信心精選(三維交集:法人連買 ≥3 + 千張戶進場 + ML 過門檻)— 跟 ≥2 共識
     # 並列獨立 section。helper 自己 graceful 空回 []。任何例外不擋主推播。
