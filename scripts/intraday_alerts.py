@@ -38,6 +38,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
+from src import price_alerts as pa  # noqa: E402
 from src.discord_notifier import send_discord_message  # noqa: E402
 from src.intraday import get_intraday_quote  # noqa: E402
 from src.logging_setup import setup_file_logging  # noqa: E402
@@ -48,6 +49,10 @@ logger = logging.getLogger(__name__)
 ALERT_STOP_LOSS = "stop_loss"
 ALERT_ENTRY_ZONE = "entry_zone"
 ALERT_BREAKOUT = "breakout"
+# G 個股價格警報(price_alerts 表)觸發 → 統一打到這個 alert_type
+# 寫 alert_dedup,當日不重推。
+ALERT_PRICE_ALERT = "price_alert"
+ALERT_INTRADAY_DROP = "intraday_drop"
 
 
 def _now_iso() -> str:
@@ -280,6 +285,80 @@ def format_alert_message(
     return f"{head}(目前 {current:.2f},{sign}{change_pct:.2f}%)"
 
 
+def _push_price_alert_candidates(
+    conn: sqlite3.Connection,
+    candidates: list[dict],
+    alert_type_label: str,
+    today_iso: str,
+    *,
+    dry_run: bool,
+    send_telegram: bool,
+    send_discord: bool,
+    stats: dict[str, int],
+    mark_triggered_on_push: bool,
+) -> None:
+    """統一處理 price_alerts engine 算出的 triggered candidates。
+
+    - alert_dedup 同日去重
+    - 推 Telegram + Discord(失敗只 log)
+    - mark_triggered_on_push=True 表示對 price_alerts row 標 triggered_at + is_active=0
+      (用於 manual price_above/below/pct_change/ex_dividend);intraday_drop 系統算的
+      則 False(無對應 row)。
+    """
+    for c in candidates:
+        sid = c["stock_id"]
+        if is_already_alerted(conn, sid, alert_type_label, today_iso):
+            stats["n_skipped_dedup"] += 1
+            print(
+                f"[INTRADAY-ALERTS] SKIP dedup {sid} {alert_type_label}",
+                flush=True,
+            )
+            continue
+
+        msg = c["message"]
+        print(f"[INTRADAY-ALERTS] {msg}", flush=True)
+
+        if dry_run:
+            stats["n_pushed"] += 1
+            continue
+
+        tg_ok = True
+        dc_ok = True
+        if send_telegram:
+            tg_ok = send_telegram_message(msg, parse_mode="")
+        if send_discord:
+            dc_ok = send_discord_message(msg)
+
+        ref_price = c.get("current_price")
+        threshold = c.get("target_value")
+        record_alert(
+            conn, sid, alert_type_label, today_iso,
+            ref_price=float(ref_price) if ref_price is not None else 0.0,
+            threshold=float(threshold) if threshold is not None else 0.0,
+        )
+        if mark_triggered_on_push and c.get("alert_id"):
+            # 走既有 conn(避開 outer BEGIN holding writer lock 時另開連線
+            # 撞 database is locked)
+            try:
+                from datetime import datetime, timezone
+                ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                conn.execute(
+                    "UPDATE price_alerts SET triggered_at=?, is_active=0 "
+                    "WHERE id=? AND is_active=1",
+                    (ts, int(c["alert_id"])),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[INTRADAY-ALERTS] mark_triggered 失敗 id=%s: %s",
+                    c["alert_id"], e,
+                )
+
+        if tg_ok or dc_ok:
+            stats["n_pushed"] += 1
+        else:
+            stats["n_failed"] += 1
+
+
 def run(
     dry_run: bool = False,
     send_telegram: bool = True,
@@ -289,7 +368,8 @@ def run(
 ) -> dict[str, int]:
     """主要 entry point — 給 CLI / test 共用。
 
-    回 {n_active_trades, n_candidates, n_pushed, n_skipped_dedup, n_failed}。
+    回 {n_active_trades, n_candidates, n_pushed, n_skipped_dedup, n_failed,
+        n_price_alerts, n_intraday_drops}。
     """
     stats = {
         "n_active_trades": 0,
@@ -297,56 +377,92 @@ def run(
         "n_pushed": 0,
         "n_skipped_dedup": 0,
         "n_failed": 0,
+        "n_price_alerts": 0,
+        "n_intraday_drops": 0,
     }
     today_iso = _today_iso()
 
     with db.get_conn(db_path) as conn:
         trades = load_active_trades(conn)
         stats["n_active_trades"] = len(trades)
-        if not trades:
-            print("[INTRADAY-ALERTS] 無 active paper_trades,跳過", flush=True)
-            return stats
 
-        watchlist_sids = load_watchlist_sids(conn)
-        trade_sids = {t["sid"] for t in trades}
-        # 報價抓 union(active + watchlist),但只對 active trade 比門檻
-        all_sids = sorted(trade_sids | watchlist_sids)
-        prices = fetch_current_prices(conn, all_sids, use_intraday=use_intraday)
+        if trades:
+            watchlist_sids = load_watchlist_sids(conn)
+            trade_sids = {t["sid"] for t in trades}
+            # 報價抓 union(active + watchlist),但只對 active trade 比門檻
+            all_sids = sorted(trade_sids | watchlist_sids)
+            prices = fetch_current_prices(conn, all_sids, use_intraday=use_intraday)
 
-        candidates = evaluate_alerts(trades, prices)
-        stats["n_candidates"] = len(candidates)
+            candidates = evaluate_alerts(trades, prices)
+            stats["n_candidates"] = len(candidates)
 
-        for c in candidates:
-            if is_already_alerted(conn, c["sid"], c["alert_type"], today_iso):
-                stats["n_skipped_dedup"] += 1
-                print(
-                    f"[INTRADAY-ALERTS] SKIP dedup {c['sid']} {c['alert_type']}",
-                    flush=True,
+            for c in candidates:
+                if is_already_alerted(conn, c["sid"], c["alert_type"], today_iso):
+                    stats["n_skipped_dedup"] += 1
+                    print(
+                        f"[INTRADAY-ALERTS] SKIP dedup {c['sid']} {c['alert_type']}",
+                        flush=True,
+                    )
+                    continue
+
+                msg = c["message"]
+                print(f"[INTRADAY-ALERTS] {msg}", flush=True)
+
+                if dry_run:
+                    stats["n_pushed"] += 1
+                    continue
+
+                tg_ok = True
+                dc_ok = True
+                if send_telegram:
+                    tg_ok = send_telegram_message(msg, parse_mode="")
+                if send_discord:
+                    dc_ok = send_discord_message(msg)
+                # dedup 寫入不依賴 push 成功(channel 暫斷不該下次又狂推)
+                record_alert(
+                    conn, c["sid"], c["alert_type"], today_iso,
+                    ref_price=c["current"], threshold=c["threshold"],
                 )
-                continue
+                if tg_ok or dc_ok:
+                    stats["n_pushed"] += 1
+                else:
+                    stats["n_failed"] += 1
+        else:
+            print("[INTRADAY-ALERTS] 無 active paper_trades,跳過 trade 條件檢查", flush=True)
 
-            msg = c["message"]
-            print(f"[INTRADAY-ALERTS] {msg}", flush=True)
-
-            if dry_run:
-                stats["n_pushed"] += 1
-                continue
-
-            tg_ok = True
-            dc_ok = True
-            if send_telegram:
-                tg_ok = send_telegram_message(msg, parse_mode="")
-            if send_discord:
-                dc_ok = send_discord_message(msg)
-            # dedup 寫入不依賴 push 成功(channel 暫斷不該下次又狂推)
-            record_alert(
-                conn, c["sid"], c["alert_type"], today_iso,
-                ref_price=c["current"], threshold=c["threshold"],
+        # === G:price_alerts(主公手動設)+ intraday_drop(持倉急殺)===
+        if pa.is_enabled():
+            try:
+                pa_candidates = pa.check_price_alerts(conn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[INTRADAY-ALERTS] check_price_alerts 失敗: %s", e)
+                pa_candidates = []
+            stats["n_price_alerts"] = len(pa_candidates)
+            _push_price_alert_candidates(
+                conn, pa_candidates, ALERT_PRICE_ALERT, today_iso,
+                dry_run=dry_run,
+                send_telegram=send_telegram,
+                send_discord=send_discord,
+                stats=stats,
+                mark_triggered_on_push=True,
             )
-            if tg_ok or dc_ok:
-                stats["n_pushed"] += 1
-            else:
-                stats["n_failed"] += 1
+
+            try:
+                drop_candidates = pa.check_intraday_drop(conn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[INTRADAY-ALERTS] check_intraday_drop 失敗: %s", e)
+                drop_candidates = []
+            stats["n_intraday_drops"] = len(drop_candidates)
+            _push_price_alert_candidates(
+                conn, drop_candidates, ALERT_INTRADAY_DROP, today_iso,
+                dry_run=dry_run,
+                send_telegram=send_telegram,
+                send_discord=send_discord,
+                stats=stats,
+                mark_triggered_on_push=False,
+            )
+        else:
+            print("[INTRADAY-ALERTS] PRICE_ALERT_ENABLED=false,跳過 price alerts", flush=True)
 
         conn.commit()
 

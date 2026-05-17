@@ -59,6 +59,7 @@ streamlit run app.py
 |  | 📊 策略歷史 | 4 sub-tabs,含 vectorbt grid search 結果 |
 | **追蹤** | 💼 交易紀錄 | 手動倉位 + 損益 + 勝率 |
 |  | 🛡️ 持倉管理 | **真倉風險管理:ATR 停損停利 + drawdown 警報 + Kelly 部位建議** |
+|  | 🚨 警報設定 | **G 個股價格警報:價位 ≥/≤ / 漲跌幅 % / 除權息,30 分 cron 自動推 Telegram + Discord** |
 |  | 🧪 實測追蹤 | paper trades(自動 entry,30 分 cron 觸發進場/停損/突破 alerts)|
 | **系統** | 📋 系統結論 / ⚙️ 系統 / ⚙️ 設定 | 資料新鮮度 / ML 模型狀態 / token 設定 |
 
@@ -113,6 +114,27 @@ Mobile-first 設計 — 主公 iPhone Safari「加到主畫面」當 App 用,全
 - `PATTERN_DETECTION_ENABLED=false` → K 線形態行 + 個股深度頁 section 都不顯
 - `TRAILING_STOP_ENABLED=false` → 動態停損不自動更新
 - `TAKE_PROFIT_ALERT_ENABLED=false` → 達標警報 section 不發
+
+---
+
+## 🚨 G 個股價格警報
+
+主公拍板「持倉股不能等下次推播才知道急殺,主動設好條件、cron 跑時自動推」(2026-05-17)。
+
+**支援類型**(在「🚨 警報設定」頁設):
+- `price_above` — 當前 ≥ 目標價(突破時推)
+- `price_below` — 當前 ≤ 目標價(跌破時推)
+- `pct_change` — |當前 − 基準| / 基準 ≥ X%(notes 寫 `base=600` 當基準)
+- `ex_dividend` — N 日內除權息(從 `dividend.ex_dividend_date` 算)
+- `intraday_drop` — 持倉股當日跌幅 ≤ -3%(系統自動,無需手動設)
+
+**運作流程**:
+- 每 30 分鐘 `intraday-alerts.yml` cron 跑 `scripts/intraday_alerts.py`
+- engine(`src/price_alerts.py`)對 active alerts 比對最新 daily close
+- 觸發 → 寫 `alert_dedup`(同日去重)+ 推 Telegram + Discord + `mark_triggered`(一次性)
+- daily-notify(22:13)+ morning-brief(08:30)推播都加「🚨 警報快訊」section
+
+**Kill-switch**:`PRICE_ALERT_ENABLED=false` → engine 全部回 []、不推任何 alert
 
 ---
 
@@ -201,6 +223,7 @@ RISK_MGMT_ENABLED=true             # ATR 停損停利 + drawdown 警報
 PATTERN_DETECTION_ENABLED=true     # K 線形態判讀(三紅兵 / 槌子 / 吞噬 / 晨星 / 旗形 / 十字星)
 TRAILING_STOP_ENABLED=true         # 動態停損(only-up)+ daily-notify batch update
 TAKE_PROFIT_ALERT_ENABLED=true     # TP/SL/trailing 達標警報 + 分批了結建議(+5%/+10%)
+PRICE_ALERT_ENABLED=true           # G 個股價格警報 + 持倉急殺 + 除權息提醒
 ```
 
 每個出事可立刻設 `=false` 退化整個 module。

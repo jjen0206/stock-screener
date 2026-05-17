@@ -112,7 +112,7 @@ PAGES = [
     "🔍 個股", "📊 個股深度",
     "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
-    "💼 交易紀錄", "🛡️ 持倉管理", "🧪 實測追蹤", "📊 策略歷史",
+    "💼 交易紀錄", "🛡️ 持倉管理", "🚨 警報設定", "🧪 實測追蹤", "📊 策略歷史",
     "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -1021,6 +1021,8 @@ def main() -> None:
         _page_trades()
     elif page == "🛡️ 持倉管理":
         _page_position_management()
+    elif page == "🚨 警報設定":
+        _page_price_alerts()
     elif page == "🧪 實測追蹤":
         _page_paper_tracking()
     elif page == "📊 策略歷史":
@@ -6639,6 +6641,123 @@ def _bulk_add_paper_trades_callback(
         st.toast(f"📭 全部 {n_skipped} 張都已追蹤過", icon="ℹ️")
     if n_errors > 0:
         st.toast(f"⚠ {n_errors} 張無效資料跳過", icon="⚠️")
+
+
+def _page_price_alerts() -> None:
+    """🚨 警報設定 — 主公手動設定 G 個股價格警報(price_above / price_below /
+    pct_change / ex_dividend)+ 看已觸發歷史。
+
+    跑 intraday_alerts cron(每 30 分鐘)時 src.price_alerts 會比對當前 daily
+    close 跟設定門檻,觸發後寫 alert_dedup + Telegram / Discord + mark_triggered
+    (一次性,要再用須重設)。
+    """
+    from src import price_alerts as _pa
+
+    st.header("🚨 警報設定")
+    st.caption(
+        "設定價位 ≥ / ≤ / 漲跌幅 % / 除權息提醒。"
+        "盤中 cron(每 30 分鐘)自動檢查 + 推 Telegram + Discord。"
+    )
+    db.init_db()
+
+    if not _pa.is_enabled():
+        st.warning(
+            "⚠️ 警報已停用(`PRICE_ALERT_ENABLED=false`),設定還可寫,但不會推播。"
+        )
+
+    # === 新增警報表單 ===
+    with st.expander("✚ 新增警報", expanded=True):
+        with st.form("add_price_alert_form", clear_on_submit=True):
+            cols = st.columns([2, 2, 2])
+            sid_input = cols[0].text_input(
+                "股票代號", placeholder="2330", key="alert_sid",
+            )
+            alert_type_label = cols[1].selectbox(
+                "警報類型",
+                options=[
+                    "價位 ≥ (price_above)",
+                    "價位 ≤ (price_below)",
+                    "漲跌幅 % (pct_change)",
+                    "除權息提醒 (ex_dividend)",
+                ],
+                key="alert_type_label",
+            )
+            target_value = cols[2].number_input(
+                "目標值",
+                value=0.0, step=0.5, format="%.2f",
+                key="alert_target",
+                help=(
+                    "price_above/below 填價位;pct_change 填 % 門檻(例 5.0);"
+                    "ex_dividend 填提醒天數(例 3)。"
+                ),
+            )
+            notes_input = st.text_input(
+                "備註(選填,pct_change 可寫 base=600 當基準價)",
+                key="alert_notes",
+            )
+
+            submitted = st.form_submit_button("✚ 新增警報", type="primary")
+            if submitted:
+                sid_clean = sid_input.strip().upper()
+                if not sid_clean:
+                    st.error("請輸入股票代號")
+                else:
+                    label_to_type = {
+                        "價位 ≥ (price_above)": "price_above",
+                        "價位 ≤ (price_below)": "price_below",
+                        "漲跌幅 % (pct_change)": "pct_change",
+                        "除權息提醒 (ex_dividend)": "ex_dividend",
+                    }
+                    atype = label_to_type[alert_type_label]
+                    try:
+                        aid = db.add_alert(
+                            sid_clean, atype,
+                            target_value=float(target_value),
+                            notes=notes_input.strip() if notes_input.strip() else None,
+                        )
+                        st.success(
+                            f"✅ #{aid} {sid_clean} {atype} target={target_value}"
+                        )
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(f"❌ 輸入錯誤:{e}")
+
+    # === 兩個 tab:active + history ===
+    tab_active, tab_history = st.tabs(["🟢 進行中", "📜 已觸發歷史"])
+
+    with tab_active:
+        active_alerts = db.list_alerts(active_only=True)
+        if not active_alerts:
+            st.info("目前沒有 active 警報。上方新增一筆開始。")
+        else:
+            st.caption(f"共 {len(active_alerts)} 筆 active。")
+            for a in active_alerts:
+                cols = st.columns([1, 2, 2, 2, 3, 1])
+                cols[0].text(f"#{a['id']}")
+                cols[1].text(a["stock_id"])
+                cols[2].text(a["alert_type"])
+                tv = a.get("target_value")
+                cols[3].text(f"{tv:.2f}" if tv is not None else "—")
+                cols[4].text((a.get("notes") or "")[:40])
+                if cols[5].button("🗑", key=f"del_alert_{a['id']}"):
+                    if db.delete_alert(int(a["id"])):
+                        st.toast(f"已刪除 #{a['id']}", icon="🗑")
+                        st.rerun()
+
+    with tab_history:
+        all_alerts = db.list_alerts(active_only=False, limit=200)
+        triggered = [a for a in all_alerts if a.get("triggered_at")]
+        if not triggered:
+            st.info("尚無已觸發紀錄。")
+        else:
+            st.caption(f"共 {len(triggered)} 筆已觸發。")
+            for a in triggered:
+                cols = st.columns([1, 2, 2, 2, 3])
+                cols[0].text(f"#{a['id']}")
+                cols[1].text(a["stock_id"])
+                cols[2].text(a["alert_type"])
+                cols[3].text(a.get("triggered_at") or "—")
+                cols[4].text((a.get("notes") or "")[:40])
 
 
 def _page_paper_tracking() -> None:

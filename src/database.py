@@ -581,6 +581,35 @@ SCHEMA: list[str] = [
     "ON user_positions(stock_id, is_open)",
     "CREATE INDEX IF NOT EXISTS idx_user_positions_open "
     "ON user_positions(is_open, entry_date DESC)",
+    # price_alerts:G 個股價格警報(2026-05-17 加)。主公手動設「2330 跌破 600
+    # 就推播」等條件,intraday_alerts cron 跑時順便檢查 + 推 Telegram / Discord。
+    # alert_type:
+    #   price_above   — current >= target_value 觸發
+    #   price_below   — current <= target_value 觸發
+    #   pct_change    — |current - baseline| / baseline ≥ target_value%
+    #                   (baseline 從 notes 字串裡 base=xxx 抓,沒填就用 created
+    #                   當下的 daily close)
+    #   ex_dividend   — 從 dividend.ex_dividend_date 算 N 日內除權息(target_value
+    #                   是 days_ahead,預設 3)
+    #   intraday_drop — 系統自動建(非主公手動):open position 當日跌幅
+    #                   < -3% 時 enqueue,推播後 mark_triggered
+    # 觸發後 triggered_at 設時間 + is_active=0(一次性),主公要重設要再開一筆。
+    """
+    CREATE TABLE IF NOT EXISTS price_alerts (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_id      TEXT NOT NULL,
+        alert_type    TEXT NOT NULL,
+        target_value  REAL,
+        created_at    TEXT NOT NULL,
+        triggered_at  TEXT,
+        is_active     INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+        notes         TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_price_alerts_sid_active "
+    "ON price_alerts(stock_id, is_active)",
+    "CREATE INDEX IF NOT EXISTS idx_price_alerts_active "
+    "ON price_alerts(is_active, created_at DESC)",
 ]
 
 
@@ -2189,6 +2218,124 @@ def get_position_pnl(
         "stop_loss": rec.get("stop_loss"),
         "take_profit": rec.get("take_profit"),
     }
+
+
+# === price_alerts(G 個股價格警報)===
+
+VALID_ALERT_TYPES = (
+    "price_above", "price_below", "pct_change",
+    "ex_dividend", "intraday_drop",
+)
+
+
+def add_alert(
+    stock_id: str,
+    alert_type: str,
+    target_value: float | None = None,
+    notes: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """新增一筆 price_alerts(主公手動設警報 / 系統自動 enqueue intraday_drop)。
+
+    Args:
+        stock_id: 股號。
+        alert_type: 必須在 VALID_ALERT_TYPES。
+        target_value:
+            price_above / price_below — 目標價(必填)
+            pct_change — 觸發 % 門檻(例 5.0 = 5%);baseline 從 notes
+              "base=xxx" 抓,沒寫就用今天 daily_prices close。
+            ex_dividend — N 日內提醒(預設由 caller 決定;helper 不強制)。
+            intraday_drop — 跌幅閾值(負數,例 -3.0)。
+        notes: 自由文字。pct_change 可寫「base=XXX」當 baseline。
+
+    回新 row id。
+    """
+    if alert_type not in VALID_ALERT_TYPES:
+        raise ValueError(
+            f"alert_type 必須在 {VALID_ALERT_TYPES},got {alert_type!r}"
+        )
+    sid = str(stock_id).strip()
+    if not sid:
+        raise ValueError("stock_id 不可空")
+    init_db(db_path)
+    now = _now_iso()
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO price_alerts (
+                stock_id, alert_type, target_value, created_at,
+                triggered_at, is_active, notes
+            ) VALUES (?, ?, ?, ?, NULL, 1, ?)
+            """,
+            (
+                sid, alert_type,
+                (float(target_value) if target_value is not None else None),
+                now,
+                (notes.strip() if notes else None),
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_alerts(
+    active_only: bool = True,
+    stock_id: str | None = None,
+    db_path: str | Path | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """列警報。active_only=False 一併撈已觸發 / 已停用。
+
+    回 list[dict],按 is_active DESC + created_at DESC 排序(active 在前)。
+    """
+    init_db(db_path)
+    where: list[str] = []
+    args: list = []
+    if active_only:
+        where.append("is_active = 1")
+    if stock_id is not None:
+        where.append("stock_id = ?")
+        args.append(str(stock_id).strip())
+    sql = "SELECT * FROM price_alerts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY is_active DESC, created_at DESC LIMIT ?"
+    args.append(int(limit))
+    with get_conn(db_path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_triggered(
+    alert_id: int,
+    triggered_at: str | None = None,
+    db_path: str | Path | None = None,
+) -> bool:
+    """把 alert 設為已觸發(triggered_at 填值 + is_active=0)。
+
+    回 True 表示有更新。預設用當下時間。
+    """
+    init_db(db_path)
+    ts = triggered_at or _now_iso()
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE price_alerts SET triggered_at=?, is_active=0 "
+            "WHERE id=? AND is_active=1",
+            (ts, int(alert_id)),
+        )
+        return cur.rowcount > 0
+
+
+def delete_alert(
+    alert_id: int,
+    db_path: str | Path | None = None,
+) -> bool:
+    """硬刪除一筆 alert(誤建 / 不想再追蹤)。回 True 表示有刪。"""
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM price_alerts WHERE id=?", (int(alert_id),),
+        )
+        return cur.rowcount > 0
 
 
 # === sync_log helpers(快取核心) ===
