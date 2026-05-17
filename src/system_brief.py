@@ -551,6 +551,52 @@ def _build_recommendations(
 
 # === 對外 API ===
 
+def _build_real_performance(conn: sqlite3.Connection) -> dict[str, Any]:
+    """D 績效分析:主公本週真實平倉 P&L + 表現最佳策略 attribution。
+
+    跟既有 strategy_performance(系統推薦勝率)不同 — 這是「主公真的買賣」勝率。
+    無資料 / kill-switch off 時回 zeros。
+    """
+    # lazy import 避免循環 / cold load 拖累
+    from src import performance_analysis as _pa  # noqa: E402,WPS433
+
+    if not _pa.is_enabled():
+        return {
+            "enabled": False, "n_trades": 0, "total_pnl": 0.0,
+            "win_rate": None, "avg_return_pct": None,
+            "best_strategy_key": None, "best_strategy_label": None,
+            "best_strategy_pnl": None, "best_strategy_count": 0,
+        }
+    week_stats = _pa.compute_user_win_rate(conn, window_days=7)
+    attr = _pa.compute_attribution(conn)
+    best = _pa.best_strategy_by_pnl(attr, min_count=1)
+    best_key: str | None = None
+    best_label: str | None = None
+    best_pnl: float | None = None
+    best_count = 0
+    if best is not None:
+        # lazy import STRATEGY_LABELS(strategies module heavy)
+        try:
+            from src.strategies import STRATEGY_LABELS as _SL
+        except Exception:  # noqa: BLE001
+            _SL = {}
+        best_key, info = best
+        best_label = _SL.get(best_key, best_key)
+        best_pnl = info.get("total_pnl")
+        best_count = int(info.get("count", 0))
+    return {
+        "enabled": True,
+        "n_trades": week_stats.get("n_trades", 0),
+        "total_pnl": week_stats.get("total_pnl") or 0.0,
+        "win_rate": week_stats.get("win_rate"),
+        "avg_return_pct": week_stats.get("avg_return_pct"),
+        "best_strategy_key": best_key,
+        "best_strategy_label": best_label,
+        "best_strategy_pnl": best_pnl,
+        "best_strategy_count": best_count,
+    }
+
+
 def build_system_brief(
     conn: sqlite3.Connection,
     models_dir: Path | None = None,
@@ -565,6 +611,7 @@ def build_system_brief(
     ml_perf = _build_ml_performance(conn, models_dir=models_dir)
     market_state = _build_market_state(conn)
     watchlist = _build_watchlist_today(conn)
+    real_perf = _build_real_performance(conn)
     recommendations = _build_recommendations(
         health, strategy_perf, ml_perf, market_state,
     )
@@ -575,6 +622,7 @@ def build_system_brief(
         "ml_performance": ml_perf,
         "market_state": market_state,
         "watchlist_today": watchlist,
+        "real_performance": real_perf,
         "recommendations": recommendations,
     }
 
@@ -665,6 +713,26 @@ def format_brief_for_telegram(brief: dict[str, Any]) -> str:
             lines.append(
                 f"{i}. [{item.get('sid', '?')}] {item.get('name', '—')} — "
                 f"{item.get('reason', '')}"
+            )
+        lines.append("")
+
+    # === 本週真實績效（D 績效分析）===
+    rp = brief.get("real_performance") or {}
+    if rp.get("enabled") and rp.get("n_trades", 0) > 0:
+        lines.append("📈 *本週真實績效*")
+        pnl_str = f"{rp.get('total_pnl', 0):+,.0f} NTD"
+        wr = rp.get("win_rate")
+        wr_str = f"{int(wr * 100)}%" if wr is not None else "—"
+        lines.append(
+            f"主公本週 {rp.get('n_trades', 0)} 筆平倉 · "
+            f"P&L {pnl_str} · WR {wr_str}"
+        )
+        if rp.get("best_strategy_label"):
+            best_pnl = rp.get("best_strategy_pnl") or 0.0
+            lines.append(
+                f"表現最佳策略:{rp['best_strategy_label']} · "
+                f"+{best_pnl:,.0f} NTD · "
+                f"N={rp.get('best_strategy_count', 0)}"
             )
         lines.append("")
 

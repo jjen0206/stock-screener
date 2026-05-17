@@ -154,3 +154,4 @@
 - 2026-04-27 修 backtest 兩個 bug:夏普 √(252/hold_days) 年化、累積報酬曲線改 date 軸 + 加直方圖;summary 加年化報酬/波動率欄位
 - 2026-04-27 修 KeyError(雲端 module cache 落後場景):UI 全改 .get() 防呆
 - 2026-04-27 G1 Telegram 推播完成:notifier 模組 + CLI 腳本 + sidebar 按鈕 + 設定頁教學 + README GitHub Actions 範本;115 passed
+- 2026-05-17 D 績效分析完成:src/performance_analysis.py(pnl/win_rate/attribution/drawdown/summary) + src/strategy_backtest.py(union/intersect 回測 + Jaccard 相關性);「📈 績效分析」4-tab 分頁;system_brief 加 real_performance + Telegram 週報「📈 本週真實績效」section;47 個新測試;2030 passed;kill-switch `PERFORMANCE_ENABLED=true`

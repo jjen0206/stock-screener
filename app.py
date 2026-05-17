@@ -113,6 +113,7 @@ PAGES = [
     "⭐ 關注", "🌡️ 市場熱度", "👥 大戶入場", "📊 強者跟蹤",
     "📊 大盤",
     "💼 交易紀錄", "🛡️ 持倉管理", "🚨 警報設定", "🧪 實測追蹤", "📊 策略歷史",
+    "📈 績效分析",
     "📋 系統結論", "⚙️ 系統", "⚙️ 設定",
 ]
 
@@ -1027,6 +1028,8 @@ def main() -> None:
         _page_paper_tracking()
     elif page == "📊 策略歷史":
         _page_strategy_history()
+    elif page == "📈 績效分析":
+        _page_performance()
     elif page == "📋 系統結論":
         _page_system_brief()
     elif page == "⚙️ 系統":
@@ -7442,6 +7445,321 @@ def _render_reliability_diagram(strategy: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         st.warning(f"Reliability diagram 渲染失敗:{type(e).__name__}: {e}")
+
+
+def _page_performance() -> None:
+    """📈 績效分析 — 主公真實平倉損益 + 策略歸因 + 組合回測 + 相關性。
+
+    四個 tab:
+      1. 真實交易:user_positions 已平倉 P&L 表 + equity curve + drawdown + metrics
+      2. 策略 attribution:把每筆平倉歸因到當時 daily_picks 命中的策略
+      3. 策略組合回測:對選定策略(交集/聯集)從 daily_picks 撈歷史 + holding_days
+      4. 策略相關性:Jaccard heatmap
+
+    Kill-switch:PERFORMANCE_ENABLED=false 時 page 顯 warning 但仍 render
+    結構讓 test 過(empty data),不擋畫面。
+    """
+    from src import performance_analysis as _pa
+    from src import strategy_backtest as _sb
+    from src.strategies import STRATEGY_LABELS
+
+    st.header("📈 績效分析")
+    st.caption(
+        "看主公真實買賣的損益、勝率、Sharpe、drawdown,並把每筆平倉歸因到"
+        "當時觸發的策略。**全部讀 SQLite,不打 API。**"
+    )
+
+    if not _pa.is_enabled():
+        st.warning(
+            "⚠️ 績效分析已停用(`PERFORMANCE_ENABLED=false`),"
+            "下方顯示空白(kill-switch)。"
+        )
+
+    db.init_db()
+
+    tabs = st.tabs([
+        "💰 真實交易", "🎯 策略 attribution",
+        "🔬 策略組合回測", "🧭 策略相關性",
+    ])
+
+    # === Tab 1: 真實交易 ===
+    with tabs[0]:
+        with db.get_conn() as conn:
+            pnl_df = _pa.compute_user_pnl(conn)
+            summary = _pa.compute_summary_metrics(conn)
+            dd_df = _pa.compute_drawdown_curve(conn)
+
+        if pnl_df.empty:
+            st.info(
+                "尚無已平倉交易,先到🛡️ 持倉管理新增/平倉。"
+                "(系統結算後此頁會自動顯示損益曲線)"
+            )
+        else:
+            cols = st.columns(4)
+            total_pnl = summary.get("total_pnl") or 0.0
+            cols[0].metric(
+                "總損益(NTD)",
+                f"{total_pnl:+,.0f}",
+                help=f"共 {summary.get('n_trades', 0)} 筆已平倉",
+            )
+            wr = summary.get("win_rate")
+            cols[1].metric(
+                "勝率",
+                f"{wr * 100:.1f}%" if wr is not None else "—",
+            )
+            sh = summary.get("sharpe")
+            cols[2].metric(
+                "Sharpe",
+                f"{sh:.2f}" if sh is not None else "—",
+                help="年化(× √252),P&L 序列",
+            )
+            max_dd = summary.get("max_drawdown") or 0.0
+            cols[3].metric(
+                "Max Drawdown(NTD)",
+                f"{max_dd:+,.0f}",
+                help=(
+                    f"百分比 {summary.get('max_drawdown_pct'):.2f}%"
+                    if summary.get("max_drawdown_pct") is not None else "—"
+                ),
+            )
+
+            # equity curve
+            if not dd_df.empty:
+                st.markdown("#### 📈 累積損益(equity curve)")
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=dd_df["date"], y=dd_df["equity"],
+                    mode="lines+markers",
+                    name="Equity (NTD)",
+                    line=dict(color="#1f77b4", width=2),
+                ))
+                fig.update_layout(
+                    height=320,
+                    margin=dict(l=40, r=20, t=20, b=40),
+                    xaxis_title="日期", yaxis_title="累積 P&L (NTD)",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### 📉 Drawdown")
+                fig_dd = go.Figure()
+                fig_dd.add_trace(go.Scatter(
+                    x=dd_df["date"], y=dd_df["drawdown_pct"],
+                    mode="lines",
+                    fill="tozeroy",
+                    name="Drawdown %",
+                    line=dict(color="#d62728", width=2),
+                ))
+                fig_dd.update_layout(
+                    height=240,
+                    margin=dict(l=40, r=20, t=20, b=40),
+                    xaxis_title="日期", yaxis_title="Drawdown %",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_dd, use_container_width=True)
+
+            st.markdown("#### 📋 每筆平倉")
+            disp = pnl_df[[
+                "exit_date", "sid", "entry_date", "entry_price",
+                "exit_price", "shares", "pnl", "pnl_pct", "holding_days",
+            ]].rename(columns={
+                "exit_date": "出場日", "sid": "代號",
+                "entry_date": "進場日", "entry_price": "進場價",
+                "exit_price": "出場價", "shares": "股數",
+                "pnl": "P&L(NTD)", "pnl_pct": "P&L %",
+                "holding_days": "持有天數",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    # === Tab 2: 策略 attribution ===
+    with tabs[1]:
+        with db.get_conn() as conn:
+            attr = _pa.compute_attribution(conn)
+
+        if not attr:
+            st.info(
+                "尚無歸因資料(需要已平倉部位 + 對應 daily_picks)。"
+                "先到🛡️ 持倉管理新增/平倉,或等 nightly daily_picks 累積。"
+            )
+        else:
+            df_attr = pd.DataFrame([
+                {
+                    "策略": STRATEGY_LABELS.get(k, k),
+                    "key": k,
+                    "總 P&L (NTD)": v.get("total_pnl") or 0.0,
+                    "筆數": v.get("count", 0),
+                    "勝率": (
+                        f"{v['win_rate'] * 100:.1f}%"
+                        if v.get("win_rate") is not None else "—"
+                    ),
+                    "平均報酬 %": (
+                        round(v["avg_return_pct"], 2)
+                        if v.get("avg_return_pct") is not None else None
+                    ),
+                    "平均 P&L (NTD)": v.get("avg_pnl") or 0.0,
+                }
+                for k, v in attr.items()
+            ])
+            df_attr = df_attr.sort_values("總 P&L (NTD)", ascending=False)
+
+            st.markdown("#### 🎯 各策略貢獻 P&L")
+            chart_df = df_attr[df_attr["key"] != "_unknown"].copy()
+            if not chart_df.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=chart_df["策略"], y=chart_df["總 P&L (NTD)"],
+                    marker_color=[
+                        "#2ca02c" if v >= 0 else "#d62728"
+                        for v in chart_df["總 P&L (NTD)"]
+                    ],
+                ))
+                fig.update_layout(
+                    height=360,
+                    margin=dict(l=40, r=20, t=20, b=80),
+                    yaxis_title="總 P&L (NTD)",
+                    xaxis_tickangle=-30,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.dataframe(
+                df_attr.drop(columns=["key"]),
+                use_container_width=True, hide_index=True,
+            )
+
+            # 軍師判讀
+            best = _pa.best_strategy_by_pnl(attr, min_count=1)
+            if best:
+                k, v = best
+                label = STRATEGY_LABELS.get(k, k)
+                wr_str = (
+                    f"{v['win_rate'] * 100:.0f}%"
+                    if v.get("win_rate") is not None else "—"
+                )
+                st.success(
+                    f"🎖️ 軍師判讀:主公真實表現最好的策略是 **{label}**"
+                    f"(累計 +{v['total_pnl']:,.0f} NTD,勝率 {wr_str},"
+                    f"共 {v['count']} 筆),建議多看 {label} 類推薦。"
+                )
+
+    # === Tab 3: 策略組合回測 ===
+    with tabs[2]:
+        st.caption(
+            "從 daily_picks 撈歷史命中,模擬「N 個策略**交集/聯集**」"
+            "推薦後持有 holding_days 個交易日的實際報酬。"
+        )
+
+        all_keys = list(STRATEGY_LABELS.keys())
+        label_map = {STRATEGY_LABELS[k]: k for k in all_keys}
+        chosen_labels = st.multiselect(
+            "策略(可複選)",
+            options=list(label_map.keys()),
+            default=[STRATEGY_LABELS["ma_alignment"]],
+            key="perf_backtest_strategies",
+        )
+        cols_bt = st.columns([1.5, 1.5, 1.5])
+        mode_label = cols_bt[0].radio(
+            "組合模式",
+            options=["聯集(任一命中)", "交集(全部命中)"],
+            horizontal=True,
+            key="perf_backtest_mode",
+        )
+        mode = "union" if "聯集" in mode_label else "intersect"
+        holding_days = cols_bt[1].slider(
+            "持有交易日(holding_days)",
+            min_value=1, max_value=30, value=5, step=1,
+            key="perf_backtest_hold",
+        )
+        date_from = cols_bt[2].date_input(
+            "開始日",
+            value=date.today() - timedelta(days=180),
+            key="perf_backtest_from",
+        )
+        date_to = st.date_input(
+            "結束日",
+            value=date.today(),
+            key="perf_backtest_to",
+        )
+
+        if st.button("▶️ 執行回測", type="primary", key="perf_backtest_run"):
+            chosen = [label_map[lbl] for lbl in chosen_labels]
+            if not chosen:
+                st.error("請至少選一個策略")
+            else:
+                with db.get_conn() as conn:
+                    result = _sb.backtest_combination(
+                        conn,
+                        strategies=chosen,
+                        start_date=date_from.isoformat(),
+                        end_date=date_to.isoformat(),
+                        holding_days=int(holding_days),
+                        mode=mode,
+                    )
+                cols_m = st.columns(5)
+                cols_m[0].metric("樣本數", result.get("n_trades", 0))
+                wr = result.get("win_rate")
+                cols_m[1].metric(
+                    "勝率",
+                    f"{wr * 100:.1f}%" if wr is not None else "—",
+                )
+                avg = result.get("avg_return_pct")
+                cols_m[2].metric(
+                    "平均報酬",
+                    f"{avg:+.2f}%" if avg is not None else "—",
+                )
+                tot = result.get("total_return_pct") or 0.0
+                cols_m[3].metric("累積報酬", f"{tot:+.2f}%")
+                sh = result.get("sharpe")
+                cols_m[4].metric("Sharpe", f"{sh:.2f}" if sh is not None else "—")
+
+                trades = result.get("trades") or []
+                if trades:
+                    tr_df = pd.DataFrame(trades)
+                    tr_df["matched"] = tr_df["matched"].apply(
+                        lambda lst: "/".join(
+                            STRATEGY_LABELS.get(s, s) for s in (lst or [])
+                        )
+                    )
+                    st.dataframe(
+                        tr_df, use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.info("此區間 / 模式下沒有命中。")
+
+    # === Tab 4: 策略相關性 ===
+    with tabs[3]:
+        st.caption(
+            "Jaccard 相關性 = |A ∩ B| / |A ∪ B|(同 (date, sid) 命中集合)。"
+            "高 = 兩策略常同時推同股,低 = 互補。預設過去 180 日。"
+        )
+        corr_days = st.slider(
+            "區間天數", min_value=30, max_value=365, value=180, step=30,
+            key="perf_corr_days",
+        )
+        with db.get_conn() as conn:
+            corr_df = _sb.compute_strategy_correlation(conn, days=int(corr_days))
+
+        if corr_df.empty:
+            st.info("daily_picks 表內無資料,無法算相關性。")
+        else:
+            # 用 STRATEGY_LABELS 把 key 換中文標籤
+            renamed = corr_df.rename(
+                index=lambda k: STRATEGY_LABELS.get(k, k),
+                columns=lambda k: STRATEGY_LABELS.get(k, k),
+            )
+            fig = go.Figure(data=go.Heatmap(
+                z=renamed.values,
+                x=list(renamed.columns),
+                y=list(renamed.index),
+                colorscale="Viridis",
+                zmin=0, zmax=1,
+                colorbar=dict(title="Jaccard"),
+            ))
+            fig.update_layout(
+                height=max(360, 30 * len(renamed)),
+                margin=dict(l=120, r=20, t=20, b=120),
+                xaxis_tickangle=-45,
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 
 def _page_system_brief() -> None:
