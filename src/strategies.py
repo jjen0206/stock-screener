@@ -1050,13 +1050,6 @@ def _evaluate_gap_up(
 
 # === Phase 1 新加策略 12:eps_acceleration(季 EPS 加速) ===
 
-def _quarter_sort_key(period: str) -> tuple:
-    """quarterly period 排序 key。FinMind period 多為 "YYYY-MM-DD"(季末日)
-    或 "YYYY-Q[1-4]";直接字串比較剛好遞增。回 tuple 讓 sorted() 用。
-    """
-    return (period,)
-
-
 def screen_eps_acceleration(
     date: str,
     params: dict | None = None,

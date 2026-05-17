@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import sys
 import urllib3
 import requests
 from datetime import date, timedelta

@@ -14,21 +14,9 @@ from __future__ import annotations
 import inspect
 from datetime import date as _d, timedelta as _td
 
-import pytest
+from src import database as db, notifier, regime_gating as rg
 
-from src import config, database as db, notifier, regime_gating as rg
-
-
-# === Fixtures ===
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "notifier_gating.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 def _seed_taiex(closes: list[float]) -> str:

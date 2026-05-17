@@ -89,10 +89,7 @@ def get_intraday_quote(
     return out
 
 
-def format_intraday_line(
-    quote: dict | None,
-    fallback_close: float | None = None,
-) -> str:
+def format_intraday_line(quote: dict | None) -> str:
     """組單行盤中行字串給 UI 顯。quote=None / 非交易時段 → 回空字串。
 
     格式:`📡 9.15 (↑14.7%)`(漲)/ `📡 9.15 (↓1.5%)`(跌)/ `📡 9.15 (→0.0%)`(平)。

@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 import re
-import sys
 import urllib3
 import requests
 

@@ -12,25 +12,14 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
-
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts import data_health_alert  # noqa: E402
-from src import config, database as db  # noqa: E402
+from src import database as db  # noqa: E402
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """production schema init_db()。"""
-    db_file = tmp_path / "health.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()
+# tmp_db fixture 共用 tests/conftest.py
 
 
 def _patch_pushers(monkeypatch, tg_calls: list, dc_calls: list):

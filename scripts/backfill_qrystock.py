@@ -337,9 +337,8 @@ def run_backfill(
         for sid in sids:
             if (sid, week_end) in existing:
                 skipped += 1
-                # 已存在的 row 也要把 count 灌到 prev,讓下一週 delta 算得對
-                latest = db.get_latest_shareholder_concentration(sid, db_path=db_path)
-                # 但 latest 可能不是這週;以 week_end exact match 比較準
+                # 已存在的 row 也要把 count 灌到 prev,讓下一週 delta 算得對。
+                # 以 week_end exact match 比較準(不能直接吃 latest)。
                 with db.get_conn(db_path) as conn:
                     r = conn.execute(
                         "SELECT holders_1000up_count FROM shareholder_concentration "

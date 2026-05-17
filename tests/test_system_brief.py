@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-import pytest
-
-from src import config, database as db
+from src import database as db
 from src.system_brief import (
     _build_health,
     _build_strategy_performance,
@@ -24,16 +22,7 @@ from src.system_brief import (
     format_brief_for_telegram,
 )
 
-
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """乾淨 tmp SQLite + production schema(init_db),不 mock streamlit。"""
-    db_file = tmp_path / "brief.db"
-    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
-    db._reset_path_cache()  # type: ignore[attr-defined]
-    db.init_db()
-    yield db_file
-    db._reset_path_cache()  # type: ignore[attr-defined]
+# tmp_db fixture 共用 tests/conftest.py
 
 
 def _today() -> str:

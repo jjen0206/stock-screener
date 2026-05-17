@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -573,7 +574,7 @@ def build_training_dataset(
     return X, y
 
 
-def train_short_pick_model(X: pd.DataFrame, y: pd.Series):
+def train_short_pick_model(X: pd.DataFrame, y: pd.Series) -> tuple[Any, dict]:
     """訓練 RandomForestClassifier(n_estimators=100, max_depth=5)。
 
     回 (model, metrics_dict)。metrics 含 accuracy / precision / recall / f1
@@ -819,7 +820,7 @@ def load_model_meta(model_path: str | Path) -> dict | None:
         return None
 
 
-def load_model(path: str | Path):
+def load_model(path: str | Path) -> Any | None:
     """joblib load。檔不存在或 load 失敗 → 回 None。
 
     print 診斷 log 排查雲端找不到 / sklearn 版本不相容的根因(streamlit cloud
@@ -849,7 +850,7 @@ def per_strategy_model_path(strategy_name: str) -> Path:
     return Path(config.PROJECT_ROOT) / "models" / "per_strategy" / f"{strategy_name}.pkl"
 
 
-def load_strategy_model(strategy_name: str):
+def load_strategy_model(strategy_name: str) -> Any | None:
     """載入 models/per_strategy/<strategy>.pkl;檔不存在 / load 失敗 → 回 None。
 
     Stage 2B inference 路由用 — caller(predict_for_strategy)拿到 None 自動
@@ -862,7 +863,7 @@ def load_strategy_model(strategy_name: str):
     return load_model(per_strategy_model_path(strategy_name))
 
 
-def load_strategy_calibrator(strategy_name: str):
+def load_strategy_calibrator(strategy_name: str) -> Any | None:
     """載入 models/calibrators/<strategy>.pkl;檔不存在 → 回 None。
 
     Calibration kill-switch / fallback graceful:caller 直接拿 None 傳給
@@ -872,7 +873,7 @@ def load_strategy_calibrator(strategy_name: str):
     return ml_calibration.load_calibrator(strategy_name)
 
 
-def load_short_pick_calibrator():
+def load_short_pick_calibrator() -> Any | None:
     """載入 models/calibrators/short_pick.pkl;不存在 → None。"""
     from src import ml_calibration
     return ml_calibration.load_calibrator("short_pick")

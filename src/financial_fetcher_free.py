@@ -191,16 +191,6 @@ def _twse_date_to_iso(d: str) -> str:
     return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
 
-def _quarter_to_period(year_roc: Any, quarter: Any) -> str:
-    """民國年 + 季 → 'YYYY-QN'(西元)。例 (114, 4) → '2025-Q4'。"""
-    try:
-        y = int(year_roc) + 1911
-        q = int(quarter)
-        return f"{y}-Q{q}"
-    except (ValueError, TypeError):
-        return ""
-
-
 def _fetch_all_metrics(force_refresh: bool = False) -> dict[str, dict]:
     """拉全市場 BWIBBU_d 並轉成 {stock_id: raw_dict}。5 分鐘 cache。"""
     global _metrics_cache, _metrics_cache_time

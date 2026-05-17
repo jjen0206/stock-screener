@@ -51,7 +51,7 @@ import argparse
 import logging
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 

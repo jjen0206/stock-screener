@@ -22,7 +22,6 @@ Output:
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -32,7 +31,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
 
 from src import database as db, ml_predictor  # noqa: E402
 from src.universe import TW_TOP_50  # noqa: E402
