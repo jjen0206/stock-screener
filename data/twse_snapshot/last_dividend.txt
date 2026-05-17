@@ -1,10 +1,10 @@
 backfilled_at=2026-05-17T15:31:42+00:00
 git_sha=82536191f634d3f46ea78f15283f977cde8afaa4
 run_id=25994594656
-shard=1
-total_shards=8
+shards_completed=8/8
 years=5
-todo=258
-ok=258
+todo=2060
+ok=2060
 fail=0
-elapsed_min=2.4
+success_rate_pct=100.0
+elapsed_min_max=2.4
