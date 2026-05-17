@@ -1463,6 +1463,50 @@ def _format_drawdown_alert(channel: str = "telegram") -> str:
     return f"{header}\n{body}\n   {detail}"
 
 
+def _format_price_alerts_section(channel: str = "telegram") -> str:
+    """組 G 個股價格警報 section(從 price_alerts + 持倉急殺撈)。
+
+    PRICE_ALERT_ENABLED=false / 無觸發 → 回空字串。triggered count > 0 才顯。
+    跟 morning_brief 用同一支 src.price_alerts.check_*,確保兩處推播一致。
+    """
+    try:
+        from src import price_alerts as _pa
+    except Exception:  # noqa: BLE001
+        return ""
+    if not _pa.is_enabled():
+        return ""
+    try:
+        with db.get_conn() as conn:
+            triggered = _pa.check_price_alerts(conn)
+            drops = _pa.check_intraday_drop(conn)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] price_alerts check 失敗")
+        return ""
+    if not triggered and not drops:
+        return ""
+
+    b = _bold
+    lines: list[str] = [f"🚨 {b('警報快訊', channel)}"]
+    for t in triggered[:5]:
+        sid = str(t.get("stock_id", ""))
+        name = str(t.get("name") or "")
+        atype = str(t.get("alert_type", ""))
+        cur = t.get("current_price")
+        tv = t.get("target_value")
+        cur_s = f"${cur:.2f}" if cur is not None else "—"
+        tv_s = f"${tv:.2f}" if tv is not None else "—"
+        lines.append(
+            f"• {sid} {name} — {atype} 觸發(現價 {cur_s} / 門檻 {tv_s})"
+        )
+    for d in drops[:3]:
+        sid = str(d.get("stock_id", ""))
+        name = str(d.get("name") or "")
+        change = d.get("change_pct")
+        change_s = f"{change:+.2f}%" if change is not None else "—"
+        lines.append(f"• {sid} {name} — 持倉急殺 {change_s}")
+    return "\n".join(lines)
+
+
 def _regime_gating_caption(picks: list[dict]) -> str:
     """從 picks[0]["regime_gating"] 取 caption(注入訊息開頭)。
 
@@ -1596,6 +1640,14 @@ def format_top_picks_message(
             parts.append(dd_alert)
     except Exception:  # noqa: BLE001
         logger.exception("[NOTIFIER] drawdown alert 失敗,略過該 section")
+
+    # G 個股價格警報快訊(2026-05-17 加)— PRICE_ALERT_ENABLED + 有觸發才顯。
+    try:
+        pa_section = _format_price_alerts_section(channel=channel)
+        if pa_section:
+            parts.append(pa_section)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] price alerts 失敗,略過該 section")
 
     for block in (
         recap_block, theme_block, short_picks_block, premium_block, movers_block,

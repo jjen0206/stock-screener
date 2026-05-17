@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-05-17 — 🚨 G 個股價格警報系統
+
+### Added
+- **`price_alerts` table**(`src/database.py`):主公手動設「2330 跌破 600 推播」等條件的警報 ledger。schema:`id / stock_id / alert_type / target_value / created_at / triggered_at / is_active / notes`,加 `idx_price_alerts_sid_active` + `idx_price_alerts_active` 兩個 index。`alert_type` 限定 `price_above` / `price_below` / `pct_change` / `ex_dividend` / `intraday_drop`。CRUD helpers:`add_alert / list_alerts / mark_triggered / delete_alert`
+- **`src/price_alerts.py`** — 警報引擎:
+  - `check_price_alerts(conn)` — 對 active alerts 算當前 daily close 是否觸發
+  - `check_intraday_drop(conn, threshold_pct=-3.0)` — open user_positions 當日跌幅超 -3% → 急殺警報
+  - `check_ex_dividend_alerts(conn, days_ahead=3)` — 持倉 + watchlist N 日內除權息提醒(從 `dividend.ex_dividend_date` 算)
+  - `format_alert_message(...)` — 主公規格訊息(🚨 警報觸發 / 當前 / 達到設定價位 / 建議行動)
+  - Kill-switch `PRICE_ALERT_ENABLED=true`(預設 on)
+- **`scripts/intraday_alerts.py` 升級**:30 分鐘 cron 跑完 paper_trades 三條件後,順手 `check_price_alerts` + `check_intraday_drop`。打 `alert_dedup` 同日去重 + Telegram + Discord 推播 + 觸發後 `mark_triggered`(一次性 alert)
+- **App 新頁「🚨 警報設定」**(`app.py::_page_price_alerts`):股票代號 + 警報類型(下拉)+ 目標值 + 備註 → 新增。兩個 tab:「🟢 進行中」(可刪)/「📜 已觸發歷史」。緊跟「🛡️ 持倉管理」之後
+- **`src/notifier.py::_format_price_alerts_section`** + **`scripts/morning_brief.py::_build_price_alert_lines`** — 晚上 daily_notify 跟早上 morning_brief 推播都加「🚨 警報快訊」section(有觸發才顯)
+- **4 個新 test 檔**(共 46 test cases):
+  - `test_price_alerts.py` — CRUD + check_price_alerts 各類型 + kill-switch + 訊息格式 共 21 test
+  - `test_intraday_drop.py` — 急殺 threshold / 多檔 / 已平倉 / kill-switch 共 7 test
+  - `test_page_price_alerts.py` — page 註冊 / dispatch / wire 結構守住 共 8 test
+  - `test_notifier_alert_wire.py` — wire daily-notify + morning_brief + intraday_alerts + mark_triggered 共 10 test
+
+### Notes
+- `pct_change` 警報需在 notes 寫 `base=600` 當基準價,沒寫的話 engine 視為無法評估(避免誤觸)
+- `ex_dividend` 資料源是 FinMind 年度配息表,當年最新 ex 日可能還沒到 — TODO 接 TWSE 即時除權息日程更準
+- 觸發後 alert `is_active=0`(一次性),要再警報需重設一筆
+
+---
+
 ## 2026-05-17 — Company profiles LLM 預生 backfill(GH Actions 分批跑 + release dump)
 
 ### Added

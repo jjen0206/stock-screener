@@ -537,6 +537,64 @@ def _build_drawdown_alert_lines(channel: str) -> list[str]:
     return [header, body, ""]
 
 
+def _build_price_alert_lines(channel: str) -> list[str]:
+    """組「警報快訊」section — 顯示已觸發 / 即將觸發的 G 個股價格警報。
+
+    PRICE_ALERT_ENABLED=false 或無觸發 → 回 []。同時撈 active price_alerts 對
+    最新 daily close 算的觸發,以及持倉急殺(intraday_drop)。
+    morning_brief 是「盤前快訊」,主要顯示昨日 close 觸發的 alert(隔日提醒)。
+    """
+    try:
+        from src import price_alerts as _pa
+    except Exception:  # noqa: BLE001
+        return []
+    if not _pa.is_enabled():
+        return []
+    try:
+        with db.get_conn() as conn:
+            triggered = _pa.check_price_alerts(conn)
+            drops = _pa.check_intraday_drop(conn)
+    except Exception:  # noqa: BLE001
+        return []
+    if not triggered and not drops:
+        return []
+
+    if channel == "telegram":
+        header = "🚨 <b>警報快訊</b>"
+    else:
+        header = "🚨 **警報快訊**"
+    lines: list[str] = [header]
+    for t in triggered[:5]:
+        sid = str(t.get("stock_id", ""))
+        name = str(t.get("name") or "")
+        atype = str(t.get("alert_type", ""))
+        cur = t.get("current_price")
+        tv = t.get("target_value")
+        cur_s = f"${cur:.2f}" if cur is not None else "—"
+        tv_s = f"${tv:.2f}" if tv is not None else "—"
+        if channel == "telegram":
+            lines.append(
+                f"• {_h(sid)} {_h(name)} — {_h(atype)} 觸發(現價 {_h(cur_s)} / 門檻 {_h(tv_s)})"
+            )
+        else:
+            lines.append(
+                f"• {sid} {name} — {atype} 觸發(現價 {cur_s} / 門檻 {tv_s})"
+            )
+    for d in drops[:3]:
+        sid = str(d.get("stock_id", ""))
+        name = str(d.get("name") or "")
+        change = d.get("change_pct")
+        change_s = f"{change:+.2f}%" if change is not None else "—"
+        if channel == "telegram":
+            lines.append(
+                f"• {_h(sid)} {_h(name)} — 持倉急殺 {_h(change_s)}"
+            )
+        else:
+            lines.append(f"• {sid} {name} — 持倉急殺 {change_s}")
+    lines.append("")
+    return lines
+
+
 def _format_no_change(today_iso: str, channel: str) -> str:
     """極簡訊:三項全無變動。"""
     if channel == "telegram":
@@ -563,6 +621,9 @@ def _format_full_telegram(
 
     # 持倉 drawdown 警報(2026-05-17 加)— RISK_MGMT_ENABLED + 有持倉 + severity != ok
     lines.extend(_build_drawdown_alert_lines("telegram"))
+
+    # G 個股價格警報快訊(2026-05-17 加)— PRICE_ALERT_ENABLED + 有觸發
+    lines.extend(_build_price_alert_lines("telegram"))
 
     # 警示更新
     if newly_warned:
@@ -653,6 +714,7 @@ def _format_full_discord(
     lines: list[str] = [f"🌅 **盤前快訊 {today_iso}**", ""]
 
     lines.extend(_build_drawdown_alert_lines("discord"))
+    lines.extend(_build_price_alert_lines("discord"))
 
     if newly_warned:
         lines.append("⚠️ **警示更新 (vs 昨晚)**")
