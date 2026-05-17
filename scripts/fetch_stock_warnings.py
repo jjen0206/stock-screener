@@ -1,10 +1,18 @@
 """TWSE / TPEx 警示股紀錄抓取 CLI(2026-05-15 主公拍板加入,違約交割教訓)。
 
 抓取的警示分類(寫入 stock_warnings.warning_type):
-  - default_settlement (違約交割) — **MOPS 公開資訊觀測站重大訊息 RSS** 過濾「違約」
-                                     關鍵字(2026-05-16 加入)。涵蓋全市場(TWSE+TPEx
-                                     +興櫃+公開發行)。違約事件年數筆,日常多 0 rows
-                                     屬正常,不觸發 baseline raise。
+  - default_settlement (違約交割) — **TPEx 違約公告專區「個股違約資訊」**(主來源,
+                                     2026-05-17 加入,3105 4/27-4/28 違約教訓 root
+                                     cause)+ MOPS 重大訊息 RSS(輔助來源,實測
+                                     滾動視窗只 8 筆 / 24h,僅作備援不可單獨依賴)。
+                                     TPEx breach endpoint 第 2 表「個股達違約資訊
+                                     揭露標準」涵蓋全市場(上市+上櫃+興櫃,實測
+                                     3105 穩懋雖為上市股仍可從此抓到),門檻為
+                                     同一標的當日違約金額達 1000 萬元。
+                                     另存「每日全市場違約金額彙總」進
+                                     default_settlement_daily 表(TWSE BFIGTU +
+                                     TPEx breach 第 1 表),即使個股未達 1000 萬
+                                     揭露門檻仍可警示市場異常日。
   - attention         (注意股)   — TWSE /announcement/notice + /announcement/notetrans
                                   + TPEx tpex_trading_warning_information
   - disposition       (處置股)   — TWSE /announcement/punish
@@ -15,7 +23,8 @@
   - method_changed    (變更交易方法) — TWSE /exchangeReport/TWT85U
                                   + TPEx tpex_cmode 之 AlteredTrading=Ｙ
 
-主要資料來源(2026-05-16 從 bs4 HTML 改成 OpenAPI JSON,silent 0 rows 修復):
+主要資料來源(2026-05-16 從 bs4 HTML 改成 OpenAPI JSON,silent 0 rows 修復;
+              2026-05-17 加 TWSE BFIGTU + TPEx breach,違約交割 root cause):
   TWSE (上市):
     - 處置股   https://openapi.twse.com.tw/v1/announcement/punish
     - 注意股   https://openapi.twse.com.tw/v1/announcement/notice
@@ -24,13 +33,33 @@
     - 變更交易 https://openapi.twse.com.tw/v1/exchangeReport/TWT85U
                 (僅含 Code/Name/PeriodicCallAuctionTrading,無 Date/Reason/迄日;
                  全標 method_changed)
-  違約交割(全市場):
-    - MOPS 重大訊息 RSS
+    - 違約交割 https://www.twse.com.tw/announcement/BFIGTU?response=json&startDate=&endDate=
+                **每日全市場彙總金額** — 上市市場無個股細目(TWSE 不公開);
+                寫進 default_settlement_daily (market='TWSE'),供 UI alert 市場
+                異常日。個股細目要從 TPEx breach 抓(下方說明)。
+  違約交割(全市場 — 個股細目):
+    - TPEx breach https://www.tpex.org.tw/www/zh-tw/bulletin/breach?response=json&...
+                  **主來源**。回兩個 table:
+                  table[0] 「證券商申報投資人違約金額」每日上櫃/興櫃彙總 →
+                           寫 default_settlement_daily (market='TPEX_LISTED'/
+                           'TPEX_EMERGING')
+                  table[1] 「個股達違約資訊揭露標準(註1)之證券資訊」 →
+                           寫 stock_warnings.default_settlement。揭露門檻:
+                           同一標的當日違約金額 >= 1000 萬元。涵蓋全市場
+                           (上市+上櫃+興櫃,3105 穩懋為上市股仍在此 endpoint)
+                  日期參數:startDate=YYYY/MM/DD&endDate=YYYY/MM/DD(斜線分隔)
+    - MOPS 重大訊息 RSS(輔助來源,降權使用)
       https://mopsov.twse.com.tw/nas/rss/mopsrss201001.xml
-      編碼 cp950,滾動最近 100 筆重大訊息;parser 過濾標題/內文含「違約」
-      關鍵字 → warning_type='default_settlement'。涵蓋 TWSE+TPEx+興櫃+公開發行
-      全市場。違約事件年數筆,日常多 0 rows,不在 baseline 偵測內。
+      編碼 cp950,**實測滾動只 8 筆 / 24h 視窗**(原 spec「100 筆」與實測不符),
+      parser 過濾標題/內文含「違約」關鍵字 → warning_type='default_settlement'。
+      因視窗太短,僅作 TPEx 主來源備援(若 TPEx endpoint 壞掉時仍能抓到部分
+      公司主動 MOPS 公告的違約案)。違約事件年數筆,0 rows 屬正常,不在 baseline
+      偵測內。
   TPEx (上櫃):
+    - 注意股   https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information
+    - 處置股   https://www.tpex.org.tw/openapi/v1/tpex_disposal_information
+    - 變更交易方法 https://www.tpex.org.tw/openapi/v1/tpex_cmode
+  TPEx (上櫃) — 其他警示:
     - 注意股   https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information
     - 處置股   https://www.tpex.org.tw/openapi/v1/tpex_disposal_information
     - 變更交易方法 https://www.tpex.org.tw/openapi/v1/tpex_cmode
@@ -96,12 +125,33 @@ URL_NOTICE = "https://openapi.twse.com.tw/v1/announcement/notice"
 URL_NOTETRANS = "https://openapi.twse.com.tw/v1/announcement/notetrans"
 URL_METHOD_CHANGED = "https://openapi.twse.com.tw/v1/exchangeReport/TWT85U"
 
-# === MOPS 公開資訊觀測站 重大訊息 RSS(2026-05-16 加入)===
-# 滾動最近 100 筆重大訊息;parser 過濾「違約」關鍵字 → default_settlement。
-# 編碼 cp950(XML 宣告 encoding='big5',實際 big5/cp950 通用)。
+# === MOPS 公開資訊觀測站 重大訊息 RSS(2026-05-16 加入,輔助來源)===
+# **實測**滾動只 8 筆 / 24h 視窗(舊註解寫「100 筆」已查證錯誤,2026-05-17 修);
+# 因視窗太短,僅作 TPEx 主來源備援。parser 過濾標題/內文含「違約」關鍵字
+# → default_settlement。編碼 cp950(XML 宣告 big5,big5/cp950 通用)。
 URL_MOPS_DEFAULT_SETTLEMENT_RSS = (
     "https://mopsov.twse.com.tw/nas/rss/mopsrss201001.xml"
 )
+
+# === TWSE 違約交割「每日全市場彙總金額」(2026-05-17 加,違約交割教訓 R3)===
+# 上市市場無個股細目(TWSE 不公開);只回每日彙總,寫進 default_settlement_daily
+# (market='TWSE')供 UI alert 市場異常日。個股細目要從 TPEx breach 抓(下方)。
+# 日期參數格式:startDate=YYYYMMDD&endDate=YYYYMMDD(無分隔)。
+URL_TWSE_BFIGTU_BASE = "https://www.twse.com.tw/announcement/BFIGTU"
+
+# === TPEx 違約交割(主來源,涵蓋全市場)===
+# 回兩個 table:
+#   table[0] 證券商申報投資人違約金額 — 上櫃/興櫃每日彙總(寫
+#            default_settlement_daily market='TPEX_LISTED'/'TPEX_EMERGING')
+#   table[1] 個股達違約資訊揭露標準(註1)之證券資訊 — 個股細目,門檻同一
+#            標的當日違約金額 >= 1000 萬。涵蓋全市場(含上市股,如 3105)。
+#            寫 stock_warnings(warning_type='default_settlement')。
+# 日期參數格式:startDate=YYYY/MM/DD&endDate=YYYY/MM/DD(斜線分隔)。
+URL_TPEX_BREACH_BASE = "https://www.tpex.org.tw/www/zh-tw/bulletin/breach"
+
+# 違約交割 backfill 預設窗口(天)。TPEx + TWSE endpoint 都接受 6 個月內單次查
+# 詢,無需切窗(實測 2025/11 - 2026/05 共 6 個月,單次 11K bytes 內可回完整)。
+DEFAULT_SETTLEMENT_BACKFILL_DAYS = 90
 
 # TPEx (上櫃) — 走官方 OpenAPI v1 JSON,結構穩定。
 TPEX_URL_DISPOSITION = (
@@ -687,6 +737,213 @@ def parse_mops_default_settlement_rss(
     return out
 
 
+# === TWSE BFIGTU(違約交割每日全市場彙總,2026-05-17 加)===
+
+def _twse_bfigtu_url(start_iso: str, end_iso: str) -> str:
+    """組 BFIGTU URL。日期參數格式 YYYYMMDD(無分隔)。"""
+    s = start_iso.replace("-", "")
+    e = end_iso.replace("-", "")
+    return f"{URL_TWSE_BFIGTU_BASE}?response=json&startDate={s}&endDate={e}"
+
+
+def parse_twse_bfigtu_json(
+    raw_text: str, source_url: str,
+) -> list[dict]:
+    """TWSE BFIGTU JSON → list[default_settlement_daily rows](market='TWSE')。
+
+    Response 結構:
+      {"stat":"OK","flag":104,"hints":"單位:元",
+       "tables":[{"title":"...","fields":["申報日期","買進、賣出合計總金額",
+       "買進、賣出相抵後金額"],"data":[["115/03/02","9,724,458","564,180"],...]}]}
+
+    Schema 限制(2026-05-17 確認):TWSE 上市市場「不公開」個股細目,此 endpoint
+    只回每日彙總金額。所以 return 的 row 都是 (market='TWSE', report_date,
+    gross_amount, net_amount) 結構,不會有 stock_id。
+
+    空資料 / parse 失敗 → 回 []。但若 endpoint 回 stat != 'OK' 或結構異常 → raise,
+    讓 fetch_and_parse_all 在 default_settlement source 全 0 時可 log warning。
+    """
+    s = (raw_text or "").strip()
+    if not s:
+        return []
+    data = json.loads(s)
+    # stat="OK" 必填,其他可能是 "查無資料" 之類的 sentinel
+    if not isinstance(data, dict):
+        return []
+    stat = str(data.get("stat", "")).strip()
+    if stat and stat != "OK":
+        # 查無資料屬正常,不 raise
+        return []
+    tables = data.get("tables") or []
+    out: list[dict] = []
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        for row in table.get("data", []) or []:
+            if not isinstance(row, list) or len(row) < 3:
+                continue
+            date_iso = normalize_date(row[0])
+            if not date_iso:
+                continue
+            try:
+                gross = int(str(row[1]).replace(",", "").strip() or "0")
+                net = int(str(row[2]).replace(",", "").strip() or "0")
+            except (ValueError, IndexError):
+                continue
+            out.append({
+                "market": "TWSE",
+                "report_date": date_iso,
+                "gross_amount": gross,
+                "net_amount": net,
+                "source_url": source_url,
+            })
+    return out
+
+
+# === TPEx breach(違約交割,2026-05-17 加,主來源)===
+
+def _tpex_breach_url(start_iso: str, end_iso: str) -> str:
+    """組 TPEx breach URL。日期參數格式 YYYY/MM/DD(斜線分隔)。"""
+    s = start_iso.replace("-", "/")
+    e = end_iso.replace("-", "/")
+    return f"{URL_TPEX_BREACH_BASE}?response=json&startDate={s}&endDate={e}"
+
+
+# table[0] 「證券商申報投資人違約金額」每日彙總,fields 例:
+#   ["申報日期","類別","買進、賣出合計總金額","買進、賣出相抵後金額"]
+# 類別欄位是「上櫃」或「興櫃」字串。
+# table[1] 「個股達違約資訊揭露標準(註1)之證券資訊」個股細目,fields 例:
+#   ["申報日期","證券名稱","證券代號","證券商名稱","個股違約總金額(註1)"]
+_TPEX_BREACH_DAILY_TITLE_KEY = "證券商申報"
+_TPEX_BREACH_PERSTOCK_TITLE_KEY = "個股達違約"
+
+# 「類別」中文 → market enum 對應(寫 default_settlement_daily.market)
+_TPEX_CATEGORY_TO_MARKET = {
+    "上櫃": "TPEX_LISTED",
+    "興櫃": "TPEX_EMERGING",
+}
+
+
+def parse_tpex_breach_json(
+    raw_text: str, source_url: str,
+) -> tuple[list[dict], list[dict]]:
+    """TPEx breach JSON → (per_stock_rows, daily_rows)。
+
+    per_stock_rows:list of stock_warnings row(warning_type='default_settlement'),
+                    來自 table[1]「個股達違約資訊揭露標準」。涵蓋全市場
+                    (含上市股,如 3105)。
+    daily_rows:list of default_settlement_daily row(market='TPEX_LISTED'/
+                'TPEX_EMERGING'),來自 table[0]「證券商申報投資人違約金額」。
+
+    空 / parse 失敗 → ([], [])(空資料屬正常,不 raise;malformed JSON 才 raise)。
+    """
+    s = (raw_text or "").strip()
+    if not s:
+        return [], []
+    data = json.loads(s)
+    if not isinstance(data, dict):
+        return [], []
+    tables = data.get("tables") or []
+
+    per_stock: list[dict] = []
+    daily: list[dict] = []
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        title = str(table.get("title", "") or "")
+        rows = table.get("data", []) or []
+        if _TPEX_BREACH_DAILY_TITLE_KEY in title:
+            # 每日彙總:[申報日期, 類別, 買賣合計, 買賣相抵]
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 4:
+                    continue
+                date_iso = normalize_date(row[0])
+                if not date_iso:
+                    continue
+                market = _TPEX_CATEGORY_TO_MARKET.get(
+                    str(row[1] or "").strip()
+                )
+                if not market:
+                    continue
+                try:
+                    gross = int(str(row[2]).replace(",", "").strip() or "0")
+                    net = int(str(row[3]).replace(",", "").strip() or "0")
+                except ValueError:
+                    continue
+                daily.append({
+                    "market": market,
+                    "report_date": date_iso,
+                    "gross_amount": gross,
+                    "net_amount": net,
+                    "source_url": source_url,
+                })
+        elif _TPEX_BREACH_PERSTOCK_TITLE_KEY in title:
+            # 個股細目:[申報日期, 證券名稱, 證券代號, 證券商名稱, 違約總金額]
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 5:
+                    continue
+                date_iso = normalize_date(row[0])
+                if not date_iso:
+                    continue
+                sid = _extract_stock_id(row[2])
+                if not sid:
+                    continue
+                name = str(row[1] or "").strip()
+                # 證券商名稱可能用 <br> 串多家,replace 成 ' / ' 給 reason 顯示
+                brokers = (
+                    str(row[3] or "").strip()
+                    .replace("<br>", " / ")
+                    .replace("<br/>", " / ")
+                    .replace("<br />", " / ")
+                )
+                try:
+                    amount = int(str(row[4]).replace(",", "").strip() or "0")
+                except ValueError:
+                    amount = 0
+                amount_yi = amount / 100_000_000  # 億
+                if amount_yi >= 1:
+                    amount_pretty = f"{amount_yi:.2f} 億"
+                else:
+                    amount_pretty = f"{amount / 10_000:,.0f} 萬"
+                reason = (
+                    f"{name} {sid} 違約交割 {amount_pretty}(申報券商:{brokers})"
+                )
+                per_stock.append({
+                    "stock_id": sid,
+                    "warning_type": "default_settlement",
+                    "announced_date": date_iso,
+                    "effective_from": date_iso,
+                    "effective_to": None,
+                    "reason": reason[:500],
+                    "source_url": source_url,
+                })
+    return per_stock, daily
+
+
+def _fetch_twse_default_settlement(
+    start_iso: str,
+    end_iso: str,
+    override: str | None = None,
+) -> str:
+    """打 TWSE BFIGTU 拿原始 JSON 字串(或 override)。retry 3 次。"""
+    if override is not None:
+        return override
+    url = _twse_bfigtu_url(start_iso, end_iso)
+    return fetch_url_with_retry(url, label="TWSE BFIGTU 違約彙總")
+
+
+def _fetch_tpex_default_settlement(
+    start_iso: str,
+    end_iso: str,
+    override: str | None = None,
+) -> str:
+    """打 TPEx breach 拿原始 JSON 字串(或 override)。retry 3 次。"""
+    if override is not None:
+        return override
+    url = _tpex_breach_url(start_iso, end_iso)
+    return fetch_url_with_retry(url, label="TPEx breach 違約彙總/個股")
+
+
 # === Source orchestration ===
 
 # Source 表:每筆 (warning_type_label, url, parser, market)
@@ -720,27 +977,43 @@ _BASELINE_URLS = {URL_PUNISH, URL_METHOD_CHANGED}
 
 def fetch_and_parse_all(
     html_overrides: dict[str, str] | None = None,
-) -> tuple[list[dict], dict[str, int]]:
-    """打所有 source、parse、合併成單一 rows list(不寫 DB)。
+    default_settlement_days: int = DEFAULT_SETTLEMENT_BACKFILL_DAYS,
+    today_iso: str | None = None,
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """打所有 source、parse、合併成 rows list(不寫 DB)。
 
     Args:
-        html_overrides: {url: json_text} — 測試用,跳過真實 HTTP。
-            key 對應 _SOURCES 內的 URL_* constant。
-            (鍵 "html_overrides" 是歷史名稱,實際接 JSON 字串)
+        html_overrides: {url: text} — 測試用,跳過真實 HTTP。
+            key 對應 _SOURCES 內的 URL_* constant,以及 BFIGTU / TPEx breach
+            的具體 URL(含 startDate/endDate query string)。為了測試方便,
+            BFIGTU / TPEx breach 額外接受不含 query string 的 base URL
+            (URL_TWSE_BFIGTU_BASE / URL_TPEX_BREACH_BASE)當 override key。
+        default_settlement_days: TWSE BFIGTU + TPEx breach 抓近 N 天資料
+            (預設 90)。日常 schedule 可用較小值(7-14),手動 backfill 用 90+。
+        today_iso: 視同今日的 ISO 日期(測試 / backfill 用,預設 UTC today)。
 
     Returns:
-        (all_rows, per_source_counts):per_source_counts 是 {url: row_count}。
+        (warnings_rows, daily_rows, per_source_counts)
+          warnings_rows:list of stock_warnings row(個股警示)
+          daily_rows:list of default_settlement_daily row(每日全市場違約彙總)
+          per_source_counts:{url_or_label: row_count}
 
     任何 source 抓 / parse 失敗 → raise(讓 CI exit 1 觸發告警),不要 silent skip。
 
     Baseline 防呆:跑完後若 TWSE punish + TWT85U 兩條源都 0 rows → raise
     (這兩條歷史上一定有資料,同時 0 表示 endpoint 整體壞掉)。
 
-    MOPS 違約交割 RSS(2026-05-16 加入):全市場違約交割專用,單獨流程
-    (cp950 編碼);違約事件年數筆,0 rows 屬正常,不在 baseline 偵測內。
+    違約交割:
+      - TPEx breach 為主來源(個股細目 + 上櫃/興櫃每日彙總);若 fetch 失敗
+        → raise(主來源不能 silent miss)。
+      - TWSE BFIGTU(上市每日彙總,無個股細目)。fetch 失敗 → raise
+        (主公拍板:違約類 source 任一壞掉都要 fail loud)。
+      - MOPS RSS 為輔助來源(視窗 8 筆 / 24h,僅備援);fetch 失敗 → log
+        warning 不 raise(避免拖垮主流程)。
     """
     html_overrides = html_overrides or {}
     all_rows: list[dict] = []
+    daily_rows: list[dict] = []
     per_source: dict[str, int] = {}
 
     for label, url, parser, market in _SOURCES:
@@ -776,8 +1049,73 @@ def fetch_and_parse_all(
             f"baseline_zero={baseline_zero}"
         )
 
-    # === MOPS 違約交割 RSS(獨立 flow:cp950 編碼)===
-    # 違約事件年數筆,0 rows 屬正常,不在 baseline 偵測內。
+    # === 違約交割專區 (TPEx breach 主來源 + TWSE BFIGTU 每日彙總)===
+    from datetime import date, timedelta
+    if today_iso is None:
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+    end_iso = today_iso
+    start_iso = (
+        date.fromisoformat(today_iso) - timedelta(days=int(default_settlement_days))
+    ).isoformat()
+
+    # TPEx breach — 主來源(全市場個股細目 + 上櫃/興櫃每日彙總)
+    tpex_breach_url = _tpex_breach_url(start_iso, end_iso)
+    tpex_text = html_overrides.get(URL_TPEX_BREACH_BASE)
+    if tpex_text is None:
+        tpex_text = html_overrides.get(tpex_breach_url)
+    if tpex_text is None:
+        tpex_text = _fetch_tpex_default_settlement(start_iso, end_iso)
+    try:
+        tpex_perstock, tpex_daily = parse_tpex_breach_json(
+            tpex_text, source_url=URL_TPEX_BREACH_BASE,
+        )
+    except Exception as ex:
+        raise RuntimeError(
+            f"[WARNINGS] parse TPEx breach 失敗:"
+            f"{type(ex).__name__}: {ex}"
+        ) from ex
+    per_source["TPEx_breach_perstock"] = len(tpex_perstock)
+    per_source["TPEx_breach_daily"] = len(tpex_daily)
+    print(
+        f"[WARNINGS] [TPEx] breach_perstock            "
+        f"{len(tpex_perstock):>4d} rows",
+        flush=True,
+    )
+    print(
+        f"[WARNINGS] [TPEx] breach_daily_aggregate     "
+        f"{len(tpex_daily):>4d} rows",
+        flush=True,
+    )
+    all_rows.extend(tpex_perstock)
+    daily_rows.extend(tpex_daily)
+
+    # TWSE BFIGTU — 上市每日彙總(無個股細目,TWSE 不公開)
+    twse_bfigtu_url = _twse_bfigtu_url(start_iso, end_iso)
+    twse_text = html_overrides.get(URL_TWSE_BFIGTU_BASE)
+    if twse_text is None:
+        twse_text = html_overrides.get(twse_bfigtu_url)
+    if twse_text is None:
+        twse_text = _fetch_twse_default_settlement(start_iso, end_iso)
+    try:
+        twse_daily = parse_twse_bfigtu_json(
+            twse_text, source_url=URL_TWSE_BFIGTU_BASE,
+        )
+    except Exception as ex:
+        raise RuntimeError(
+            f"[WARNINGS] parse TWSE BFIGTU 失敗:"
+            f"{type(ex).__name__}: {ex}"
+        ) from ex
+    per_source["TWSE_BFIGTU_daily"] = len(twse_daily)
+    print(
+        f"[WARNINGS] [TWSE] BFIGTU_daily_aggregate     "
+        f"{len(twse_daily):>4d} rows",
+        flush=True,
+    )
+    daily_rows.extend(twse_daily)
+
+    # === MOPS 違約交割 RSS(輔助來源:cp950 編碼,8 筆 / 24h)===
+    # 實測視窗極短,僅備援(主來源是 TPEx breach 第 2 表)。fetch 失敗 → log 不
+    # raise,不阻擋主流程(主來源已涵蓋個股違約)。
     mops_url = URL_MOPS_DEFAULT_SETTLEMENT_RSS
     if mops_url in html_overrides:
         mops_text = html_overrides[mops_url]
@@ -785,10 +1123,9 @@ def fetch_and_parse_all(
         try:
             mops_text = _fetch_mops_rss_text(mops_url)
         except Exception as ex:
-            # MOPS 偶爾 502,違約交割本身年數筆事件,fetch fail → log 不 raise
-            # (不能 silent miss 但也不該 block 其他警示寫入)。
             logger.warning(
-                "[WARNINGS] MOPS 違約交割 RSS fetch 失敗:%s: %s — 本次 run 跳過",
+                "[WARNINGS] MOPS 違約交割 RSS fetch 失敗(輔助來源,不阻擋):"
+                "%s: %s — 本次 run 跳過",
                 type(ex).__name__, ex,
             )
             mops_text = ""
@@ -804,30 +1141,45 @@ def fetch_and_parse_all(
     per_source[mops_url] = len(mops_rows)
     print(
         f"[WARNINGS] [MOPS] default_settlement_rss     "
-        f"{len(mops_rows):>4d} rows",
+        f"{len(mops_rows):>4d} rows (輔助)",
         flush=True,
     )
     all_rows.extend(mops_rows)
 
-    return all_rows, per_source
+    return all_rows, daily_rows, per_source
 
 
 def run(
     html_overrides: dict[str, str] | None = None,
     db_path: str | Path | None = None,
+    default_settlement_days: int = DEFAULT_SETTLEMENT_BACKFILL_DAYS,
+    today_iso: str | None = None,
 ) -> dict:
-    """主流程:抓 + parse 全部來源 → upsert stock_warnings。
+    """主流程:抓 + parse 全部來源 → upsert stock_warnings + default_settlement_daily。
 
-    Returns summary dict {rows_parsed, rows_written, by_type, per_source,
-                          elapsed_secs}.
+    Args:
+        default_settlement_days: 違約交割抓近 N 天(backfill 可給較大值)。
+        today_iso: 視同今日 ISO date(測試用)。
+
+    Returns summary dict {rows_parsed, rows_written, daily_rows_written, by_type,
+                          per_source, elapsed_secs}.
     """
     t0 = time.time()
     db.init_db(db_path)
-    rows, per_source = fetch_and_parse_all(html_overrides=html_overrides)
+    rows, daily_rows, per_source = fetch_and_parse_all(
+        html_overrides=html_overrides,
+        default_settlement_days=default_settlement_days,
+        today_iso=today_iso,
+    )
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for r in rows:
         r.setdefault("fetched_at", fetched_at)
+    for r in daily_rows:
+        r.setdefault("fetched_at", fetched_at)
     n_written = db.upsert_stock_warnings(rows, db_path=db_path)
+    n_daily_written = db.upsert_default_settlement_daily(
+        daily_rows, db_path=db_path,
+    )
     by_type: dict[str, int] = {}
     for r in rows:
         wt = r["warning_type"]
@@ -835,12 +1187,15 @@ def run(
     elapsed = round(time.time() - t0, 2)
     print(
         f"[WARNINGS] DONE rows_parsed={len(rows)} rows_written={n_written} "
-        f"by_type={by_type} elapsed={elapsed}s",
+        f"daily_rows_written={n_daily_written} by_type={by_type} "
+        f"elapsed={elapsed}s",
         flush=True,
     )
     return {
         "rows_parsed": len(rows),
         "rows_written": n_written,
+        "daily_rows_parsed": len(daily_rows),
+        "daily_rows_written": n_daily_written,
         "by_type": by_type,
         "per_source": per_source,
         "elapsed_secs": elapsed,
@@ -849,22 +1204,63 @@ def run(
 
 def main(argv: Iterable[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="TWSE / TPEx 警示股紀錄抓取 + upsert(stock_warnings)",
+        description=(
+            "TWSE / TPEx 警示股紀錄抓取 + upsert"
+            "(stock_warnings + default_settlement_daily)"
+        ),
     )
     p.add_argument(
         "--dry-run", action="store_true",
         help="只 fetch + parse,不寫 DB(smoke 用)",
     )
+    p.add_argument(
+        "--backfill-default-settlement", action="store_true",
+        help=(
+            "違約交割 backfill 模式:--days 給的天數套用到 TWSE BFIGTU + "
+            "TPEx breach 兩條 endpoint(都支援 6 個月以內單次窗口),"
+            "歷史違約資料一併補進 DB。"
+        ),
+    )
+    p.add_argument(
+        "--days", type=int, default=None,
+        help=(
+            f"違約交割抓近 N 天(預設 {DEFAULT_SETTLEMENT_BACKFILL_DAYS});"
+            "搭配 --backfill-default-settlement 可拉更長窗口(建議 ≤180)。"
+        ),
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     setup_file_logging("fetch_stock_warnings", mirror_print=True)
 
+    days = args.days
+    if days is None:
+        days = DEFAULT_SETTLEMENT_BACKFILL_DAYS
+    if args.backfill_default_settlement and args.days is None:
+        # backfill 預設拉 180 天(6 個月,endpoint 支援單次)
+        days = 180
+        print(
+            "[WARNINGS] --backfill-default-settlement 模式,預設拉 180 天",
+            flush=True,
+        )
+    if days > 365:
+        print(
+            f"[WARNINGS] WARN: --days={days} 超過 1 年,endpoint 可能拒絕或回斷層,"
+            "建議分次跑 ≤180 天窗口",
+            flush=True,
+        )
+
     try:
         if args.dry_run:
-            rows, _ = fetch_and_parse_all()
-            print(f"[WARNINGS] DRY RUN parsed {len(rows)} rows", flush=True)
+            rows, daily_rows, _ = fetch_and_parse_all(
+                default_settlement_days=days,
+            )
+            print(
+                f"[WARNINGS] DRY RUN parsed {len(rows)} warning rows "
+                f"+ {len(daily_rows)} daily aggregate rows",
+                flush=True,
+            )
             return 0
-        summary = run()
+        summary = run(default_settlement_days=days)
     except Exception as ex:  # noqa: BLE001
         print(
             f"[WARNINGS] FATAL: {type(ex).__name__}: {ex}", file=sys.stderr,

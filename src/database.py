@@ -610,6 +610,28 @@ SCHEMA: list[str] = [
     "ON price_alerts(stock_id, is_active)",
     "CREATE INDEX IF NOT EXISTS idx_price_alerts_active "
     "ON price_alerts(is_active, created_at DESC)",
+    # default_settlement_daily:TWSE / TPEx 違約交割「每日全市場彙總金額」
+    # (2026-05-17 主公拍板加入,違約交割教訓 round 3)。
+    #
+    # 兩家交易所 OpenAPI 提供的「全市場違約金額」每日彙總:
+    #   TWSE BFIGTU       — 上市市場(無個股細目)
+    #   TPEx breach 第 1 表 — 上櫃 + 興櫃市場(亦無個股細目)
+    # 「個股細目」(達 1000 萬揭露門檻)由 TPEx breach 第 2 表提供,涵蓋全市場
+    # (含上市股),寫進 stock_warnings.default_settlement;此表獨立存「每日總額」
+    # 給 UI 顯示「今日全市場違約異常」alert,即使個股都未達 1000 萬門檻仍可警示。
+    """
+    CREATE TABLE IF NOT EXISTS default_settlement_daily (
+        market         TEXT NOT NULL,
+        report_date    TEXT NOT NULL,
+        gross_amount   INTEGER NOT NULL,
+        net_amount     INTEGER NOT NULL,
+        source_url     TEXT,
+        fetched_at     TEXT NOT NULL,
+        PRIMARY KEY (market, report_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_default_settle_daily_date "
+    "ON default_settlement_daily(report_date DESC)",
 ]
 
 
@@ -4133,6 +4155,101 @@ def get_warning_history_for_sid(
     return out
 
 
+# === default_settlement_daily:全市場違約交割每日彙總(2026-05-17 加)===
+
+def upsert_default_settlement_daily(
+    rows: Iterable[dict], db_path: str | Path | None = None,
+) -> int:
+    """寫入 / 更新「每日全市場違約金額」彙總(同 PK 覆寫,fetcher idempotent)。
+
+    rows 每筆需有:market(TWSE / TPEX_LISTED / TPEX_EMERGING)、report_date(ISO)、
+                   gross_amount、net_amount。
+    optional:source_url。fetched_at 自動補 now()。
+
+    用途:UI 顯示「今日全市場違約異常」alert(即使所有個股都未達 1000 萬個股
+    揭露門檻仍可警示市場異常)、backfill 歷史違約熱度供 ML 特徵。
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    now = _now_iso()
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO default_settlement_daily
+                (market, report_date, gross_amount, net_amount,
+                 source_url, fetched_at)
+            VALUES
+                (:market, :report_date, :gross_amount, :net_amount,
+                 :source_url, :fetched_at)
+            ON CONFLICT(market, report_date) DO UPDATE SET
+                gross_amount=excluded.gross_amount,
+                net_amount=excluded.net_amount,
+                source_url=excluded.source_url,
+                fetched_at=excluded.fetched_at
+            """,
+            [
+                {
+                    "market": str(r["market"]).strip(),
+                    "report_date": str(r["report_date"]).strip(),
+                    "gross_amount": int(r["gross_amount"]),
+                    "net_amount": int(r["net_amount"]),
+                    "source_url": r.get("source_url"),
+                    "fetched_at": r.get("fetched_at") or now,
+                }
+                for r in rows_list
+            ],
+        )
+    return len(rows_list)
+
+
+def get_default_settlement_daily(
+    market: str | None = None,
+    days: int = 90,
+    min_net_amount: int | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """讀近 N 天的每日違約金額紀錄,依 report_date desc 排序。
+
+    market:'TWSE' / 'TPEX_LISTED' / 'TPEX_EMERGING' — None 回全部。
+    min_net_amount:僅回 net_amount >= 該值的 row(供 UI 過濾異常日)。
+    """
+    from datetime import date, timedelta
+    init_db(db_path)
+    cutoff = (date.today() - timedelta(days=int(days))).isoformat()
+    sql = (
+        "SELECT market, report_date, gross_amount, net_amount, "
+        "       source_url, fetched_at "
+        "FROM default_settlement_daily "
+        "WHERE report_date >= ?"
+    )
+    params: list = [cutoff]
+    if market is not None:
+        sql += " AND market=?"
+        params.append(market)
+    if min_net_amount is not None:
+        sql += " AND net_amount >= ?"
+        params.append(int(min_net_amount))
+    sql += " ORDER BY report_date DESC, market"
+    with get_conn(db_path) as conn:
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [
+        {
+            "market": r["market"],
+            "report_date": r["report_date"],
+            "gross_amount": r["gross_amount"],
+            "net_amount": r["net_amount"],
+            "source_url": r["source_url"],
+            "fetched_at": r["fetched_at"],
+        }
+        for r in rows
+    ]
+
+
 __all__ = [
     "get_conn",
     "init_db",
@@ -4185,6 +4302,8 @@ __all__ = [
     "upsert_stock_warnings",
     "get_active_warnings_for_sids",
     "get_warning_history_for_sid",
+    "upsert_default_settlement_daily",
+    "get_default_settlement_daily",
     "add_position",
     "close_position",
     "update_position",

@@ -2,11 +2,15 @@
 
 2026-05-16 大改:從 bs4 HTML parser 改成 OpenAPI v1 JSON parser
 (silent 0 rows 修復;違約交割教訓 round 2)。
+2026-05-17 加 TWSE BFIGTU + TPEx breach fetcher / parser(主來源,違約交割
+教訓 round 3 — 3105 4/27-4/28 silent miss bug)。
 
 涵蓋:
   - schema 對齊 production(用 db.init_db() 建表,不自編 CREATE TABLE)
   - TWSE OpenAPI JSON fixture 餵 parser → 驗 sid / warning_type / dates
   - TPEx OpenAPI JSON fixture 同樣覆蓋(舊測試保留)
+  - **TPEx breach 個股違約 fixture**:per-stock 細目 → stock_warnings
+  - **TWSE BFIGTU + TPEx breach 每日彙總**:寫 default_settlement_daily 表
   - 重複 fetch idempotent(同 PK 不重複插)
   - User-Agent header 確實送出(TDCC 教訓)
   - normalize_date 民國 / 西元雙格式(連寫 + 分隔符)
@@ -446,7 +450,11 @@ def test_parse_tpex_skips_rows_with_missing_required_fields():
 # ============================================================================
 
 def _twse_only_overrides() -> dict[str, str]:
-    """只給 TWSE fixture,TPEx + MOPS 餵空隔離(免打真實 API)。"""
+    """只給 TWSE fixture,TPEx + MOPS 餵空隔離(免打真實 API)。
+
+    違約交割兩條 endpoint(TPEx breach + TWSE BFIGTU)用 base URL key
+    餵空,跳過真實 HTTP(orchestration 內部會優先吃 base URL key)。
+    """
     return {
         fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
         fetcher.URL_NOTICE: _TWSE_NOTICE_JSON,
@@ -456,6 +464,9 @@ def _twse_only_overrides() -> dict[str, str]:
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        # 違約交割兩條 endpoint:餵空 JSON / 空 dict 跳過真實 HTTP
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
 
 
@@ -502,6 +513,9 @@ def test_run_writes_twse_and_tpex_together(tmp_db):
         fetcher.TPEX_URL_CMODE: _TPEX_CMODE_JSON,
         # MOPS 違約交割(餵空,免打真實 API)
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        # 違約交割兩條 endpoint(餵空,免打真實 API)
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
     summary = fetcher.run(html_overrides=overrides)
     # TWSE 7 + TPEx attention 1 + disposition 2 + cmode 3(7777 跳過) = 13
@@ -528,6 +542,8 @@ def test_baseline_raises_when_punish_and_twt85u_both_empty(tmp_db):
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
     with pytest.raises(RuntimeError, match="baseline"):
         fetcher.run(html_overrides=overrides)
@@ -544,6 +560,8 @@ def test_baseline_passes_when_only_one_zero(tmp_db):
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
     summary = fetcher.run(html_overrides=overrides)
     assert summary["rows_parsed"] == 2  # 來自 TWT85U
@@ -744,6 +762,9 @@ def test_run_writes_mops_default_settlement_rows(tmp_db):
         fetcher.TPEX_URL_CMODE: "[]",
         # MOPS — 含 2 筆違約 + 1 筆 unrelated
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: _MOPS_RSS_HAS_DEFAULT_SETTLEMENT,
+        # 違約交割主來源餵空(只測 MOPS 輔助路徑)
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
     summary = fetcher.run(html_overrides=overrides)
     assert summary["by_type"].get("default_settlement") == 2
@@ -754,6 +775,253 @@ def test_run_writes_mops_default_settlement_rows(tmp_db):
             "WHERE warning_type='default_settlement' ORDER BY stock_id"
         ).fetchall()
     assert [r["stock_id"] for r in rows] == ["1234", "5678"]
+
+
+# ============================================================================
+# TWSE BFIGTU + TPEx breach — 違約交割主來源(2026-05-17 加,3105 教訓)
+# ============================================================================
+
+# TWSE BFIGTU 真實 response 結構(僅每日彙總,無個股細目)。
+_TWSE_BFIGTU_JSON = """{
+  "stat": "OK",
+  "flag": 104,
+  "hints": "單位:元",
+  "tables": [{
+    "title": "115年04月20日至115年05月05日 證券商申報投資人違約金額",
+    "fields": ["申報日期", "買進、賣出合計總金額", "買進、賣出相抵後金額"],
+    "data": [
+      ["115/04/27", "162,397,590", "12,448,690"],
+      ["115/04/28", "63,008,045", "12,635,777"]
+    ]
+  }]
+}"""
+
+
+def test_parse_twse_bfigtu_daily_aggregate():
+    """TWSE BFIGTU 只回每日彙總(無個股),寫 default_settlement_daily。"""
+    rows = fetcher.parse_twse_bfigtu_json(
+        _TWSE_BFIGTU_JSON, source_url=fetcher.URL_TWSE_BFIGTU_BASE,
+    )
+    assert len(rows) == 2
+    by_date = {r["report_date"]: r for r in rows}
+    assert "2026-04-27" in by_date
+    r = by_date["2026-04-27"]
+    assert r["market"] == "TWSE"
+    assert r["gross_amount"] == 162_397_590
+    assert r["net_amount"] == 12_448_690
+    assert r["source_url"] == fetcher.URL_TWSE_BFIGTU_BASE
+
+
+def test_parse_twse_bfigtu_empty_returns_empty():
+    """空字串 / 沒資料 → 回 [](不 raise)。"""
+    assert fetcher.parse_twse_bfigtu_json(
+        "", source_url=fetcher.URL_TWSE_BFIGTU_BASE,
+    ) == []
+    assert fetcher.parse_twse_bfigtu_json(
+        '{"stat":"查無資料","tables":[]}',
+        source_url=fetcher.URL_TWSE_BFIGTU_BASE,
+    ) == []
+
+
+def test_parse_twse_bfigtu_malformed_raises():
+    with pytest.raises(Exception):
+        fetcher.parse_twse_bfigtu_json(
+            "this is not json", source_url=fetcher.URL_TWSE_BFIGTU_BASE,
+        )
+
+
+# TPEx breach 真實 response(包含 4/27 3105 穩懋的歷史 case,本次 silent miss 教訓)
+_TPEX_BREACH_JSON = """{
+  "date": "20260420~20260510",
+  "tables": [
+    {
+      "title": "證券商申報投資人違約金額",
+      "date": "115/04/20~115/05/10",
+      "totalCount": 6,
+      "fields": ["申報日期", "類別", "買進、賣出合計總金額", "買進、賣出相抵後金額"],
+      "data": [
+        ["115/04/27", "上櫃", "5,000,000", "1,000,000"],
+        ["115/04/27", "興櫃", "0", "0"],
+        ["115/04/28", "上櫃", "3,500,000", "500,000"],
+        ["115/04/28", "興櫃", "0", "0"]
+      ]
+    },
+    {
+      "title": "個股達違約資訊揭露標準(註1)之證券資訊",
+      "totalCount": 3,
+      "fields": ["申報日期", "證券名稱", "證券代號", "證券商名稱", "個股違約總金額(註1)"],
+      "data": [
+        ["115/04/27", "穩懋", "3105", "新光桃園<br>國泰敦南<br>群益永和<br>永豐羅東<br>永豐天母", "96,696,250"],
+        ["115/04/27", "信驊", "5274", "玉山景美", "32,835,000"],
+        ["115/04/28", "穩懋", "3105", "群益永和", "86,697,000"]
+      ]
+    }
+  ]
+}"""
+
+
+def test_parse_tpex_breach_extracts_per_stock_default_settlement():
+    """TPEx breach 第 2 表個股細目 → stock_warnings(default_settlement)。
+
+    這條測試直接驗 3105 4/27-4/28 違約 case(silent miss bug 教訓 root cause)。
+    """
+    per_stock, daily = fetcher.parse_tpex_breach_json(
+        _TPEX_BREACH_JSON, source_url=fetcher.URL_TPEX_BREACH_BASE,
+    )
+    assert len(per_stock) == 3
+    sids_dates = {(r["stock_id"], r["announced_date"]) for r in per_stock}
+    # 3105 必中(4/27 + 4/28)
+    assert ("3105", "2026-04-27") in sids_dates
+    assert ("3105", "2026-04-28") in sids_dates
+    assert ("5274", "2026-04-27") in sids_dates
+
+    r_3105_427 = next(
+        r for r in per_stock
+        if r["stock_id"] == "3105" and r["announced_date"] == "2026-04-27"
+    )
+    assert r_3105_427["warning_type"] == "default_settlement"
+    assert r_3105_427["effective_from"] == "2026-04-27"
+    # 金額換算 0.97 億 → reason 含「億」
+    assert "0.97 億" in r_3105_427["reason"] or "9," in r_3105_427["reason"]
+    # 多家證券商 <br> 應替換成 ' / ' 而非保留 HTML
+    assert "<br>" not in r_3105_427["reason"]
+
+
+def test_parse_tpex_breach_extracts_daily_aggregate():
+    """TPEx breach 第 1 表每日彙總 → default_settlement_daily(market 對應)。"""
+    _, daily = fetcher.parse_tpex_breach_json(
+        _TPEX_BREACH_JSON, source_url=fetcher.URL_TPEX_BREACH_BASE,
+    )
+    assert len(daily) == 4  # 上櫃 x 2 日 + 興櫃 x 2 日
+    by_key = {(r["market"], r["report_date"]): r for r in daily}
+    assert ("TPEX_LISTED", "2026-04-27") in by_key
+    assert ("TPEX_EMERGING", "2026-04-27") in by_key
+    r_listed = by_key[("TPEX_LISTED", "2026-04-27")]
+    assert r_listed["gross_amount"] == 5_000_000
+    assert r_listed["net_amount"] == 1_000_000
+
+
+def test_parse_tpex_breach_empty_returns_empty_tuples():
+    per_stock, daily = fetcher.parse_tpex_breach_json(
+        "", source_url=fetcher.URL_TPEX_BREACH_BASE,
+    )
+    assert per_stock == [] and daily == []
+
+
+def test_parse_tpex_breach_malformed_raises():
+    with pytest.raises(Exception):
+        fetcher.parse_tpex_breach_json(
+            "this is not json", source_url=fetcher.URL_TPEX_BREACH_BASE,
+        )
+
+
+def test_run_writes_tpex_breach_3105_to_stock_warnings(tmp_db):
+    """整合測試 — TPEx breach fixture 含 3105 → stock_warnings 真的寫入。
+
+    這是 silent miss bug 的 regression guard:跑完 run() 後 DB 內必有 3105
+    違約紀錄(announced_date=2026-04-27/28)。
+    """
+    overrides = {
+        # 保底 baseline
+        fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
+        fetcher.URL_NOTICE: "[]",
+        fetcher.URL_NOTETRANS: "[]",
+        fetcher.URL_METHOD_CHANGED: _TWSE_TWT85U_JSON,
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        # 違約主來源
+        fetcher.URL_TWSE_BFIGTU_BASE: _TWSE_BFIGTU_JSON,
+        fetcher.URL_TPEX_BREACH_BASE: _TPEX_BREACH_JSON,
+    }
+    summary = fetcher.run(html_overrides=overrides)
+    # 至少 3 筆個股違約(3105 x2 + 5274 x1)
+    assert summary["by_type"].get("default_settlement", 0) >= 3
+    # default_settlement_daily 寫了 6 筆(TWSE 2 + TPEX_LISTED 2 + TPEX_EMERGING 2)
+    assert summary["daily_rows_written"] == 6
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT stock_id, announced_date FROM stock_warnings "
+            "WHERE stock_id='3105' AND warning_type='default_settlement' "
+            "ORDER BY announced_date"
+        ).fetchall()
+    dates = [r["announced_date"] for r in rows]
+    assert dates == ["2026-04-27", "2026-04-28"], (
+        f"3105 違約交割 silent miss bug regression — DB 內未找到預期日期:{dates}"
+    )
+
+    # 驗 default_settlement_daily 表也有 3 個 market 的 4/27 row
+    with db.get_conn() as conn:
+        daily_rows = conn.execute(
+            "SELECT market, gross_amount FROM default_settlement_daily "
+            "WHERE report_date='2026-04-27' ORDER BY market"
+        ).fetchall()
+    markets = {r["market"] for r in daily_rows}
+    assert {"TWSE", "TPEX_LISTED", "TPEX_EMERGING"} == markets
+
+
+def test_run_default_settlement_idempotent_no_dup(tmp_db):
+    """同 fixture 跑兩次 → stock_warnings 與 default_settlement_daily 都不重複插。"""
+    overrides = {
+        fetcher.URL_PUNISH: _TWSE_PUNISH_JSON,
+        fetcher.URL_NOTICE: "[]",
+        fetcher.URL_NOTETRANS: "[]",
+        fetcher.URL_METHOD_CHANGED: _TWSE_TWT85U_JSON,
+        fetcher.TPEX_URL_ATTENTION: "[]",
+        fetcher.TPEX_URL_DISPOSITION: "[]",
+        fetcher.TPEX_URL_CMODE: "[]",
+        fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",
+        fetcher.URL_TWSE_BFIGTU_BASE: _TWSE_BFIGTU_JSON,
+        fetcher.URL_TPEX_BREACH_BASE: _TPEX_BREACH_JSON,
+    }
+    fetcher.run(html_overrides=overrides)
+    fetcher.run(html_overrides=overrides)
+
+    with db.get_conn() as conn:
+        n_warn = conn.execute(
+            "SELECT COUNT(*) AS c FROM stock_warnings "
+            "WHERE warning_type='default_settlement'"
+        ).fetchone()["c"]
+        n_daily = conn.execute(
+            "SELECT COUNT(*) AS c FROM default_settlement_daily"
+        ).fetchone()["c"]
+    assert n_warn == 3, f"default_settlement PK 防重失敗,有 {n_warn} 筆"
+    assert n_daily == 6, f"default_settlement_daily PK 防重失敗,有 {n_daily} 筆"
+
+
+def test_twse_bfigtu_url_format():
+    """URL 組裝:YYYYMMDD 連寫(無分隔)、含 response=json。"""
+    url = fetcher._twse_bfigtu_url("2026-04-01", "2026-05-17")
+    assert "startDate=20260401" in url
+    assert "endDate=20260517" in url
+    assert "response=json" in url
+
+
+def test_tpex_breach_url_format():
+    """URL 組裝:YYYY/MM/DD 斜線、含 response=json。"""
+    url = fetcher._tpex_breach_url("2026-04-01", "2026-05-17")
+    assert "startDate=2026/04/01" in url
+    assert "endDate=2026/05/17" in url
+    assert "response=json" in url
+
+
+def test_default_settlement_db_schema_has_required_columns(tmp_db):
+    """default_settlement_daily schema 對齊 production(防有人 commit 漏 migration)。"""
+    with db.get_conn() as conn:
+        cols = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(default_settlement_daily)"
+            ).fetchall()
+        }
+    expected = {
+        "market", "report_date", "gross_amount", "net_amount",
+        "source_url", "fetched_at",
+    }
+    assert expected.issubset(cols), (
+        f"default_settlement_daily schema 缺欄位,實有 {cols}"
+    )
 
 
 def test_mops_baseline_zero_does_not_raise(tmp_db):
@@ -767,6 +1035,8 @@ def test_mops_baseline_zero_does_not_raise(tmp_db):
         fetcher.TPEX_URL_DISPOSITION: "[]",
         fetcher.TPEX_URL_CMODE: "[]",
         fetcher.URL_MOPS_DEFAULT_SETTLEMENT_RSS: "",  # 0 rows
+        fetcher.URL_TWSE_BFIGTU_BASE: "",
+        fetcher.URL_TPEX_BREACH_BASE: "",
     }
     # 不該 raise(MOPS 不在 _BASELINE_URLS 內)
     summary = fetcher.run(html_overrides=overrides)
