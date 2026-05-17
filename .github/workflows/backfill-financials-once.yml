@@ -10,6 +10,12 @@ name: Backfill Financials (one-shot manual)
 #
 # 預估 runtime:~2000 待補檔 × FinMind throttle ~1 call/s + sleep = 30-60 min。
 # 給 GH runner 120 min 上限應該夠。
+#
+# Storage 策略(2026-05-17 改):
+#   - 全市場 financials.quarterly ~30MB CSV / ~5MB parquet
+#   - 預設 parquet 上傳到 GH Release(snapshot-financials-YYYY-MM-DD),根治
+#     未來資料量增長撞 100MB
+#   - 既有 CSV 路徑保留作為向後相容 fallback
 
 on:
   workflow_dispatch:
@@ -30,30 +36,14 @@ on:
         description: "每檔 sleep 秒數(預設 0.5,FinMind 友善)"
         required: false
         default: "0.5"
-      batch_start:
-        description: "從 universe 第 N 檔開始(0-based, inclusive,預設 0)"
+      dump_format:
+        description: "Dump 格式: parquet(預設,給 release) / csv(向後相容)"
         required: false
-        default: "0"
-      batch_end:
-        description: "跑到 universe 第 N 檔結束(0-based, exclusive,預設 200)。0 = 跑到末尾"
-        required: false
-        default: "200"
-      max_stocks:
-        description: "單次 run 上限檔數(預設 200,避免 FinMind quota 撞牆)"
-        required: false
-        default: "200"
-      dump_csv:
-        description: "結束後 dump financials_quarterly.csv 並 commit(預設 true)"
+        default: "parquet"
+      upload_release:
+        description: "Dump 完上傳到 GH Release(預設 true)"
         required: false
         default: "true"
-
-# 主公手動跑多次的範例(2000 檔 universe → 10 批):
-#   batch_start=0    batch_end=200
-#   batch_start=200  batch_end=400
-#   batch_start=400  batch_end=600
-#   ...
-#   batch_start=1800 batch_end=2000
-# 每批 30-60 min(視 FinMind throttle),quota 重置(免費 token 1 小時/600 calls)。
 
 concurrency:
   group: backfill-financials
@@ -84,6 +74,7 @@ jobs:
       - name: Init universe + preload financials snapshot
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/daily_fetch.py || true
           python -c "
@@ -96,18 +87,13 @@ jobs:
       - name: Run financials backfill
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-          # FINMIND_LONG_BACKOFF 不再對 402 生效(_api_call 對 quota error 直接 fail-fast)
-          # 留著讓非 quota 的暫時錯誤吃長 backoff(網路抖動 / 5xx)
           FINMIND_LONG_BACKOFF: "1"
         run: |
           ARGS="--years ${{ inputs.years || '5' }}"
           ARGS="$ARGS --sleep ${{ inputs.sleep || '0.5' }}"
-          ARGS="$ARGS --batch-start ${{ inputs.batch_start || '0' }}"
-          ARGS="$ARGS --batch-end ${{ inputs.batch_end || '200' }}"
-          ARGS="$ARGS --max-stocks ${{ inputs.max_stocks || '200' }}"
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          if [ "${{ inputs.dump_csv }}" = "true" ]; then ARGS="$ARGS --dump-csv"; fi
+          ARGS="$ARGS --dump-format ${{ inputs.dump_format }}"
           echo "Running: python scripts/backfill_financials.py $ARGS"
           python scripts/backfill_financials.py $ARGS
 
@@ -125,31 +111,70 @@ jobs:
               print(f'[VERIFY] financials.quarterly: {row[0]} rows / {row[1]} 不同 stock_id / 範圍 {row[2]} ~ {row[3]}')
           "
 
-      - name: Commit & push financials_quarterly.csv
-        if: inputs.dump_csv == 'true'
+      - name: Upload snapshot to GitHub Release
+        if: inputs.upload_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FMT="${{ inputs.dump_format }}"
+          if [ "$FMT" = "parquet" ]; then
+            FILE="data/twse_snapshot/financials_quarterly.parquet"
+          else
+            FILE="data/twse_snapshot/financials_quarterly.csv"
+          fi
+          if [ ! -f "$FILE" ]; then
+            echo "[RELEASE] $FILE 不存在,skip upload"
+            exit 0
+          fi
+          TAG="snapshot-financials-$(date +%Y-%m-%d)"
+          NOTES="Backfill financials.quarterly $(stat -c%s "$FILE") bytes"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "[RELEASE] tag $TAG 已存在,直接 upload --clobber"
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" "$FILE" \
+            --repo "${{ github.repository }}" \
+            --clobber
+          python -c "
+          from pathlib import Path
+          from src import snapshot_release as sr
+          f = Path('$FILE')
+          sr.update_release_cache(
+              snapshot_dir='data/twse_snapshot',
+              tag='$TAG',
+              assets=[{'name': f.name, 'size': f.stat().st_size, 'sha256': sr.compute_sha256(f)}],
+              notes='financials backfill',
+          )
+          "
+          echo "[RELEASE] uploaded $FILE to $TAG"
+
+      - name: Commit .snapshot_releases.json (manifest only — parquet 不入 git)
+        if: inputs.upload_release == 'true'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/twse_snapshot/financials_quarterly.csv 2>/dev/null || true
+          git add data/twse_snapshot/.snapshot_releases.json 2>/dev/null || true
           if git diff --staged --quiet; then
-            echo "No changes to financials_quarterly.csv"
+            echo "[COMMIT] no manifest changes"
             exit 0
           fi
-          git commit -m "chore(snapshot): backfill financials.quarterly [skip ci]"
+          git commit -m "chore(snapshot): update financials release manifest [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main || {
-              echo "rebase failed — abort and bail"
               git rebase --abort || true
               exit 1
             }
             if git push origin HEAD:main; then
-              echo "push OK on attempt $i"
+              echo "[COMMIT] push OK on attempt $i"
               exit 0
             fi
-            echo "push rejected (attempt $i), retry"
             sleep $((i * 5))
           done
-          echo "push failed after 5 retries"
           exit 1
 
       - name: Upload backfill log artifact

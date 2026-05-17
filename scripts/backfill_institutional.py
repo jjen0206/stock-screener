@@ -36,11 +36,15 @@ CLI
     # 自訂 sleep / retry
     python scripts/backfill_institutional.py --sleep 2.0 --max-retries 5
 
-    # 補完後同時 dump 進 data/twse_snapshot/institutional.parquet(雲端 reload 用,zstd 壓縮)
+    # 補完後同時 dump 進 data/twse_snapshot/institutional.csv(cloud reload 需要)
+    python scripts/backfill_institutional.py --dump-csv
+
+    # Parquet 格式(~1/5 大小,避開 GitHub 100MB git push 上限)
     python scripts/backfill_institutional.py --dump-format parquet
 
-    # 舊行為(CSV)— 22 月全市場約 280MB,撞 GitHub 100MB 上限,僅 debug 用
-    python scripts/backfill_institutional.py --dump-format csv
+    # 跑完上傳到 GH Release(institutional 22 月 backfill 已撞 100MB),
+    # GH workflow 用 GITHUB_TOKEN secret 即可
+    python scripts/backfill_institutional.py --dump-format parquet --upload-release
 
 Exit code
 ---------
@@ -644,50 +648,24 @@ def backfill_one_date(
     return len(combined), source
 
 
-def _load_existing_snapshot() -> pd.DataFrame:
-    """讀既有 institutional 快照(parquet 優先,fallback csv,都沒 → 空 DF)。
-
-    回 DataFrame schema 跟 db.institutional 表一致(stock_id, date, foreign_buy_sell,
-    trust_buy_sell, dealer_buy_sell, total_buy_sell)。
-    """
-    pq = SNAPSHOT_DIR / "institutional.parquet"
-    csv = SNAPSHOT_DIR / "institutional.csv"
-    if pq.exists():
-        try:
-            df = pd.read_parquet(pq)
-            if "stock_id" in df.columns:
-                df["stock_id"] = df["stock_id"].astype(str)
-            return df
-        except Exception as ex:  # noqa: BLE001
-            logger.warning("讀既有 parquet 失敗,fallback csv: %s", ex)
-    if csv.exists():
-        try:
-            return pd.read_csv(csv, dtype={"stock_id": str})
-        except pd.errors.EmptyDataError:
-            return pd.DataFrame()
-    return pd.DataFrame()
-
-
 def dump_snapshot(
     start: str,
     end: str,
-    fmt: str = "parquet",
     db_path: str | Path | None = None,
-) -> int:
-    """把 [start, end] 範圍的 institutional 資料 dump 成 snapshot 檔。
+    *,
+    fmt: str = "csv",
+) -> tuple[Path | None, int]:
+    """Dump [start, end] 的 institutional 資料 → snapshot 檔(CSV 或 Parquet)。
 
-    `fmt` ∈ {'parquet', 'csv'}:
-      - 'parquet'(預設):寫 institutional.parquet,zstd level 9 壓縮
-        (對 22 月 ~280MB CSV 壓到 ~30MB,避過 GitHub 100MB single-file 上限)
-      - 'csv':寫 institutional.csv(舊行為,debug / 向後相容)
+    - `fmt='csv'`: 走原本「跟既有資料 merge → 去重 by (stock_id, date)」邏輯,
+      保持向後相容(institutional.csv 同名同 schema)
+    - `fmt='parquet'`: 直接寫 `institutional.parquet`(no merge — parquet 走 release
+      路徑,單檔即一次 backfill 的完整快照,不跟舊檔合)
 
-    既有 snapshot(parquet/csv 任一)讀進來 merge,同 (stock_id, date) 用 new 蓋掉。
+    Returns:
+      (out_path, row_count) — DB 空時回 (None, 0)
     """
-    if fmt not in ("parquet", "csv"):
-        raise ValueError(f"fmt 必須是 'parquet' 或 'csv',收到: {fmt!r}")
-
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-
     with db.get_conn(db_path) as conn:
         new_df = pd.read_sql(
             "SELECT stock_id, date, foreign_buy_sell, trust_buy_sell, "
@@ -696,48 +674,49 @@ def dump_snapshot(
             conn, params=(start, end),
         )
     if new_df.empty:
-        logger.info(
-            "DB 沒有 [%s, %s] 範圍的資料,skip dump %s",
-            start, end, fmt,
-        )
-        return 0
-    if "stock_id" in new_df.columns:
-        new_df["stock_id"] = new_df["stock_id"].astype(str)
-
-    old_df = _load_existing_snapshot()
-    if not old_df.empty:
-        merged = pd.concat([old_df, new_df], ignore_index=True)
-        merged = merged.drop_duplicates(
-            subset=["stock_id", "date"], keep="last",
-        ).sort_values(["date", "stock_id"]).reset_index(drop=True)
-    else:
-        merged = new_df
+        logger.info("DB 沒有 [%s, %s] 範圍的資料,skip dump", start, end)
+        return None, 0
 
     if fmt == "parquet":
         out_path = SNAPSHOT_DIR / "institutional.parquet"
-        # zstd level 9:壓比 ~9-10x vs CSV;pyarrow 預設 engine
-        merged.to_parquet(
-            out_path, compression="zstd", compression_level=9, index=False,
+        try:
+            new_df.to_parquet(out_path, index=False, compression="zstd")
+        except (ImportError, ValueError) as ex:
+            # pyarrow / fastparquet 缺 → fallback snappy
+            logger.warning("zstd 失敗(%s),改用 snappy", ex)
+            new_df.to_parquet(out_path, index=False, compression="snappy")
+        size_mb = out_path.stat().st_size / (1024 * 1024)
+        logger.info(
+            "[PARQUET] 寫 %s: %d 行 (%.1f MB)",
+            out_path.name, len(new_df), size_mb,
         )
-    else:
-        out_path = SNAPSHOT_DIR / "institutional.csv"
-        merged.to_csv(out_path, index=False)
+        return out_path, len(new_df)
 
-    logger.info(
-        "[%s] 寫 %s: %d 行(merge 後)",
-        fmt.upper(), out_path.name, len(merged),
-    )
-    return len(merged)
+    # csv path: merge 邏輯保留
+    out_path = SNAPSHOT_DIR / "institutional.csv"
+    if out_path.exists():
+        try:
+            old_df = pd.read_csv(out_path, dtype={"stock_id": str})
+        except pd.errors.EmptyDataError:
+            old_df = pd.DataFrame()
+        merged = pd.concat([old_df, new_df], ignore_index=True)
+        merged = merged.drop_duplicates(
+            subset=["stock_id", "date"], keep="last",
+        ).sort_values(["date", "stock_id"])
+    else:
+        merged = new_df
+
+    merged.to_csv(out_path, index=False)
+    logger.info("[CSV] 寫 %s: %d 行(merge 後)", out_path.name, len(merged))
+    return out_path, len(merged)
 
 
 def dump_snapshot_csv(
     start: str, end: str, db_path: str | Path | None = None,
 ) -> int:
-    """向後相容 wrapper:呼叫 dump_snapshot(fmt='csv')。
-
-    舊測試 / 外部 caller 用。新流程請用 dump_snapshot(..., fmt='parquet')。
-    """
-    return dump_snapshot(start, end, fmt="csv", db_path=db_path)
+    """Back-compat shim: `--dump-csv` 路徑用,等同 dump_snapshot(fmt='csv')。"""
+    _, n = dump_snapshot(start, end, db_path=db_path, fmt="csv")
+    return n
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -765,19 +744,27 @@ def main(argv: list[str] | None = None) -> int:
         help="關掉 FinMind fallback(只用 TWSE/TPEx)",
     )
     parser.add_argument(
-        "--dump-format", choices=["parquet", "csv", "none"], default="none",
+        "--dump-csv", action="store_true",
+        help="跑完後把資料 dump 進 data/twse_snapshot/institutional.csv(向後相容,等同 --dump-format csv)",
+    )
+    parser.add_argument(
+        "--dump-format", choices=["csv", "parquet"], default=None,
         help=(
-            "跑完後 dump 進 data/twse_snapshot/institutional.{parquet|csv}。"
-            "parquet 預設用 zstd lvl 9(壓比 ~9x,避過 GitHub 100MB 上限);"
-            "csv 為舊行為(22 月全量 ~280MB)。預設 none = 不 dump"
+            "Snapshot 格式 — csv(merge 模式,原本 default)/ parquet(~1/5 大小,給 GH Release 用)。"
+            "與 --dump-csv 互斥(--dump-csv 等同 --dump-format csv)"
         ),
     )
     parser.add_argument(
-        "--dump-csv", action="store_true",
+        "--upload-release", action="store_true",
         help=(
-            "[DEPRECATED] 等同 --dump-format csv,留著相容既有 workflow。"
-            "新用法請改 --dump-format parquet"
+            "Dump 完上傳到 GH Release(tag=snapshot-institutional-YYYY-MM-DD)。"
+            "需要 `gh` CLI + GITHUB_TOKEN/GITHUB_PAT。"
+            "預設只在 --dump-format=parquet 才有意義(避開 100MB 上限)"
         ),
+    )
+    parser.add_argument(
+        "--release-tag", default=None,
+        help="覆寫 release tag(預設 snapshot-institutional-{YYYY-MM-DD})",
     )
     parser.add_argument(
         "--progress-every", type=int, default=50,
@@ -874,12 +861,33 @@ def main(argv: list[str] | None = None) -> int:
     if source_counts:
         logger.info("[BACKFILL-INST] 來源分布: %s", source_counts)
 
-    # --dump-csv (legacy) → --dump-format csv
-    dump_fmt = args.dump_format
-    if args.dump_csv and dump_fmt == "none":
+    # 解析 --dump-format / --dump-csv:--dump-csv 等同 --dump-format csv
+    dump_fmt: str | None = args.dump_format
+    if args.dump_csv and dump_fmt is None:
         dump_fmt = "csv"
-    if dump_fmt != "none":
-        dump_snapshot(args.start, args.end, fmt=dump_fmt)
+
+    if dump_fmt:
+        out_path, n_rows = dump_snapshot(
+            args.start, args.end, fmt=dump_fmt,
+        )
+        if args.upload_release and out_path and n_rows > 0:
+            from src.snapshot_release import (
+                upload_snapshot_to_release, make_snapshot_tag,
+            )
+            tag = args.release_tag or make_snapshot_tag("institutional")
+            notes = (
+                f"Backfill institutional {args.start} ~ {args.end},"
+                f" {n_rows} rows ({out_path.name})"
+            )
+            ok = upload_snapshot_to_release(
+                tag, [out_path], notes=notes, snapshot_dir=SNAPSHOT_DIR,
+            )
+            if ok:
+                logger.info("[RELEASE] uploaded %s → %s", out_path.name, tag)
+            else:
+                logger.warning(
+                    "[RELEASE] upload failed (snapshot 仍在 SQLite,可手動補)",
+                )
 
     # exit code: fail > 25% 視為失敗
     if fail > 0 and fail > len(todo) // 4:

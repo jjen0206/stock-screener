@@ -9,8 +9,13 @@ name: Backfill Institutional (one-shot manual)
 # 完整 22 月: ~440 工作日 × 2 endpoints × (HTTP + sleep) ≈ 30-60 min。
 # 給 GH runner 120 min 上限應該綽綽有餘。
 #
-# 結果:更新 data/twse_snapshot/institutional.csv 跟 commit 回 main,讓 Streamlit
-# Cloud 下次 reload 就有完整歷史。
+# Storage 策略(2026-05-17 改):
+#   - 22 月 institutional ~150MB,直接 commit 進 git push 會撞 100MB 上限
+#   - **改 dump parquet + 上傳 GH Release**(snapshot-institutional-YYYY-MM-DD),
+#     不污染 git history、零成本、versioned 天然
+#   - Cloud `src.database.preload_snapshots` 啟動時若本地缺 parquet → 自動從 latest
+#     release 拉 → load 進 SQLite
+#   - 既有 CSV 路徑仍保留,當作向後相容 fallback
 
 on:
   workflow_dispatch:
@@ -28,13 +33,13 @@ on:
         required: false
         default: "2.5"
       dump_format:
-        description: "snapshot 輸出格式: parquet (預設,zstd ~30MB) / csv (~280MB,撞 100MB 上限) / none"
+        description: "Dump 格式: parquet(預設,給 release) / csv(向後相容,小型 backfill)"
         required: false
         default: "parquet"
-      dump_csv:
-        description: "[DEPRECATED] 等同 dump_format=csv,保留相容,預設 false"
+      upload_release:
+        description: "Dump 完上傳到 GH Release(預設 true)"
         required: false
-        default: "false"
+        default: "true"
 
 concurrency:
   group: backfill-institutional
@@ -63,47 +68,53 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Preload existing institutional snapshot → SQLite (skip already-fetched dates)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python -c "
           import pandas as pd
           from pathlib import Path
           from src import database as db
+          from src import snapshot_release as sr
           db.init_db()
-          pq = Path('data/twse_snapshot/institutional.parquet')
-          csv = Path('data/twse_snapshot/institutional.csv')
-          src_path = None
-          if pq.exists():
-              df = pd.read_parquet(pq); src_path = 'parquet'
-              if 'stock_id' in df.columns: df['stock_id'] = df['stock_id'].astype(str)
-          elif csv.exists():
-              df = pd.read_csv(csv, dtype={'stock_id': str}); src_path = 'csv'
-          else:
-              df = None
-          if df is not None and not df.empty:
-              records = df.to_dict('records')
-              for r in records:
-                  for k, v in list(r.items()):
-                      if pd.isna(v): r[k] = None
-              db.upsert_institutional(records)
-              print(f'[PRELOAD] {len(records)} rows from {src_path} → SQLite')
-          else:
-              print('[PRELOAD] no existing institutional.parquet/csv')
+          # 先試從 GH Release 拉最新 parquet(若有)
+          tag = sr.get_latest_snapshot_tag('snapshot-institutional-')
+          if tag:
+              p = sr.download_snapshot_from_release(
+                  tag, 'institutional.parquet',
+                  dest=Path('data/twse_snapshot'),
+                  snapshot_dir=Path('data/twse_snapshot'),
+              )
+              if p and p.exists():
+                  df = pd.read_parquet(p)
+                  df['stock_id'] = df['stock_id'].astype(str)
+                  records = df.to_dict('records')
+                  db.upsert_institutional(records)
+                  print(f'[PRELOAD] {len(records)} rows from release {tag}')
+          # 向後相容:CSV 也載入
+          p = Path('data/twse_snapshot/institutional.csv')
+          if p.exists():
+              df = pd.read_csv(p, dtype={'stock_id': str})
+              if not df.empty:
+                  records = df.to_dict('records')
+                  for r in records:
+                      for k, v in list(r.items()):
+                          if pd.isna(v): r[k] = None
+                  db.upsert_institutional(records)
+                  print(f'[PRELOAD] {len(records)} rows from CSV')
           "
 
       - name: Run backfill (TWSE + TPEx, FinMind fallback)
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
-          # dump_csv=true 為 legacy alias → 強制覆寫 dump_format
-          DUMP_FMT="${{ inputs.dump_format }}"
-          if [ "${{ inputs.dump_csv }}" = "true" ]; then DUMP_FMT="csv"; fi
           python scripts/backfill_institutional.py \
             --start "${{ inputs.start }}" \
             --end "${{ inputs.end }}" \
             --sleep "${{ inputs.sleep }}" \
             --max-retries 3 \
             --progress-every 25 \
-            --dump-format "$DUMP_FMT"
+            --dump-format "${{ inputs.dump_format }}"
 
       - name: Verify backfilled rows
         run: |
@@ -118,40 +129,72 @@ jobs:
               print(f'[VERIFY] institutional 覆蓋區間: {row[0]} ~ {row[1]}')
           "
 
-      - name: Commit & push updated institutional snapshot
-        if: inputs.dump_format != 'none'
+      - name: Upload snapshot to GitHub Release
+        if: inputs.upload_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # parquet 進 git(預設,~30MB),csv 已被 .gitignore 阻擋 → workflow 用 csv mode
-          # 只能跑 dry-run 看大小,推不上去
-          DUMP_FMT="${{ inputs.dump_format }}"
-          if [ "${{ inputs.dump_csv }}" = "true" ]; then DUMP_FMT="csv"; fi
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ "$DUMP_FMT" = "parquet" ]; then
-            git add data/twse_snapshot/institutional.parquet
+          FMT="${{ inputs.dump_format }}"
+          if [ "$FMT" = "parquet" ]; then
+            FILE="data/twse_snapshot/institutional.parquet"
           else
-            # csv 路徑(legacy)— .gitignore 會阻擋,需 -f 強制 add
-            git add -f data/twse_snapshot/institutional.csv
+            FILE="data/twse_snapshot/institutional.csv"
           fi
-          if git diff --staged --quiet; then
-            echo "No changes to institutional.$DUMP_FMT"
+          if [ ! -f "$FILE" ]; then
+            echo "[RELEASE] $FILE 不存在,skip upload"
             exit 0
           fi
-          git commit -m "chore(snapshot): backfill institutional ${{ inputs.start }} ~ ${{ inputs.end }} ($DUMP_FMT) [skip ci]"
+          TAG="snapshot-institutional-$(date +%Y-%m-%d)"
+          NOTES="Backfill institutional ${{ inputs.start }} ~ ${{ inputs.end }} ($(stat -c%s "$FILE") bytes)"
+          # 用 gh CLI(GH Actions runner 預裝)
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "[RELEASE] tag $TAG 已存在,直接 upload --clobber"
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" "$FILE" \
+            --repo "${{ github.repository }}" \
+            --clobber
+          # 也把 .snapshot_releases.json cache 寫進去 commit(讓雲端 boot 知道 SHA)
+          python -c "
+          from pathlib import Path
+          from src import snapshot_release as sr
+          f = Path('$FILE')
+          sr.update_release_cache(
+              snapshot_dir='data/twse_snapshot',
+              tag='$TAG',
+              assets=[{'name': f.name, 'size': f.stat().st_size, 'sha256': sr.compute_sha256(f)}],
+              notes='${{ inputs.start }} ~ ${{ inputs.end }}',
+          )
+          "
+          echo "[RELEASE] uploaded $FILE to $TAG"
+
+      - name: Commit .snapshot_releases.json (manifest only — parquet 不入 git)
+        if: inputs.upload_release == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/.snapshot_releases.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "[COMMIT] no manifest changes"
+            exit 0
+          fi
+          git commit -m "chore(snapshot): update institutional release manifest [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main || {
-              echo "rebase failed — abort and bail"
               git rebase --abort || true
               exit 1
             }
             if git push origin HEAD:main; then
-              echo "push OK on attempt $i"
+              echo "[COMMIT] push OK on attempt $i"
               exit 0
             fi
-            echo "push rejected (attempt $i), retry"
             sleep $((i * 5))
           done
-          echo "push failed after 5 retries"
           exit 1
 
       - name: Upload backfill log artifact

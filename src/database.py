@@ -1995,6 +1995,72 @@ def cache_health_summary(db_path: str | Path | None = None) -> dict:
     }
 
 
+def _ensure_snapshot_present(
+    snapshot_dir: Path,
+    kind: str,
+    basename: str,
+) -> tuple[Path | None, str | None]:
+    """三層 fallback 找 snapshot 檔(2026-05-17 加,GH Release 路徑)。
+
+    1. 本地 `{snapshot_dir}/{basename}.parquet` 存在 → 直接用(零 IO)
+    2. 否則 release enabled + 找到 `snapshot-{kind}-*` latest tag → download parquet
+    3. 否則本地 `{snapshot_dir}/{basename}.csv` 存在(向後相容)→ 用 CSV
+    4. 都沒有 → (None, None)
+
+    Returns:
+        (path, fmt) — fmt ∈ {'parquet', 'csv'}
+
+    Notes:
+        - Release download 失敗(沒網 / 不在 release / SHA mismatch)→ silently
+          降級到 CSV(若 CSV 存在),沒 CSV 也就 skip 整個 section
+        - 為避免 import cycle / 啟動延遲,snapshot_release 模組是 lazy import
+        - kind 例:'institutional' → prefix='snapshot-institutional-'
+    """
+    snapshot_dir = Path(snapshot_dir)
+    parquet_path = snapshot_dir / f"{basename}.parquet"
+    csv_path = snapshot_dir / f"{basename}.csv"
+
+    if parquet_path.exists():
+        return parquet_path, "parquet"
+
+    try:
+        from src import snapshot_release as sr
+        if sr.is_releases_enabled():
+            tag = sr.get_latest_snapshot_tag(f"snapshot-{kind}-")
+            if tag:
+                got = sr.download_snapshot_from_release(
+                    tag,
+                    f"{basename}.parquet",
+                    dest=snapshot_dir,
+                    snapshot_dir=snapshot_dir,
+                )
+                if got and got.exists():
+                    logger.info(
+                        "[PRELOAD] %s pulled from release %s",
+                        basename, tag,
+                    )
+                    return got, "parquet"
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("[PRELOAD] release lookup for %s 失敗: %s", kind, ex)
+
+    if csv_path.exists():
+        return csv_path, "csv"
+    return None, None
+
+
+def _read_snapshot(path: Path, fmt: str, **read_csv_kwargs):
+    """Lazy-load helper 對應上面 _ensure_snapshot_present。"""
+    import pandas as pd
+    if fmt == "parquet":
+        df = pd.read_parquet(path)
+        # parquet 不會自動把 stock_id 維持 str → 顯式轉
+        for col in ("stock_id", "sid"):
+            if col in df.columns:
+                df[col] = df[col].astype(str)
+        return df
+    return pd.read_csv(path, **read_csv_kwargs)
+
+
 def preload_snapshots(
     snapshot_dir: str | Path | None = None,
     db_path: str | Path | None = None,
@@ -2010,7 +2076,7 @@ def preload_snapshots(
 
     Loads(順序保留依賴關係:stocks 先行,daily_prices/institutional 後續):
       stocks.csv / daily_metrics.csv / financials_quarterly.csv /
-      daily_prices.csv / institutional.{parquet,csv} / taiex.csv /
+      daily_prices.csv / institutional.csv / taiex.csv /
       watchlist.csv(2026-05-07 加,讓 actions runner 看到主公的關注股
       → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)/
       pick_outcomes.csv(weekly backtest_picks.py dump,讓 daily-notify
@@ -2069,10 +2135,12 @@ def preload_snapshots(
             upsert_daily_metrics(rows, db_path=db_path)
             counts["daily_metrics"] = len(rows)
 
-    # 3. financials.quarterly
-    fin_csv = snapshot_dir / "financials_quarterly.csv"
-    if fin_csv.exists():
-        df = pd.read_csv(fin_csv, dtype={"stock_id": str})
+    # 3. financials.quarterly — parquet (release) preferred, csv backward-compat
+    fin_path, fin_fmt = _ensure_snapshot_present(
+        snapshot_dir, "financials", "financials_quarterly",
+    )
+    if fin_path is not None:
+        df = _read_snapshot(fin_path, fin_fmt, dtype={"stock_id": str})
         rows = []
         for _, r in df.iterrows():
             rows.append({
@@ -2130,21 +2198,12 @@ def preload_snapshots(
             upsert_daily_prices(records, db_path=db_path)
             counts["daily_prices"] = len(records)
 
-    # 5. institutional — parquet(zstd,~30MB)優先,fallback csv(~280MB,可能撞 GH 100MB 上限)
-    inst_parquet = snapshot_dir / "institutional.parquet"
-    inst_csv = snapshot_dir / "institutional.csv"
-    inst_path: Path | None = None
-    inst_reader = None
-    if inst_parquet.exists():
-        inst_path = inst_parquet
-        inst_reader = lambda p: pd.read_parquet(p)  # noqa: E731
-    elif inst_csv.exists():
-        inst_path = inst_csv
-        inst_reader = lambda p: pd.read_csv(p, dtype={"stock_id": str})  # noqa: E731
-    if inst_path is not None and inst_reader is not None:
-        df = inst_reader(inst_path)
-        if "stock_id" in df.columns:
-            df["stock_id"] = df["stock_id"].astype(str)
+    # 5. institutional — parquet (release) preferred, csv backward-compat
+    inst_path, inst_fmt = _ensure_snapshot_present(
+        snapshot_dir, "institutional", "institutional",
+    )
+    if inst_path is not None:
+        df = _read_snapshot(inst_path, inst_fmt, dtype={"stock_id": str})
         records = df.to_dict("records")
         for r in records:
             for k, v in list(r.items()):
