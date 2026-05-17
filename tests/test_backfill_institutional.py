@@ -540,11 +540,12 @@ def test_dump_snapshot_parquet_writes_compressed_file(tmp_db, monkeypatch, tmp_p
          "dealer_buy_sell": 0, "total_buy_sell": -5},
     ])
 
-    n = bi.dump_snapshot("2025-11-01", "2025-11-30", fmt="parquet")
+    out_path, n = bi.dump_snapshot("2025-11-01", "2025-11-30", fmt="parquet")
     assert n == 2
 
     out = snapshot_dir / "institutional.parquet"
     assert out.exists()
+    assert out_path == out
     # csv 不該被產出(parquet-only mode)
     assert not (snapshot_dir / "institutional.csv").exists()
 
@@ -593,7 +594,7 @@ def test_dump_snapshot_parquet_merges_with_existing_parquet(
          "dealer_buy_sell": 0, "total_buy_sell": 999},
     ])
 
-    n = bi.dump_snapshot("2025-11-03", "2025-11-04", fmt="parquet")
+    _, n = bi.dump_snapshot("2025-11-03", "2025-11-04", fmt="parquet")
     assert n >= 3
 
     df = pd.read_parquet(snapshot_dir / "institutional.parquet")

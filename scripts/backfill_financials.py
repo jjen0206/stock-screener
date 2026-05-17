@@ -45,6 +45,12 @@ CLI
     # Dump 完上傳到 GH Release(tag=snapshot-financials-YYYY-MM-DD)
     python scripts/backfill_financials.py --dump-format parquet --upload-release
 
+    # 分批跑(避過 FinMind quota 撞牆)— stocks 表 row 0~200
+    python scripts/backfill_financials.py --batch-start 0 --batch-end 200
+
+    # 單次最多跑 200 檔(default 200,避免一個 workflow run 內把 quota 燒乾)
+    python scripts/backfill_financials.py --max-stocks 200
+
 Exit code
 ---------
 - 0  成功(全部 OK 或失敗 < 25%)
@@ -100,9 +106,18 @@ def backfill_one(
       ok=True, status='ok'        → 抓到並寫入(或本來就有 cache)
       ok=False, status='empty'    → 回空 DataFrame(FinMind 該股無資料,可能 ETF/受益憑證)
       ok=False, status='error'    → 例外(token 不足 / 網路 / FinMindAPIError)
+
+    Raises:
+      FinMindQuotaError: status=402 quota 爆 — caller(main)該 fail-fast 整批中斷,
+        不再 retry / sleep。
     """
+    # 在 lazy import 區拿 quota class(避免頂層 import 拖慢 --help)
+    from src.data_fetcher import FinMindQuotaError
     try:
         df = fetch_fn(sid, start, end)
+    except FinMindQuotaError:
+        # 不 swallow — 主迴圈 catch 後 log + 提早中斷
+        raise
     except Exception as e:  # noqa: BLE001
         logger.warning("[BACKFILL-FIN] %s fail: %s: %s", sid, type(e).__name__, e)
         return False, "error"
@@ -156,6 +171,28 @@ def main(argv: list[str] | None = None) -> int:
         "--release-tag", default=None,
         help="覆寫 release tag(預設 snapshot-financials-{YYYY-MM-DD})",
     )
+    parser.add_argument(
+        "--batch-start", type=int, default=0,
+        help=(
+            "從 universe 的第 N 檔開始(0-based,inclusive)。"
+            "搭配 --batch-end 做分批 dispatch — 例 0/200 跑前 200 檔,200/400 跑下一批,"
+            "避過 FinMind quota 撞牆"
+        ),
+    )
+    parser.add_argument(
+        "--batch-end", type=int, default=0,
+        help=(
+            "跑到 universe 的第 N 檔結束(0-based,exclusive)。0 = 跑到 universe 末尾。"
+            "搭配 --batch-start"
+        ),
+    )
+    parser.add_argument(
+        "--max-stocks", type=int, default=200,
+        help=(
+            "單次 run 上限檔數(default 200)。即使 batch 範圍更大,也只跑這麼多 — "
+            "防 FinMind quota(600/hr 免費 token,2000 檔一次跑會撞)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     setup_file_logging("backfill_financials")
@@ -173,14 +210,43 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # 1. batch range:對 universe(已排序 stable)切 [batch_start, batch_end) 視窗
+    #    讓主公手動分批 dispatch(0/200 → 200/400 → ...),避過 FinMind quota
+    batch_lo = max(0, args.batch_start)
+    batch_hi = args.batch_end if args.batch_end > 0 else len(universe)
+    if batch_lo >= len(universe):
+        print(
+            f"[BACKFILL-FIN] batch-start={batch_lo} >= universe size={len(universe)} "
+            "→ nothing to do",
+            flush=True,
+        )
+        return 0
+    if batch_lo >= batch_hi:
+        print(
+            f"[BACKFILL-FIN] batch-start={batch_lo} >= batch-end={batch_hi} → 區間空,exit",
+            file=sys.stderr, flush=True,
+        )
+        return 2
+    universe_slice = universe[batch_lo:batch_hi]
+
+    # 2. skip 已有 financials.quarterly 的 sid(除非 --force)
     if args.force:
-        todo = list(universe)
+        todo = list(universe_slice)
     else:
         have = stocks_with_financials()
-        todo = [s for s in universe if s not in have]
+        todo = [s for s in universe_slice if s not in have]
 
     if args.limit > 0:
         todo = todo[: args.limit]
+
+    # 3. 單次 run 上限(預設 200,防 quota 撞牆)
+    if args.max_stocks > 0 and len(todo) > args.max_stocks:
+        print(
+            f"[BACKFILL-FIN] todo={len(todo)} > max-stocks={args.max_stocks},"
+            f"截到前 {args.max_stocks} 檔",
+            flush=True,
+        )
+        todo = todo[: args.max_stocks]
 
     today = date.today().isoformat()
     start = (date.today() - timedelta(days=args.years * 365 + 30)).isoformat()
@@ -206,14 +272,34 @@ def main(argv: list[str] | None = None) -> int:
                            release_tag=args.release_tag)
         return 0
 
+    # lazy import:--help 不要 import data_fetcher
+    from src.data_fetcher import FinMindQuotaError
+
     n = len(todo)
     ok = fail = empty = 0
     t0 = time.time()
+    quota_hit = False
 
     for i, sid in enumerate(todo, start=1):
-        success, status = backfill_one(
-            sid, start, today, fetch_quarterly_financials,
-        )
+        try:
+            success, status = backfill_one(
+                sid, start, today, fetch_quarterly_financials,
+            )
+        except FinMindQuotaError as ex:
+            # quota 爆 — 沒救,不 retry / 不繼續燒 sleep,馬上中斷整批
+            logger.warning(
+                "[BACKFILL-FIN] FinMind quota 爆 (%s),中斷整批 — "
+                "改日再跑或加 token: %s",
+                sid, ex,
+            )
+            print(
+                f"[BACKFILL-FIN] ⚠ FinMind quota 爆({sid}),中斷整批 — "
+                f"改日再跑或加 token: {ex}",
+                file=sys.stderr, flush=True,
+            )
+            quota_hit = True
+            break
+
         if success:
             ok += 1
         elif status == "empty":
@@ -256,7 +342,9 @@ def main(argv: list[str] | None = None) -> int:
         _dump_snapshot(fmt=dump_fmt, upload_release=args.upload_release,
                        release_tag=args.release_tag)
 
-    # exit code:失敗 > 25% 視為整體失敗
+    # exit code:quota 爆 / 失敗 > 25% 視為整體失敗(workflow 該看到紅燈)
+    if quota_hit:
+        return 1
     if fail > 0 and fail > n // 4:
         return 1
     return 0

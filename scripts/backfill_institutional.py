@@ -665,6 +665,9 @@ def dump_snapshot(
     Returns:
       (out_path, row_count) — DB 空時回 (None, 0)
     """
+    if fmt not in ("csv", "parquet"):
+        raise ValueError(f"Unsupported fmt={fmt!r} — only 'csv' / 'parquet'")
+
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     with db.get_conn(db_path) as conn:
         new_df = pd.read_sql(
@@ -679,18 +682,44 @@ def dump_snapshot(
 
     if fmt == "parquet":
         out_path = SNAPSHOT_DIR / "institutional.parquet"
+        # 既有 parquet / 同 schema csv → merge,同 (sid, date) 用 DB 蓋掉
+        old_parts: list[pd.DataFrame] = []
+        if out_path.exists():
+            try:
+                old_parts.append(
+                    pd.read_parquet(out_path).astype({"stock_id": str}),
+                )
+            except Exception as ex:  # noqa: BLE001
+                logger.warning("讀既有 parquet 失敗(%s),skip merge", ex)
+        else:
+            legacy_csv = SNAPSHOT_DIR / "institutional.csv"
+            if legacy_csv.exists():
+                try:
+                    old_parts.append(
+                        pd.read_csv(legacy_csv, dtype={"stock_id": str}),
+                    )
+                except Exception as ex:  # noqa: BLE001
+                    logger.warning("讀 legacy CSV fallback 失敗(%s)", ex)
+        if old_parts:
+            merged = pd.concat([*old_parts, new_df], ignore_index=True)
+            merged = merged.drop_duplicates(
+                subset=["stock_id", "date"], keep="last",
+            ).sort_values(["date", "stock_id"]).reset_index(drop=True)
+        else:
+            merged = new_df
+
         try:
-            new_df.to_parquet(out_path, index=False, compression="zstd")
+            merged.to_parquet(out_path, index=False, compression="zstd")
         except (ImportError, ValueError) as ex:
             # pyarrow / fastparquet 缺 → fallback snappy
             logger.warning("zstd 失敗(%s),改用 snappy", ex)
-            new_df.to_parquet(out_path, index=False, compression="snappy")
+            merged.to_parquet(out_path, index=False, compression="snappy")
         size_mb = out_path.stat().st_size / (1024 * 1024)
         logger.info(
             "[PARQUET] 寫 %s: %d 行 (%.1f MB)",
-            out_path.name, len(new_df), size_mb,
+            out_path.name, len(merged), size_mb,
         )
-        return out_path, len(new_df)
+        return out_path, len(merged)
 
     # csv path: merge 邏輯保留
     out_path = SNAPSHOT_DIR / "institutional.csv"
