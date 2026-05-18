@@ -1,0 +1,91 @@
+name: Telegram Bot Poll (every 5 min)
+
+# 雙向問答 daemon — 純拉模式 getUpdates。
+# 設計決策: docs/telegram-bot-serve-decision-2026-05-18.md (方案 D)
+#
+# Cron */5 * * * * UTC = 每 5 分鐘整(台北時間同樣 5 min 一輪,不分時區)。
+# 延遲 = 主公送訊息 → 下個整 5 min 跑 → 最多 5 min。對「路上隨手問股票」夠用。
+#
+# 狀態(last_update_id)用 data/twse_snapshot/telegram_bot_state.csv 持久化,
+# 每次 run 結尾 commit + push 進 main(同 news-notify pattern)。
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送、不更新 offset)"
+        type: boolean
+        default: false
+
+# 同一時間最多 1 個 runner — 雙倍 cron 重疊會造成同一條訊息被處理兩次
+concurrency:
+  group: telegram-bot-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Preload snapshots → SQLite (restore last_update_id)
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          counts = db.preload_snapshots()
+          print('preload counts:', counts)
+          "
+
+      - name: Run telegram_bot_serve --once
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          # AI_ASSISTANT_ENABLED 主公在 secret 設 true/false 都可,缺值默認 true
+          AI_ASSISTANT_ENABLED: ${{ secrets.AI_ASSISTANT_ENABLED }}
+        run: |
+          ARGS="--once"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry"
+          fi
+          echo "Running: python scripts/telegram_bot_serve.py $ARGS"
+          python scripts/telegram_bot_serve.py $ARGS
+
+      - name: Commit & push telegram_bot_state.csv if changed
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_snapshot/telegram_bot_state.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "[TG-BOT] state CSV 無變化(可能無新訊息)"
+            exit 0
+          fi
+          git commit -m "chore(telegram-bot): advance last_update_id [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main || true
+            if git push origin HEAD:main; then
+              echo "[TG-BOT] push OK (attempt $i)"
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::warning::push 失敗 5 次 — 下次 cron 再試"

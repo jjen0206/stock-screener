@@ -632,6 +632,16 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_default_settle_daily_date "
     "ON default_settlement_daily(report_date DESC)",
+    # telegram_bot_state(2026-05-18 加,Telegram 雙向問答 daemon)
+    # 通用 key-value 儲存 daemon runtime state,目前只放 last_update_id
+    # (Telegram getUpdates offset)。CSV snapshot 跨 GHA cron run 持久化。
+    """
+    CREATE TABLE IF NOT EXISTS telegram_bot_state (
+        key         TEXT PRIMARY KEY,
+        value       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -2840,6 +2850,18 @@ def preload_snapshots(
             counts["watchlist"] = n_wl
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] watchlist load 失敗:%s", e)
+
+    # 8b3. telegram_bot_state(2026-05-18 加,Telegram 雙向問答 daemon)
+    # GHA runner 每次 fresh container,SQLite 空 → 沒這個 preload 看不到
+    # last_update_id,getUpdates 永遠從頭拉,重複處理同一條訊息。
+    # CSV 由 telegram-bot-poll.yml workflow 結尾 commit + push 回 repo。
+    try:
+        from src.telegram_bot.state import load_from_csv as _load_tg_state
+        n_tg = _load_tg_state(db_path=db_path)
+        if n_tg > 0:
+            counts["telegram_bot_state"] = n_tg
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] telegram_bot_state load 失敗:%s", e)
 
     # 8c. analyst_targets(法人目標價)— 平日抓 watchlist+picks / 週日抓全市場
     # 雲端容器重啟還原。表已有資料時 INSERT OR REPLACE 不會覆蓋同 (sid, source) PK,
