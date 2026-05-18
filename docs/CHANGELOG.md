@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-05-18 — 🎯 個股軍師判讀（白話化整合 verdict）
+
+### Added
+- **`src/individual_stock_verdict.py`** — 整合 K 線形態 / 警示 / 大盤 regime / ML 機率 / 策略共識 / 題材熱度 / 持倉狀態 → `🟢 可進場` / `🟡 觀望` / `🔴 不進場` 結論:
+  - `compute_verdict(sid, db_path)` — 純資料,回完整 dict:`verdict / verdict_color / score / reasons_pro / reasons_con / action_suggestion / entry_zone / stop_loss / take_profit / signals`
+  - `render_stock_verdict(sid)` — Streamlit render:大字 banner + 進場/不進場理由 list + 軍師建議 + 🟢 才給的三欄(進場價/停損/停利)
+  - `verdict_tag_for_card(sid)` — 卡片 / 推播用短標(`🟢 可進場`)
+  - `latest_pattern_phrase(hits)` + `PATTERN_MEANINGS` — K 線形態白話化(三紅兵 → 「強勢多頭」)
+  - Kill-switch `STOCK_VERDICT_ENABLED=true`(預設 on)
+- **`app.py::_page_stock_detail`** — Header 後、Tabs 前插入「🎯 軍師判讀」section,主公一眼看到結論
+- **`app.py::_render_detail_patterns_section`** — 形態 section 全面白話化:
+  - 「最近一根」改顯「✓ 三紅兵(★★★) — 強勢多頭」
+  - 30 日次數表加「白話解釋」欄(主公看不懂三紅兵就看「強勢多頭」)
+- **`src/ui_cards.py::render_pick_card`** — 卡片加「🎯 軍師判讀:🟢 可進場」短標(`_verdict_tag_cached` `@st.cache_data ttl=60` 避免 138 卡 N×6 SQL)
+- **`src/notifier.py::format_pick_block`** — 推播 pick block 加「🎯 軍師判讀」行,主公手機收訊息一眼看
+- **`tests/test_individual_stock_verdict.py`** — 21 unit test:kill switch / 紅燈警示強制 🔴 / 大盤 bear / 已持倉強制 🟡 / 🟢 才給 entry_zone / verdict_tag_for_card / 訊號不足 graceful return + complete keys schema
+- **`tests/test_page_stock_detail_verdict.py`** — 7 wire + AppTest smoke:公開 API guard / page 接線 / 卡片接線 / notifier 接線 / pattern 白話 helper / 違約股 AppTest 「不進場」字樣出現 / kill switch off 不顯 banner
+
+### 設計考量
+- **白話為主**:主公看「三紅兵 4 / 槌子線 2」看不懂 → 強制翻譯成「強勢多頭」「跌深反彈訊號」
+- **紅燈一定擋**:default_settlement / full_cash active → 強制 🔴(不管其他訊號)
+- **已持倉強制觀望**:不重複進場,改提醒守停損/停利
+- **🟢 才給數字**:🟡 / 🔴 不給進場價區間,避免主公被「沒結論的數字」誤導
+- **mobile-first**:banner 大字 + 三色塊;卡片短標 14px 粗體;推播一行白話
+
+---
+
 ## 2026-05-17 — 🤖 E ML / 訊號強化(v4 features:籌碼 / 多時間軸 / 產業相對強度)
 
 ### Added

@@ -155,3 +155,4 @@
 - 2026-04-27 修 KeyError(雲端 module cache 落後場景):UI 全改 .get() 防呆
 - 2026-04-27 G1 Telegram 推播完成:notifier 模組 + CLI 腳本 + sidebar 按鈕 + 設定頁教學 + README GitHub Actions 範本;115 passed
 - 2026-05-17 D 績效分析完成:src/performance_analysis.py(pnl/win_rate/attribution/drawdown/summary) + src/strategy_backtest.py(union/intersect 回測 + Jaccard 相關性);「📈 績效分析」4-tab 分頁;system_brief 加 real_performance + Telegram 週報「📈 本週真實績效」section;47 個新測試;2030 passed;kill-switch `PERFORMANCE_ENABLED=true`
+- 2026-05-18 🎯 軍師判讀整合 verdict 完成:src/individual_stock_verdict.py(compute_verdict / render_stock_verdict / verdict_tag_for_card / latest_pattern_phrase);整合 K 線形態 + 警示 + 大盤 regime + ML 機率 + 策略共識 + 題材熱度 + 持倉 → 🟢 可進場 / 🟡 觀望 / 🔴 不進場;個股深度頁 banner + 卡片短標 + 推播一行;K 線形態 section 白話化(三紅兵 → 強勢多頭);28 個新測試;2177 passed;kill-switch `STOCK_VERDICT_ENABLED=true`

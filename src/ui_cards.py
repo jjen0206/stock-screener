@@ -33,6 +33,21 @@ def _on_remove_from_watchlist(stock_id: str) -> None:
     st.toast(f"已移除 {stock_id}", icon="🗑️")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _verdict_tag_cached(sid: str) -> str:
+    """卡片用「軍師判讀」短標 — `🟢 可進場` / `🟡 觀望` / `🔴 不進場`。
+
+    `@st.cache_data(ttl=60)` 避免一頁 138 卡片各跑一輪 `compute_verdict`
+    (含 ~6 SQL queries / 模型 load)。Cache 命中第二張同 sid 卡片 → 0 cost。
+    任何例外回 ''(caller 自己 graceful skip)。
+    """
+    try:
+        from src import individual_stock_verdict as _isv
+        return _isv.verdict_tag_for_card(sid)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _build_consensus_badge_html(consensus: dict | None) -> str:
     """跨策略共識 badge — 接在股名後 inline 顯示。
 
@@ -388,6 +403,21 @@ def render_pick_card(
             ),
             unsafe_allow_html=True,
         )
+
+        # 🎯 軍師判讀短標(2026-05-18)— 主公一眼看到結論,不用展開卡片。
+        # cache ttl=60 控制 138 卡片同頁 batch query 成本。
+        verdict_tag = _verdict_tag_cached(str(sid)) if sid else ""
+        if verdict_tag:
+            color_map = {"🟢": "#2ca02c", "🟡": "#BA7517", "🔴": "#d62728"}
+            tag_color = next(
+                (c for emoji, c in color_map.items() if verdict_tag.startswith(emoji)),
+                "#555",
+            )
+            st.markdown(
+                f"<div style='font-size:14px;font-weight:600;color:{tag_color};"
+                f"margin:2px 0 4px 0'>🎯 軍師判讀:{verdict_tag}</div>",
+                unsafe_allow_html=True,
+            )
 
         # 盤中即時行(caller 注入 row["intraday_quote"] 時才顯)— 漲紅跌綠
         intra = row.get("intraday_quote")

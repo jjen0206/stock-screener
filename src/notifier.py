@@ -1050,6 +1050,20 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
             )
         except (TypeError, ValueError, KeyError):
             pass  # graceful skip,不擋整段推播
+
+    # 🎯 軍師判讀(2026-05-18 主公拍板)— 推播 pick block 加一句結論,
+    # 主公手機收訊息一眼看到 🟢 / 🟡 / 🔴。Caller 預先注入 pick["verdict_tag"]
+    # 或我們現算一次(沒注入時)。compute_verdict 失敗 → silent skip 不擋推播。
+    verdict_tag = pick.get("verdict_tag")
+    if verdict_tag is None and sid:
+        try:
+            from src import individual_stock_verdict as _isv
+            if _isv.is_enabled():
+                verdict_tag = _isv.verdict_tag_for_card(str(sid))
+        except Exception:  # noqa: BLE001
+            verdict_tag = None
+    if verdict_tag:
+        lines.append(f"   🎯 軍師判讀:{verdict_tag}")
     return "\n".join(lines)
 
 
