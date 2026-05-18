@@ -99,6 +99,7 @@ STRATEGY_NATURE: dict[str, str] = {
     "eps_acceleration": "neutral",
     "revenue_acceleration": "neutral",
     "revenue_announce_anticipation": "neutral",
+    "foreign_x_holder_alignment": "neutral",     # 籌碼共振,跟方向訊號正交
 }
 
 
