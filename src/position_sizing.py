@@ -307,9 +307,96 @@ def suggest_position_size(
     }
 
 
+# ---------------------------------------------------------------------------
+# EV-based 半 Kelly 倉位(P2-8 加;對應 Phase 1 score_to_ev mapping)
+#
+# 跟上面的 Kelly fraction 不同:這支不需要 win_rate / win_loss_ratio,而是
+# 直接拿 `score_to_ev` 翻譯出來的 EV(期望報酬 fraction)做分段線性 sizing。
+# 設計理由:主公拿到 pick 時 EV 已校準成「進場期望賺/賠 X%」,直接 map 到
+# 「倉位 N%」對主公語意最直白(EV 高 → 多投,EV 微正 → 試水溫,EV 負 → 不進)。
+#
+# 分段表(全 portfolio 5% 上限,符合「半 Kelly」實務 — 一檔不到 5%):
+#   EV > +3%        → 5%   (滿倉 — 訊號最強)
+#   +1% ≤ EV ≤ +3%  → 2~5% (線性內插)
+#   0   ≤ EV < +1%  → 1~2% (小試水溫)
+#   EV < 0          → 0%   (不該進場)
+# ---------------------------------------------------------------------------
+
+_EV_FULL_CAP: float = 0.05         # 倉位上限 5%(滿倉)
+_EV_MID_HI: float = 0.02           # 中段倉位上限 2%
+_EV_LOW_LO: float = 0.01           # 試水溫倉位下限 1%
+_EV_TIER_HI: float = 0.03          # EV > 3% → 滿倉
+_EV_TIER_MID: float = 0.01         # EV > 1% → 中高段
+_EV_TIER_LO: float = 0.0           # EV ≥ 0 → 至少試水溫
+
+
+def compute_suggested_position(ev: float | None) -> float:
+    """EV-based 半 Kelly 倉位建議。
+
+    Args:
+        ev: 期望報酬 fraction(0.023 = +2.3%);None / NaN → 回 0.0。
+
+    Returns:
+        建議倉位 fraction ∈ [0.0, 0.05]。
+
+    分段公式(連續):
+        ev < 0:          0.0
+        0 ≤ ev < 1%:     線性 1% → 2%
+        1% ≤ ev ≤ 3%:    線性 2% → 5%
+        ev > 3%:         5%(滿倉)
+
+    `score_to_ev` 在沒 calibration 時走線性 fallback(score×5% - (1-score)×3%),
+    所以即便 mapping CSV 缺失也能穩定產出非零 EV(score>0.375 起)。
+    """
+    if ev is None:
+        return 0.0
+    try:
+        e = float(ev)
+    except (TypeError, ValueError):
+        return 0.0
+    if e != e:  # NaN
+        return 0.0
+
+    if e < _EV_TIER_LO:
+        return 0.0
+    if e >= _EV_TIER_HI:
+        return _EV_FULL_CAP
+    if e >= _EV_TIER_MID:
+        # 線性 [1%, 3%] EV → [2%, 5%] position
+        ratio = (e - _EV_TIER_MID) / (_EV_TIER_HI - _EV_TIER_MID)
+        return _EV_MID_HI + ratio * (_EV_FULL_CAP - _EV_MID_HI)
+    # 0 ≤ e < 1%:線性 [0, 1%] → [1%, 2%]
+    ratio = (e - _EV_TIER_LO) / (_EV_TIER_MID - _EV_TIER_LO)
+    return _EV_LOW_LO + ratio * (_EV_MID_HI - _EV_LOW_LO)
+
+
+def render_position_str(pos: float | None) -> str:
+    """渲染倉位 fraction 成顯示字串。
+
+    Examples:
+        render_position_str(0.035) → '建議倉位 3.5%'
+        render_position_str(0.05)  → '建議倉位 5.0%'
+        render_position_str(0.0)   → '建議倉位 0%'(不進場)
+        render_position_str(None)  → '建議倉位 —'
+    """
+    if pos is None:
+        return "建議倉位 —"
+    try:
+        p = float(pos)
+    except (TypeError, ValueError):
+        return "建議倉位 —"
+    if p != p:  # NaN
+        return "建議倉位 —"
+    if p <= 0.0:
+        return "建議倉位 0%"
+    return f"建議倉位 {p * 100:.1f}%"
+
+
 __all__ = [
     "is_enabled",
     "kelly_fraction",
     "get_recent_win_stats",
     "suggest_position_size",
+    "compute_suggested_position",
+    "render_position_str",
 ]

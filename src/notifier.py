@@ -1001,6 +1001,18 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         rr_str = f"  (R:R {rr:.1f}:1)" if rr else ""
         sign = "+" if ev >= 0 else ""
         lines.append(f"   📈 EV {sign}{ev * 100:.1f}%{rr_str}")
+        # P2-8:EV-based 半 Kelly 倉位 — 把「EV +2.3%」翻成「倉位 3.5%」,
+        # 主公一眼看「該投多少」。pos=0 略過(EV<0 不該進,EV ev=None 也不顯)。
+        try:
+            from src.position_sizing import (
+                compute_suggested_position as _csp,
+                render_position_str as _rps,
+            )
+            _pos = _csp(ev)
+            if _pos > 0:
+                lines.append(f"   💼 {_rps(_pos)}")
+        except Exception:  # noqa: BLE001
+            pass  # 不擋整段推播
     # 千張大戶(TDCC 週快照)— 主公拍板:不納入 ML,只當附加資訊
     # 沒資料(該檔當週沒公布 / 還沒抓過) → 整行 graceful skip 不顯
     # delta_w=None(第一次抓,沒上週可比) → 省略「週變」段
