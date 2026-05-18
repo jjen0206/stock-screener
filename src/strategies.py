@@ -1823,6 +1823,25 @@ STRATEGY_LABELS: dict[str, str] = {
 }
 
 
+# === 已淘汰策略(止血:不再進 run_all_strategies / 不推播 / 不算 verdict) ===
+# 策略 .py impl + STRATEGY_LABELS / STRATEGY_CATEGORY / per_strategy models 保留,
+# 讓歷史 paper_trades / backtest 還能對照(直接呼叫 ALL_STRATEGIES[key] 可 opt-in)。
+# 預設 run_all_strategies(enabled=None) 跳過 deprecated keys;若 caller 顯式
+# 把 deprecated key 放進 enabled,印 warning log + 一樣跳過。
+#
+# 2026-05-18 淘汰名單(扣完成本 hold=5 ROI 為負):
+#   rsi_recovery           ROI -5.23% — 全系統最慘
+#   inst_oversold_reversal ROI 負 — Top 5 #2 deprecation 名單
+DEPRECATED_STRATEGIES: dict[str, str] = {
+    "rsi_recovery": (
+        "hold=5 ROI -5.23% after costs (2026-05-18 strategy audit)"
+    ),
+    "inst_oversold_reversal": (
+        "negative ROI after costs (2026-05-18 strategy audit)"
+    ),
+}
+
+
 # === Per-strategy ML 過濾門檻(Stage 2B 校準後落地) ===
 # 來源:scripts/audit/calibrate_ml_thresholds.py --use-per-strategy-models 跑
 # 30-day grid search 結果(Stage 2B 6 個 trained per-strategy models)。
@@ -1917,10 +1936,21 @@ def run_all_strategies(
         }
     }
     """
+    explicit_enabled = enabled is not None
     enabled = enabled or list(ALL_STRATEGIES.keys())
     aggregated: dict[str, dict] = {}
     for key in enabled:
         if key not in ALL_STRATEGIES:
+            continue
+        if key in DEPRECATED_STRATEGIES:
+            # 止血:deprecated 策略不再算入聚合 / 推播 / verdict。
+            # 顯式 enabled 帶 deprecated → log warning(留證據);default path 無聲跳過。
+            if explicit_enabled:
+                logger.warning(
+                    "[STRATEGY] %s 已淘汰(%s)— 跳過不執行;"
+                    "如需 backtest 請直接呼叫 ALL_STRATEGIES['%s'](...)。",
+                    key, DEPRECATED_STRATEGIES[key], key,
+                )
             continue
         df = ALL_STRATEGIES[key](date, params=params, stock_ids=stock_ids)
         if df.empty:
@@ -2134,6 +2164,7 @@ __all__ = [
     "enrich_with_analyst_target",
     "compute_target_prices",
     "ALL_STRATEGIES",
+    "DEPRECATED_STRATEGIES",
     "STRATEGY_LABELS",
     "STRATEGY_CATEGORY",
     "STRATEGY_REGIME_FILTER",
