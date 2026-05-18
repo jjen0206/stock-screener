@@ -5,11 +5,19 @@ name: Backfill Financials (one-shot manual)
 # 2026-05-16 健診:financials 只覆蓋 1073 / 2127 純股(~50%),長線基本面策略
 # 在沒財報的 1054 檔上跑不了。
 #
-# 一次性手動觸發 — 跑完即可,不放 cron。想再跑到 GH UI > Actions > Backfill
-# Financials > Run workflow。
+# 觸發模式:
+#   - workflow_dispatch:手動跑一次(GH UI > Actions > Run workflow)
+#   - schedule(*/30 * * * *):2026-05-19 P2-4a 加,每 30 分鐘自動串接下一批 200 檔
+#     直到 pure_stock universe coverage >= 99%。背景:script `--max-stocks=200`
+#     單次跑 200 檔,搭配 skip 已有 sid → 每次自然挑下一批,~10 個 cron fire
+#     ≈ 5 小時跑完全市場 2060 檔,主公無感。FinMind quota 1500/hr 安全,
+#     ~400 calls/hr rolling window。
+#   - Coverage guard:cron fire 時若 financials ∩ pure_stock universe >= 99%
+#     會跳過 backfill / dump / release / commit 等重活,~2-3 分鐘 noop 結束。
+#     全部跑完後可手動移除 schedule 區塊(也可以留著,反正 noop)。
 #
-# 預估 runtime:~2000 待補檔 × FinMind throttle ~1 call/s + sleep = 30-60 min。
-# 給 GH runner 120 min 上限應該夠。
+# 預估 runtime:單批 ~200 檔 × FinMind throttle ~0.5s/檔 + sleep = 5-10 min(原本
+# 30-60 min 估計是全 2000 檔單次跑;P2-4a 改 200/批以後單批快很多)。
 #
 # Storage 策略(2026-05-17 改):
 #   - 全市場 financials.quarterly ~30MB CSV / ~5MB parquet
@@ -44,6 +52,10 @@ on:
         description: "Dump 完上傳到 GH Release(預設 true)"
         required: false
         default: "true"
+  schedule:
+    # 2026-05-19 P2-4a:每 30 分鐘自動跑下一批 200 檔(coverage guard 控制停)。
+    # 全市場跑滿後可手動移除此區塊(留著也是 noop)。
+    - cron: "*/30 * * * *"
 
 concurrency:
   group: backfill-financials
@@ -84,7 +96,31 @@ jobs:
           print(f'[PRELOAD] {n}')
           "
 
+      - name: Coverage guard — skip heavy work if already complete
+        id: cov
+        # 計 financials ∩ pure_stock universe coverage,>=99% 就讓後續 step 全跳過。
+        # 給 cron 模式用:全跑完後 cron 還會持續 fire,有 guard 才不會浪費 runner 跑 backfill / dump / release。
+        run: |
+          python <<'PY'
+          import os
+          from src import database as db
+          from src.universe import pure_stock_universe
+          from scripts.backfill_financials import stocks_with_financials
+          db.init_db()
+          universe = set(pure_stock_universe(min_history=20))
+          have = stocks_with_financials() & universe
+          coverage = (len(have) / len(universe)) if universe else 1.0
+          print(f"[GUARD] coverage={coverage:.1%} ({len(have)}/{len(universe)})")
+          skip = "true" if coverage >= 0.99 else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"skip={skip}\n")
+              f.write(f"coverage={coverage:.4f}\n")
+              f.write(f"have={len(have)}\n")
+              f.write(f"universe={len(universe)}\n")
+          PY
+
       - name: Run financials backfill
+        if: steps.cov.outputs.skip != 'true'
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           FINMIND_LONG_BACKOFF: "1"
@@ -93,11 +129,12 @@ jobs:
           ARGS="$ARGS --sleep ${{ inputs.sleep || '0.5' }}"
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          ARGS="$ARGS --dump-format ${{ inputs.dump_format }}"
+          ARGS="$ARGS --dump-format ${{ inputs.dump_format || 'parquet' }}"
           echo "Running: python scripts/backfill_financials.py $ARGS"
           python scripts/backfill_financials.py $ARGS
 
       - name: Verify backfilled rows
+        if: steps.cov.outputs.skip != 'true'
         run: |
           python -c "
           from src import database as db
@@ -112,12 +149,12 @@ jobs:
           "
 
       - name: Upload snapshot to GitHub Release
-        if: inputs.upload_release == 'true'
+        if: steps.cov.outputs.skip != 'true' && (inputs.upload_release || 'true') == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          FMT="${{ inputs.dump_format }}"
+          FMT="${{ inputs.dump_format || 'parquet' }}"
           if [ "$FMT" = "parquet" ]; then
             FILE="data/twse_snapshot/financials_quarterly.parquet"
           else
@@ -154,7 +191,7 @@ jobs:
           echo "[RELEASE] uploaded $FILE to $TAG"
 
       - name: Commit .snapshot_releases.json (manifest only — parquet 不入 git)
-        if: inputs.upload_release == 'true'
+        if: steps.cov.outputs.skip != 'true' && (inputs.upload_release || 'true') == 'true'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
