@@ -18,8 +18,11 @@
     - compute_strategy_consensus(picks_by_strategy) -> dict[sid → meta]
     - consensus_multiplier(meta) -> float
     - consensus_badge(meta) -> tuple[str, str]  # (badge_text, tier_label)
+    - has_signal_conflict(strategy_keys) -> bool
     - STRATEGY_CATEGORIES: dict[str, str]
+    - STRATEGY_NATURE: dict[str, str]  # reversal / trend / neutral
     - STRATEGY_CONSENSUS_ENABLED: bool kill switch
+    - SIGNAL_CONFLICT_PENALTY_ENABLED: bool kill switch
 """
 from __future__ import annotations
 
@@ -61,6 +64,43 @@ STRATEGY_CATEGORIES: dict[str, str] = {
 }
 
 
+# === 策略「性質」維度(獨立於 STRATEGY_CATEGORIES) ===
+# reversal:均值回歸 / 超賣反彈 — 預期反方向修正
+# trend   :動能突破 / 多頭排列 — 預期同方向延續
+# neutral :籌碼 / 基本面 / 殖利率 / 事件 — 跟方向訊號正交,不會跟 reversal/trend 衝突
+#
+# 為什麼跟 STRATEGY_CATEGORIES(趨勢/反轉/籌碼/動能/...)分開:
+#   - CATEGORIES 給 UI 顯示 + regime filter 用 — 切的是「投資哲學」維度(5+ 類)
+#   - NATURE 給 conflict detection 用 — 切的是「訊號方向」維度(3 類)
+#   - 例:volume_kd 在 CATEGORIES 是「動能」,但 KD 從超賣回升其實是反轉味道 →
+#     拍不定 → 歸 neutral(保守,寧可不衝突)
+#   - 例:bias_convergence 在 CATEGORIES 兩處不同步(consensus.py 標趨勢、
+#     strategies.py 標反轉)— 不動既存欄位,NATURE 直接歸 reversal(語意正解)
+STRATEGY_NATURE: dict[str, str] = {
+    # reversal — 反轉 / 均值回歸 / 超賣反彈
+    "rsi_recovery": "reversal",
+    "bb_lower_rebound": "reversal",
+    "bias_convergence": "reversal",
+    "inst_oversold_reversal": "reversal",
+    # trend — 動能突破 / 多頭排列 / 缺口延續
+    "ma_alignment": "trend",
+    "macd_golden": "trend",
+    "ma_squeeze_breakout": "trend",
+    "volume_breakout": "trend",
+    "gap_up": "trend",
+    # neutral — 籌碼 / 基本面 / 殖利率 / 事件 / 大盤 alpha / 模糊不定
+    "volume_kd": "neutral",         # KD 從超賣回升 vs 趨勢延續,拍不定 → 保守
+    "taiex_alpha": "neutral",       # 相對大盤 alpha,跟 reversal/trend 正交
+    "inst_consensus": "neutral",
+    "inst_silent_accum": "neutral",
+    "big_holder_inflow": "neutral",
+    "high_yield_stable": "neutral",
+    "ex_dividend_swing": "neutral",
+    "eps_acceleration": "neutral",
+    "revenue_acceleration": "neutral",
+}
+
+
 def _kill_switch() -> bool:
     """讀 env var STRATEGY_CONSENSUS_ENABLED — 預設 on,設成 "false"/"0" 才關。
 
@@ -70,9 +110,39 @@ def _kill_switch() -> bool:
     return raw not in ("false", "0", "no", "off", "")
 
 
+def _conflict_penalty_enabled() -> bool:
+    """讀 env var SIGNAL_CONFLICT_PENALTY_ENABLED — 預設 on,設成 "false"/"0" 才關。
+
+    給 ops 留逃生口 — 若哪天發現衝突檢誤殺真共識可即時關閉,不用 hot-patch code。
+    """
+    raw = os.environ.get(
+        "SIGNAL_CONFLICT_PENALTY_ENABLED", "true",
+    ).strip().lower()
+    return raw not in ("false", "0", "no", "off", "")
+
+
 # Module-level alias 給 monkeypatch / 外部 import 觀察狀態用。讀 _kill_switch()
 # 才是真實判斷依據;這個值只在 import 時 snapshot 一次。
 STRATEGY_CONSENSUS_ENABLED = _kill_switch()
+SIGNAL_CONFLICT_PENALTY_ENABLED = _conflict_penalty_enabled()
+
+
+def has_signal_conflict(strategy_keys: Iterable[str] | None) -> bool:
+    """同一檔同時被 reversal 派 + trend 派策略命中 → 訊號衝突。
+
+    語意:reversal 預期反方向修正、trend 預期同方向延續 — 兩者同時亮 = 反方向訊號
+    加總 → 共識加成沒意義甚至有害,該扣掉 bonus。
+
+    neutral(籌碼/基本面/事件)不算衝突 — 跟方向訊號正交,reversal+neutral 或
+    trend+neutral 仍視為有效共識。
+
+    沒在 STRATEGY_NATURE 的策略(未來新增還沒分類)→ 當 neutral 處理(保守)。
+    Empty / None / 單一策略 → False(不可能衝突)。
+    """
+    if not strategy_keys:
+        return False
+    natures = {STRATEGY_NATURE.get(k, "neutral") for k in strategy_keys}
+    return "reversal" in natures and "trend" in natures
 
 
 def _normalize_picks(
@@ -145,10 +215,15 @@ def consensus_multiplier(meta: Mapping | None) -> float:
 
     規則:
         - 單策略 (count=1)               → ×1.0
+        - reversal × trend 衝突           → ×1.0(訊號方向矛盾,bonus 沒意義)
         - 同類別 2+ 票 (count≥2, cat=1)  → ×1.3
         - 跨類別 2 票                    → ×1.5
         - 跨類別 3+ 票                   → ×1.8
         - kill switch off                → ×1.0(不加成)
+
+    Conflict check 走 STRATEGY_NATURE 維度,跟 STRATEGY_CATEGORIES 正交 —
+    例:bias_convergence(NATURE=reversal) + volume_breakout(NATURE=trend)
+    雖然 cat_count=2 但會被 conflict 攔下回 1.0。
 
     `meta` None / 缺欄 → 1.0(防守)。
     """
@@ -160,6 +235,11 @@ def consensus_multiplier(meta: Mapping | None) -> float:
     except (TypeError, ValueError):
         return 1.0
     if count < 2:
+        return 1.0
+    # 反轉 × 趨勢衝突 → 不加成(衝突檢有自己 kill switch)
+    if _conflict_penalty_enabled() and has_signal_conflict(
+        meta.get("strategies") or [],
+    ):
         return 1.0
     if cat_count >= 3:
         return 1.8
@@ -189,6 +269,11 @@ def consensus_badge(meta: Mapping | None) -> tuple[str, str]:
     except (TypeError, ValueError):
         return ("", "none")
     if count < 2 or not _kill_switch():
+        return ("", "none")
+    # 衝突訊號 → badge 跟 multiplier 同步消失,避免 UI/multiplier 不一致
+    if _conflict_penalty_enabled() and has_signal_conflict(
+        meta.get("strategies") or [],
+    ):
         return ("", "none")
     if cat_count >= 3:
         return ("⭐⭐⭐ 強共識", "cross_3")
