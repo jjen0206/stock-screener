@@ -2532,7 +2532,9 @@ def preload_snapshots(
       watchlist.csv(2026-05-07 加,讓 actions runner 看到主公的關注股
       → fetch_analyst_targets.py --scope=watchlist 才不會回 0 檔)/
       pick_outcomes.csv(weekly backtest_picks.py dump,讓 daily-notify
-      的「昨日複盤」section 直接吃 SQLite 不用每天重算)
+      的「昨日複盤」section 直接吃 SQLite 不用每天重算)/
+      pick_shap_explanations.csv(daily-notify 即時算 + weekly backfill_pick_shap.py
+      回填,雲端 boot 後讓 SHAP 解釋 tab 看得到資料)
 
     回 {csv stem: rows loaded} 給 caller 用 log。任何 csv 不存在 → skip。
     """
@@ -3052,6 +3054,53 @@ def preload_snapshots(
             if rows:
                 upsert_default_settlement_daily(rows, db_path=db_path)
                 counts["default_settlement_daily"] = len(rows)
+
+    # 9d. pick_shap_explanations(daily-notify 即時算 + weekly backfill_pick_shap.py
+    # 回填的 SHAP top-features cache)— 雲端容器 boot 後 SQLite 空,沒這個 preload,
+    # `pick_shap_explanations` 表永遠空 → Streamlit「ML 解釋」tab / Telegram SHAP
+    # 摘要無資料(歷史 4000+ 筆 backfilled 出來只存 CSV,撈不出來)。
+    shap_csv = snapshot_dir / "pick_shap_explanations.csv"
+    if shap_csv.exists() and shap_csv.stat().st_size > 0:
+        try:
+            df = pd.read_csv(
+                shap_csv, dtype={"sid": str, "pick_date": str, "strategy": str},
+            )
+        except pd.errors.EmptyDataError:
+            df = pd.DataFrame()
+        if not df.empty:
+            records = []
+            for _, r in df.iterrows():
+                if (
+                    pd.isna(r.get("sid")) or pd.isna(r.get("pick_date"))
+                    or pd.isna(r.get("strategy"))
+                    or pd.isna(r.get("top_features"))
+                ):
+                    continue
+                records.append({
+                    "pick_date": str(r["pick_date"]),
+                    "sid": str(r["sid"]),
+                    "strategy": str(r["strategy"]),
+                    "top_features": str(r["top_features"]),
+                    "generated_at": (
+                        str(r["generated_at"])
+                        if pd.notna(r.get("generated_at")) else _now_iso()
+                    ),
+                })
+            if records:
+                with get_conn(db_path) as conn:
+                    conn.executemany(
+                        """
+                        INSERT INTO pick_shap_explanations
+                            (pick_date, sid, strategy, top_features, generated_at)
+                        VALUES
+                            (:pick_date, :sid, :strategy, :top_features, :generated_at)
+                        ON CONFLICT(pick_date, sid, strategy) DO UPDATE SET
+                            top_features=excluded.top_features,
+                            generated_at=excluded.generated_at
+                        """,
+                        records,
+                    )
+                counts["pick_shap_explanations"] = len(records)
 
     # 10. pick_outcomes(weekly backtest_picks.py 跑後 dump CSV)— daily-notify
     # 的「昨日複盤」section 從這撈昨天的 picks 實際報酬。

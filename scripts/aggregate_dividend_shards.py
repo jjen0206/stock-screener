@@ -82,7 +82,10 @@ def aggregate_dividend(total_shards: int) -> tuple[int, int]:
 
 def aggregate_last_dividend(total_shards: int) -> dict[str, int]:
     """合 8 個 last_dividend_shard_*.txt 加總。"""
-    totals = {"todo": 0, "ok": 0, "fail": 0}
+    totals = {
+        "todo": 0, "ok": 0, "empty": 0, "fail": 0,
+        "quota_fail": 0, "delta_rows": 0,
+    }
     elapsed_max = 0.0
     shards_seen = 0
     backfilled_at = ""
@@ -131,14 +134,19 @@ def aggregate_last_dividend(total_shards: int) -> dict[str, int]:
         f"years={years}\n"
         f"todo={totals['todo']}\n"
         f"ok={totals['ok']}\n"
+        f"empty={totals['empty']}\n"
         f"fail={totals['fail']}\n"
+        f"quota_fail={totals['quota_fail']}\n"
+        f"delta_rows={totals['delta_rows']}\n"
         f"success_rate_pct={success_rate:.1f}\n"
         f"elapsed_min_max={elapsed_max:.1f}\n",
         encoding="utf-8",
     )
     print(
         f"[AGG-DIV] last_dividend.txt: shards {shards_seen}/{total_shards}, "
-        f"ok={totals['ok']} fail={totals['fail']} ({success_rate:.1f}%)",
+        f"ok={totals['ok']} empty={totals['empty']} fail={totals['fail']} "
+        f"quota={totals['quota_fail']} delta_rows={totals['delta_rows']} "
+        f"({success_rate:.1f}%)",
         flush=True,
     )
     return totals

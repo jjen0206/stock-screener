@@ -442,6 +442,8 @@ def fetch_dividend(
     stock_id: str,
     start: str = "2015-01-01",
     end: str | None = None,
+    *,
+    strict: bool = False,
 ) -> pd.DataFrame:
     """取得年度配息(含快取)。
 
@@ -450,11 +452,19 @@ def fetch_dividend(
 
     ⚠️ 已知限制(2026-04 觀察):
       此 dataset 在無 token 模式可能被 FinMind 限制或拒絕。
-      遇到 FinMindAPIError 會 log warning 並回空 DataFrame,讓上層降級。
+      預設 strict=False:遇到 FinMindAPIError 會 log warning 並回空 DataFrame
+      讓互動 / 批次降級用例不中斷。
+
+    Bug 2026-05-18 衍生:weekly backfill 2060 檔報 ok=2060 但實際 dividend.csv
+      只 32 行 / 9 檔。原因是 swallow 把 quota / network 錯都吞掉,backfill
+      看不到 → 每週白跑。新加 strict=True 給 backfill 用,errors propagate
+      讓 backfill 真的能 count fail + log。
 
     參數:
         stock_id: 例 '2330'
         start, end: 'YYYY-MM-DD';預設抓 2015-01-01 ~ 今日(夠 5 年配息檢查)
+        strict: True 時遇 FinMindAPIError 不 swallow,直接 raise 讓 caller
+            自己處理(weekly backfill_dividend.py 必加,免再 silent fail)
     """
     db.init_db()
     if end is None:
@@ -472,7 +482,13 @@ def fetch_dividend(
                 raw = _api_call(
                     DATASET_DIVIDEND, data_id=stock_id, start_date=s, end_date=e,
                 )
+            except FinMindQuotaError:
+                # 402 quota 永遠 raise — 跟 fetch_quarterly_financials 同模式,
+                # batch caller 才能 fail-fast 不浪費 long-backoff slot
+                raise
             except FinMindAPIError as ex:
+                if strict:
+                    raise
                 logger.warning(
                     "配息抓取失敗(可能需要 FinMind token):%s", ex
                 )

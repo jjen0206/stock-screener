@@ -38,7 +38,7 @@ if str(_ROOT) not in sys.path:
 
 from src import database as db  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
-    FinMindAPIError, fetch_monthly_revenue,
+    FinMindAPIError, FinMindQuotaError, fetch_monthly_revenue,
 )
 from src.universe import pure_stock_universe  # noqa: E402
 
@@ -174,13 +174,37 @@ def main() -> int:
         flush=True,
     )
 
+    # 同 backfill_dividend：記錄 pre-call 行數 → 結束時看 delta 真實寫入量
+    with db.get_conn() as conn:
+        pre_rows = conn.execute(
+            "SELECT COUNT(*) FROM financials WHERE period_type='monthly_revenue'"
+        ).fetchone()[0]
+
     n = len(universe)
-    ok = fail = 0
+    ok = fail = quota_fail = 0
     t0 = time.time()
     for i, sid in enumerate(universe, start=1):
         try:
             fetch_monthly_revenue(sid, start, today)
             ok += 1
+        except FinMindQuotaError as e:
+            # 5/11 cron cancelled root-cause 之一：quota 撞牆後 long-backoff
+            # 33 min × 多檔 → shard 超過 60 min timeout → GH 全 cancel。
+            # 連續 5 次 quota 直接結束此 shard 釋放 runner。
+            quota_fail += 1
+            fail += 1
+            if quota_fail <= 3:
+                print(
+                    f"[BACKFILL-REV] {sid} quota 爆: {e}",
+                    flush=True,
+                )
+            if quota_fail >= 5:
+                print(
+                    f"[BACKFILL-REV] 連續 {quota_fail} 次 quota 爆 — "
+                    f"提前結束此 shard,避免占用 runner 配額",
+                    flush=True,
+                )
+                break
         except FinMindAPIError as e:
             fail += 1
             if fail <= 5:
@@ -198,15 +222,23 @@ def main() -> int:
             rate = i / elapsed if elapsed > 0 else 0
             eta = (n - i) / rate / 60 if rate > 0 else 0
             print(
-                f"[BACKFILL-REV] {i}/{n} (ok={ok} fail={fail}), "
-                f"{rate:.2f}/s, ETA {eta:.1f} min",
+                f"[BACKFILL-REV] {i}/{n} (ok={ok} fail={fail} "
+                f"quota={quota_fail}), {rate:.2f}/s, ETA {eta:.1f} min",
                 flush=True,
             )
+
+    with db.get_conn() as conn:
+        post_rows = conn.execute(
+            "SELECT COUNT(*) FROM financials WHERE period_type='monthly_revenue'"
+        ).fetchone()[0]
+    delta_rows = post_rows - pre_rows
 
     elapsed = time.time() - t0
     print(
         f"[BACKFILL-REV DONE] shard {args.shard}/{args.total_shards} "
-        f"共 {n} 檔,ok={ok} fail={fail},耗時 {elapsed/60:.1f} 分鐘",
+        f"共 {n} 檔,ok={ok} fail={fail} quota={quota_fail},"
+        f"SQLite monthly_revenue 表 +{delta_rows} rows "
+        f"(pre={pre_rows} → post={post_rows}),耗時 {elapsed/60:.1f} 分鐘",
         flush=True,
     )
 
@@ -224,6 +256,8 @@ def main() -> int:
         f"todo={n}\n"
         f"ok={ok}\n"
         f"fail={fail}\n"
+        f"quota_fail={quota_fail}\n"
+        f"delta_rows={delta_rows}\n"
         f"elapsed_min={elapsed/60:.1f}\n",
         encoding="utf-8",
     )

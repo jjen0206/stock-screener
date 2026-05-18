@@ -94,6 +94,67 @@ def test_backfill_calls_fetch_revenue_for_shard_sids(tmp_setup, monkeypatch):
     assert fetch_calls == ["sid0"]
 
 
+# === P0-3 regression: quota fail-fast + delta_rows instrumentation ===
+
+def test_backfill_revenue_quota_error_fail_fast(tmp_setup, monkeypatch):
+    """連續 5 次 FinMindQuotaError → 提前 break,避免 60 min timeout 撞牆。
+
+    5/11 cron run cancelled root-cause:單 shard 卡 quota long-backoff
+    × 多檔 → 超過 60 min timeout → GH 全 cancel。fail-fast 後 shard
+    早點結束,aggregate job 仍能跑完。"""
+    fake_universe = [f"sid{i:03d}" for i in range(100)]
+    monkeypatch.setattr(
+        backfill, "pure_stock_universe", lambda min_history=20: fake_universe,
+    )
+    from src.data_fetcher import FinMindQuotaError
+
+    call_count = {"n": 0}
+
+    def _quota_fetch(sid, s, e):
+        call_count["n"] += 1
+        raise FinMindQuotaError("402 quota 爆")
+
+    monkeypatch.setattr(backfill, "fetch_monthly_revenue", _quota_fetch)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_revenue.py", "--shard", "0", "--total-shards", "1"],
+    )
+    backfill.main()
+    # 連續 5 quota_fail → break,call_count 遠少於 100
+    assert call_count["n"] <= 10, (
+        f"quota fail-fast 沒生效,call_count={call_count['n']}"
+    )
+
+
+def test_backfill_revenue_records_quota_and_delta_in_shard_txt(
+    tmp_setup, monkeypatch,
+):
+    """last_revenue_shard_K.txt 必含 quota_fail / delta_rows 給 aggregator + 主公看。"""
+    snapshot_dir = tmp_setup
+    monkeypatch.setattr(
+        backfill, "pure_stock_universe", lambda min_history=20: ["sid0"],
+    )
+
+    def _stub(sid, s, e):
+        db.upsert_financials([{
+            "stock_id": sid, "period_type": "monthly_revenue",
+            "period": "2026-04", "revenue": 1e7, "revenue_yoy": 10.0,
+            "eps": None, "roe": None,
+        }])
+
+    monkeypatch.setattr(backfill, "fetch_monthly_revenue", _stub)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_revenue.py", "--shard", "0", "--total-shards", "1"],
+    )
+    backfill.main()
+
+    txt = (snapshot_dir / "last_revenue_shard_0.txt").read_text(encoding="utf-8")
+    assert "delta_rows=1" in txt
+    assert "quota_fail=0" in txt
+    assert "ok=1" in txt
+
+
 # === aggregate ===
 
 def _make_shard_csv(snapshot_dir: Path, shard: int, rows: list[dict]) -> None:

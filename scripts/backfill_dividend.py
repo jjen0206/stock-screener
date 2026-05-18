@@ -37,7 +37,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import database as db  # noqa: E402
-from src.data_fetcher import FinMindAPIError, fetch_dividend  # noqa: E402
+from src.data_fetcher import (  # noqa: E402
+    FinMindAPIError, FinMindQuotaError, fetch_dividend,
+)
 from src.universe import pure_stock_universe  # noqa: E402
 
 SNAPSHOT_DIR = _ROOT / "data" / "twse_snapshot"
@@ -193,13 +195,34 @@ def main() -> int:
         flush=True,
     )
 
+    # 記錄 pre-call dividend 表行數,結束時算 delta(真實寫入 row 數)
+    # 比單純看 ok/fail 更能反映「真的有抓到資料」(strict=True 後 ok 等於
+    # 有 API call 成功的檔數;但成功 call 也可能 0 rows)。
+    with db.get_conn() as conn:
+        pre_rows = conn.execute("SELECT COUNT(*) FROM dividend").fetchone()[0]
+
     n = len(universe)
-    ok = fail = 0
+    ok = fail = quota_fail = empty = 0
     t0 = time.time()
     for i, sid in enumerate(universe, start=1):
         try:
-            fetch_dividend(sid, start, today)
-            ok += 1
+            df = fetch_dividend(sid, start, today, strict=True)
+        except FinMindQuotaError as e:
+            quota_fail += 1
+            fail += 1
+            if quota_fail <= 3:
+                print(
+                    f"[BACKFILL-DIV] {sid} quota 爆: {e}",
+                    flush=True,
+                )
+            # 連續 quota 失敗 → fail-fast 早結束(再跑也只是消耗 runner 時鐘)
+            if quota_fail >= 5:
+                print(
+                    f"[BACKFILL-DIV] 連續 {quota_fail} 次 quota 爆 — "
+                    f"提前結束此 shard,避免占用 runner 配額",
+                    flush=True,
+                )
+                break
         except FinMindAPIError as e:
             fail += 1
             if fail <= 5:
@@ -211,21 +234,33 @@ def main() -> int:
                     f"[BACKFILL-DIV] {sid} fail: {type(e).__name__}: {e}",
                     flush=True,
                 )
+        else:
+            ok += 1
+            # 沒 raise 但回空 df = API 沒這檔資料(可能正常,如 ETF / 新 IPO)
+            if df.empty:
+                empty += 1
 
         if i % 50 == 0 or i == n:
             elapsed = time.time() - t0
             rate = i / elapsed if elapsed > 0 else 0
             eta = (n - i) / rate / 60 if rate > 0 else 0
             print(
-                f"[BACKFILL-DIV] {i}/{n} (ok={ok} fail={fail}), "
+                f"[BACKFILL-DIV] {i}/{n} (ok={ok} empty={empty} "
+                f"fail={fail} quota={quota_fail}), "
                 f"{rate:.2f}/s, ETA {eta:.1f} min",
                 flush=True,
             )
 
+    with db.get_conn() as conn:
+        post_rows = conn.execute("SELECT COUNT(*) FROM dividend").fetchone()[0]
+    delta_rows = post_rows - pre_rows
+
     elapsed = time.time() - t0
     print(
         f"[BACKFILL-DIV DONE] shard {args.shard}/{args.total_shards} "
-        f"共 {n} 檔,ok={ok} fail={fail},耗時 {elapsed/60:.1f} 分鐘",
+        f"共 {n} 檔,ok={ok} empty={empty} fail={fail} quota={quota_fail},"
+        f"SQLite dividend 表 +{delta_rows} rows(pre={pre_rows} → post={post_rows})"
+        f",耗時 {elapsed/60:.1f} 分鐘",
         flush=True,
     )
 
@@ -244,7 +279,10 @@ def main() -> int:
         f"years={args.years}\n"
         f"todo={n}\n"
         f"ok={ok}\n"
+        f"empty={empty}\n"
         f"fail={fail}\n"
+        f"quota_fail={quota_fail}\n"
+        f"delta_rows={delta_rows}\n"
         f"elapsed_min={elapsed/60:.1f}\n",
         encoding="utf-8",
     )
@@ -256,6 +294,17 @@ def main() -> int:
         print(
             f"❌ 成功率 {success_rate:.0f}% < 10%(可能 FinMind 大故障 / quota)"
             f" — exit 1",
+            flush=True,
+        )
+        return 1
+    # 額外守護:若 ok 看似正常但 SQLite 完全沒新 row 入(全部 empty df)→ 也算 silent fail
+    # 2026-05-18 bug:ok=2060 / delta_rows=0 全市場滲漏。dividends 普及程度高,
+    # delta_rows=0 + ok 很大幾乎等於系統壞。例外:全 universe 之前都已 cache → 此時
+    # 也合法,所以 gate 加 pre_rows<100 條件避免誤殺週週重跑。
+    if delta_rows == 0 and ok > 100 and pre_rows < 100:
+        print(
+            f"❌ ok={ok} 但 SQLite dividend 一筆都沒寫進去(pre={pre_rows} → "
+            f"post={post_rows}),疑似 quota / dataset access 問題 — exit 1",
             flush=True,
         )
         return 1
