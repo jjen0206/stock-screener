@@ -181,3 +181,93 @@ def test_suggest_bad_inputs_raise():
     with pytest.raises(ValueError):
         ps.suggest_position_size("2330", ml_prob=0.5, total_capital=1000,
                                  max_single_pct=0)
+
+
+# === P2-8:EV-based 半 Kelly 倉位(compute_suggested_position + render_position_str) ===
+
+def test_ev_position_negative_ev_zero():
+    """EV < 0 → 不該進場,倉位 0%。"""
+    assert ps.compute_suggested_position(-0.01) == 0.0
+    assert ps.compute_suggested_position(-0.05) == 0.0
+
+
+def test_ev_position_above_3pct_caps_at_5pct():
+    """EV > 3% → 滿倉 5%(spec 上限,訊號最強)。"""
+    assert ps.compute_suggested_position(0.03) == pytest.approx(0.05)
+    assert ps.compute_suggested_position(0.05) == pytest.approx(0.05)
+    assert ps.compute_suggested_position(0.10) == pytest.approx(0.05)
+
+
+def test_ev_position_mid_band_linear():
+    """EV +1% ~ +3% → 線性 2% ~ 5%。中點 EV=2% → 倉位 3.5%。"""
+    assert ps.compute_suggested_position(0.01) == pytest.approx(0.02)
+    assert ps.compute_suggested_position(0.02) == pytest.approx(0.035)
+    assert ps.compute_suggested_position(0.025) == pytest.approx(0.0425)
+
+
+def test_ev_position_low_band_linear():
+    """EV 0 ~ +1% → 線性 1% ~ 2%(小試水溫)。"""
+    assert ps.compute_suggested_position(0.0) == pytest.approx(0.01)
+    assert ps.compute_suggested_position(0.005) == pytest.approx(0.015)
+    # 接 mid band 下緣:EV=1% 兩段都該得 2%(連續)
+    assert ps.compute_suggested_position(0.01) == pytest.approx(0.02)
+
+
+def test_ev_position_boundary_continuous():
+    """分段邊界值連續:EV=1% 兩段都 = 2%;EV=3% 兩段都 = 5%。"""
+    # 1% 邊界
+    eps = 1e-9
+    a = ps.compute_suggested_position(0.01 - eps)
+    b = ps.compute_suggested_position(0.01 + eps)
+    assert abs(a - b) < 1e-6
+    # 3% 邊界
+    a = ps.compute_suggested_position(0.03 - eps)
+    b = ps.compute_suggested_position(0.03 + eps)
+    assert abs(a - b) < 1e-6
+
+
+def test_ev_position_none_nan_safe():
+    """None / NaN / 怪型別 → 0.0,不該炸。"""
+    assert ps.compute_suggested_position(None) == 0.0
+    assert ps.compute_suggested_position(float("nan")) == 0.0
+    assert ps.compute_suggested_position("not-a-number") == 0.0  # type: ignore[arg-type]
+
+
+def test_render_position_str_basic():
+    """渲染常見值 — 1 位小數 + 「建議倉位 X.X%」 prefix。"""
+    assert ps.render_position_str(0.035) == "建議倉位 3.5%"
+    assert ps.render_position_str(0.05) == "建議倉位 5.0%"
+    assert ps.render_position_str(0.012) == "建議倉位 1.2%"
+
+
+def test_render_position_str_zero_and_none():
+    """0 → 「建議倉位 0%」(不進場);None → 「建議倉位 —」。"""
+    assert ps.render_position_str(0.0) == "建議倉位 0%"
+    assert ps.render_position_str(None) == "建議倉位 —"
+    assert ps.render_position_str(float("nan")) == "建議倉位 —"
+    assert ps.render_position_str("bad") == "建議倉位 —"  # type: ignore[arg-type]
+
+
+def test_ev_position_end_to_end_via_score_to_ev(tmp_path, monkeypatch):
+    """整合:ml_prob → score_to_ev → compute_suggested_position 走純線性 fallback。
+
+    用空白 snapshot_dir 強制走 linear fallback(避免 repo 內 score_to_ev.csv 干擾)。
+    線性公式:EV = score*0.05 - (1-score)*0.03。
+    """
+    from src.score_to_ev import score_to_ev, invalidate_cache
+    invalidate_cache()
+    # 沒 CSV → 直接走 linear fallback:
+    #   score=0.9 → EV = 0.9*0.05 - 0.1*0.03 = 0.045 - 0.003 = 0.042 (> 3% → 滿倉)
+    ev_high = score_to_ev(0.9, snapshot_dir=str(tmp_path))
+    assert ev_high is not None
+    assert ev_high == pytest.approx(0.042, abs=1e-6)
+    assert ps.compute_suggested_position(ev_high) == pytest.approx(0.05)
+    # score=0.5 → EV = 0.5*0.05 - 0.5*0.03 = 0.01 (mid band 下緣) → 2%
+    ev_mid = score_to_ev(0.5, snapshot_dir=str(tmp_path))
+    assert ev_mid == pytest.approx(0.01, abs=1e-6)
+    assert ps.compute_suggested_position(ev_mid) == pytest.approx(0.02)
+    # score=0.3 → EV = 0.3*0.05 - 0.7*0.03 = 0.015 - 0.021 = -0.006 (< 0 → 0%)
+    ev_neg = score_to_ev(0.3, snapshot_dir=str(tmp_path))
+    assert ev_neg is not None and ev_neg < 0
+    assert ps.compute_suggested_position(ev_neg) == 0.0
+    invalidate_cache()

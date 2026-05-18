@@ -841,6 +841,7 @@ def _render_card_metadata(
 
     # EV(期望報酬 fraction)— 比 raw ML 機率對主公更直白:「進場期望賺 X%」
     ev_html = ""
+    pos_html = ""  # P2-8:EV-based 建議倉位 badge
     if ev is not None and not (
         isinstance(ev, float) and ev != ev  # NaN
     ):
@@ -856,6 +857,17 @@ def _render_card_metadata(
             ev_html = (
                 f"<span style='color:{ev_color}'>📈 EV {sign}{e * 100:.1f}%</span>"
             )
+            # P2-8:EV → 半 Kelly 建議倉位(只在 pos>0 時顯,EV<0 自然 skip)
+            try:
+                from src.position_sizing import compute_suggested_position
+                _pos = float(compute_suggested_position(e))
+                if _pos > 0:
+                    pos_html = (
+                        f"<span style='color:#1f77b4'>"
+                        f"💼 倉位 {_pos * 100:.1f}%</span>"
+                    )
+            except Exception:  # noqa: BLE001
+                pos_html = ""
         except (TypeError, ValueError):
             ev_html = ""
 
@@ -899,10 +911,12 @@ def _render_card_metadata(
         except (TypeError, ValueError):
             analyst_html = ""
 
-    if parts or ev_html or ml_html or analyst_html:
+    if parts or ev_html or pos_html or ml_html or analyst_html:
         text_parts = parts.copy()
         if ev_html:
             text_parts.append(ev_html)
+        if pos_html:
+            text_parts.append(pos_html)
         if ml_html:
             text_parts.append(ml_html)
         if analyst_html:
