@@ -1,6 +1,6 @@
 name: Backfill Monthly Revenue (weekly 8-shard)
 
-# 週一 14:13 UTC = 22:13 台北 跑全市場 monthly_revenue 補漏(月公布,週跑一次夠)。
+# 週一 15:13 UTC = 23:13 台北 跑全市場 monthly_revenue 補漏(月公布,週跑一次夠)。
 # 8-way matrix shard parallel,每 shard ~250 檔。runner 用量 ~40 min,看時鐘 ~5 min。
 #
 # 解決基本面策略 universe bottleneck — daily_market_update 沒抓 monthly_revenue,
@@ -8,10 +8,18 @@ name: Backfill Monthly Revenue (weekly 8-shard)
 #
 # 跟 backfill-financials.yml 同模式,差在 fetch_monthly_revenue + 不同 cron 時間
 # (週一 vs 週六 vs 週日),三個 backfill workflow 分散在不同天避免 8×3=24 並發。
+#
+# 2026-05-18 P0-3 修正:
+# - cron 14:13 → 15:13 UTC,錯開 14:00 整點其他週末跑的 cron(snapshot, news 等)
+# - max-parallel 8 → 4,降低 GH Actions runner contention(免費帳 20 conc limit
+#   下,8 + 同時別的 workflow 容易擠爆 → 觀察到 5/11 run cancelled)
+# - timeout-minutes 60 → 50,提早 fail-fast 讓 aggregate job 仍能跑
+# - 配合 backfill_revenue.py 新加 quota fail-fast(連續 5 次 quota 直接 break
+#   shard),避免單 shard 卡 60 min 拖累整個 workflow
 
 on:
   schedule:
-    - cron: "13 14 * * 1"
+    - cron: "13 15 * * 1"
   workflow_dispatch:
     inputs:
       years:
@@ -31,12 +39,12 @@ jobs:
   backfill:
     name: "shard ${{ matrix.shard }}/8"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 50
     permissions:
       contents: write
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
