@@ -111,6 +111,18 @@ jobs:
             python scripts/daily_notify.py
           fi
 
+      # === Step 3.5: Precompute verdict banner CSV(2026-05-18 主公拍板)===
+      # 用今日 daily_picks(Step 2 寫的)+ watchlist 跑 compute_verdict,
+      # dump 成 data/twse_snapshot/daily_verdict_summary.csv,
+      # 雲端 Streamlit Cloud preload 後首頁 + 系統結論 banner 直接吃 CSV
+      # 不用每次 user 開首頁重算 ~50 picks × ~200ms。
+      # continue-on-error:跑失敗不擋 market_update + push。
+      - name: Precompute verdict banner (home + system brief)
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python scripts/precompute_verdicts.py
+
       # === Step 4: 抓全市場財報 + dump 6 CSVs(~10-15 分鐘)===
       # 此 step 會更新 data/twse_snapshot/ CSV 並由下一 step commit
       # (continue-on-error 保證即使失敗推播 / precompute 仍已跑;Streamlit
