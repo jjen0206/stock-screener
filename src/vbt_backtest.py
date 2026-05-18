@@ -27,16 +27,23 @@ import pandas as pd
 
 from src import database as db
 from src._bulk_load import bulk_load_prices
+from src.backtest_costs import (
+    SLIPPAGE_BPS_DEFAULT,
+    vbt_fees_per_side,
+    vbt_slippage,
+)
 from src.strategies import ALL_STRATEGIES
 
 logger = logging.getLogger(__name__)
 
 
-# 預設交易成本:台股手續費 0.1425% / 雙邊,證交稅 0.3% 賣方
-# vectorbt fees 是每次交易單邊,所以買進賣出加總大概 0.1425%×2 + 0.3% = 0.585%
-# 簡化:fees=0.001425(進場手續費)+ slippage=0.001(滑點 0.1%)
-DEFAULT_FEES = 0.001425
-DEFAULT_SLIPPAGE = 0.001
+# 預設交易成本(從 src.backtest_costs 統一來源):
+#   手續費 0.1425% × 2 邊 + 賣方證交稅 0.3% = 0.585% 來回成本
+#   vbt fees 是 per side,所以證交稅均攤雙邊 → 0.1425% + 0.15% = 0.2925%/邊
+#   雙邊收 2 × 0.2925% = 0.585% ✓
+# 舊預設 DEFAULT_FEES = 0.001425 漏了證交稅,vbt 結果是偏樂觀的(差約 0.3%)。
+DEFAULT_FEES = vbt_fees_per_side()  # 0.002925
+DEFAULT_SLIPPAGE = vbt_slippage()  # 0.0005 (5 bps,跟舊 0.001 略低、更貼近大型股)
 DEFAULT_INIT_CASH = 1_000_000.0  # 100 萬本金
 DEFAULT_HOLD_DAYS = 5
 

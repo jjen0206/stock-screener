@@ -15,13 +15,16 @@ from src.backtest import (
 # === simulate_outcome ===
 
 def test_simulate_outcome_win_first():
-    """high 觸 target 之前 low 沒觸 stop → win + return = +target_pct。"""
+    """high 觸 target 之前 low 沒觸 stop → win + return = +target_pct。
+
+    apply_costs=False — 純測決策邏輯,不含交易成本。
+    """
     df = pd.DataFrame([
         {"high": 101, "low": 99, "close": 100},
         {"high": 106, "low": 100, "close": 105},  # hit target 105 = 100×1.05
         {"high": 110, "low": 104, "close": 108},
     ])
-    outcome, ret = simulate_outcome(df, entry_price=100.0)
+    outcome, ret = simulate_outcome(df, entry_price=100.0, apply_costs=False)
     assert outcome == "win"
     assert ret == pytest.approx(0.05)
 
@@ -32,7 +35,7 @@ def test_simulate_outcome_lose_first():
         {"high": 102, "low": 96, "close": 97},  # low=96 ≤ 97 = 100×(1-0.03)
         {"high": 105, "low": 95, "close": 100},
     ])
-    outcome, ret = simulate_outcome(df, entry_price=100.0)
+    outcome, ret = simulate_outcome(df, entry_price=100.0, apply_costs=False)
     assert outcome == "lose"
     assert ret == pytest.approx(-0.03)
 
@@ -42,7 +45,7 @@ def test_simulate_outcome_same_day_both_hit_treats_as_lose():
     df = pd.DataFrame([
         {"high": 106, "low": 96, "close": 100},  # 同日兩邊都觸
     ])
-    outcome, ret = simulate_outcome(df, entry_price=100.0)
+    outcome, ret = simulate_outcome(df, entry_price=100.0, apply_costs=False)
     assert outcome == "lose"
     assert ret == pytest.approx(-0.03)
 
@@ -53,7 +56,7 @@ def test_simulate_outcome_neutral_close_above_returns_win():
         {"high": 102, "low": 99, "close": 101},
         {"high": 103, "low": 100, "close": 102},
     ])
-    outcome, ret = simulate_outcome(df, entry_price=100.0)
+    outcome, ret = simulate_outcome(df, entry_price=100.0, apply_costs=False)
     assert outcome == "win"
     assert ret == pytest.approx(0.02)
 
@@ -64,7 +67,7 @@ def test_simulate_outcome_neutral_close_below_returns_lose():
         {"high": 101, "low": 98, "close": 99},
         {"high": 100, "low": 98, "close": 98},
     ])
-    outcome, ret = simulate_outcome(df, entry_price=100.0)
+    outcome, ret = simulate_outcome(df, entry_price=100.0, apply_costs=False)
     assert outcome == "lose"
     assert ret == pytest.approx(-0.02)
 
@@ -82,7 +85,9 @@ def test_simulate_outcome_custom_target_stop_pct():
     df = pd.DataFrame([
         {"high": 108, "low": 99, "close": 107},  # 108 ≥ 107 = 100×1.07
     ])
-    outcome, ret = simulate_outcome(df, 100.0, target_pct=0.07, stop_pct=0.04)
+    outcome, ret = simulate_outcome(
+        df, 100.0, target_pct=0.07, stop_pct=0.04, apply_costs=False,
+    )
     assert outcome == "win"
     assert ret == pytest.approx(0.07)
 
@@ -288,6 +293,7 @@ def test_backtest_strategy_integrates_screener_and_simulate(
         target_pct=0.05,
         stop_pct=0.03,
         hold_days=5,
+        apply_costs=False,
     )
 
     # 25 個 D × 2 sids = 50 fires

@@ -29,6 +29,12 @@ from typing import Callable
 import pandas as pd
 
 from src import database as db
+from src.backtest_costs import (
+    SLIPPAGE_BPS_DEFAULT,
+    apply_buy_cost,
+    apply_sell_cost,
+    round_trip_cost_rate,
+)
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
 
@@ -51,6 +57,10 @@ def backtest_short(
     universe: list[tuple[str, str]] | None = None,
     on_progress: ProgressCallback | None = None,
     enabled_strategies: list[str] | None = None,
+    *,
+    apply_costs: bool = True,
+    slippage_bps: int = SLIPPAGE_BPS_DEFAULT,
+    broker_fee_discount: float = 1.0,
 ) -> dict:
     """跑短線策略歷史回測。
 
@@ -63,6 +73,10 @@ def backtest_short(
         enabled_strategies: 策略 key 清單(volume_kd / ma_alignment /
             bias_convergence)。None = 用 screen_short 單策略(向下相容);
             ≥1 個 = 走 run_all_strategies 聚合,**任一策略命中即買進**。
+        apply_costs: True(預設)→ 套用台股交易成本(滑價在價格,手續費+稅在 PnL);
+            False → 不套(unit test / 無成本上限參考用)。
+        slippage_bps: 滑價 basis points(預設 5)。
+        broker_fee_discount: 券商手續費折扣(1.0 不折扣)。
 
     回傳 dict:
         summary       : 總報酬、勝率、夏普、最大回撤…等(預設值見 _empty_summary)
@@ -108,6 +122,17 @@ def backtest_short(
             sell_d, sell_price = _find_sell(sid, d, hold_days)
             if sell_d is None or buy_price <= 0:
                 continue
+            # 套用台股交易成本(apply_costs=True 預設):
+            # 1) 滑價在價格 — 進場 ×(1+bps),出場 ×(1−bps)
+            # 2) 手續費 + 證交稅在 PnL — 從報酬率扣 round_trip_cost_rate
+            # 不要重複扣 — 滑價在價格、稅費在 PnL,各扣一次。
+            if apply_costs:
+                buy_price_eff = apply_buy_cost(buy_price, slippage_bps)
+                sell_price_eff = apply_sell_cost(sell_price, slippage_bps)
+                gross_ret = (sell_price_eff - buy_price_eff) / buy_price_eff * 100.0
+                ret_pct = gross_ret - round_trip_cost_rate(broker_fee_discount) * 100.0
+            else:
+                ret_pct = (sell_price - buy_price) / buy_price * 100.0
             trade = {
                 "buy_date": d,
                 "stock_id": sid,
@@ -115,7 +140,7 @@ def backtest_short(
                 "buy_price": buy_price,
                 "sell_date": sell_d,
                 "sell_price": sell_price,
-                "return_pct": (sell_price - buy_price) / buy_price * 100.0,
+                "return_pct": ret_pct,
             }
             if "strategy" in pick:
                 trade["strategy"] = pick["strategy"]
