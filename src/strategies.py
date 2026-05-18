@@ -179,6 +179,20 @@ DEFAULT_REVENUE_ANNOUNCE_PARAMS: dict[str, Any] = {
     "window_end_day": 4,         # 進場窗口:每月 N2 號(含)— 5 號開始公佈
 }
 
+# 策略 20:外資 + 千張戶共振(foreign_x_holder_alignment) — 籌碼共振
+# 邏輯:外資 5 日累計買超 z-score > 1.0(對候選池)AND 千張戶本週 delta_w > 0
+#       且突破前 4 週滾動 mean + 0.5σ。score = (foreign_z + holder_z) / 2 clip 0~2。
+# 兩個信號正交(短期外資資金流 + 中期大戶吸籌)→ 共振 = 高確信籌碼進場訊號。
+DEFAULT_FOREIGN_X_HOLDER_PARAMS: dict[str, Any] = {
+    "foreign_lookback_days": 5,        # 外資累計天數視窗
+    "foreign_zscore_threshold": 1.0,   # 外資 5d sum 對候選池的 z-score 門檻
+    "holder_rolling_weeks": 4,         # 千張戶滾動 mean / std 視窗(前 N 週)
+    "holder_sigma_threshold": 0.5,     # 千張戶突破 σ 倍數(本週 > μ + Nσ)
+    "min_avg_volume_lots": 1000,       # 60 日均量門檻(張)— 流動性過濾
+    "avg_volume_lookback": 60,
+    "score_clip_max": 2.0,             # score 上限 clip(下限 0)
+}
+
 
 # === 策略 1:量價 + KD + 法人(包裝既有 screen_short) ===
 
@@ -2196,6 +2210,269 @@ def screen_revenue_announce_anticipation(
     return _enrich_with_targets(raw, date)
 
 
+# === 策略 20:外資 + 千張戶共振(foreign_x_holder_alignment) ===
+
+def screen_foreign_x_holder_alignment(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 20(籌碼共振):外資 5 日累計買超 + 千張戶本週進場 雙信號突破。
+
+    篩選條件(都要符合):
+    1. 流動性:60 日均量 >= min_avg_volume_lots(預設 1000 張)
+    2. 外資:近 foreign_lookback_days 個交易日(預設 5)foreign_buy_sell 累計 > 0,
+       且該檔在「候選池」內的 z-score >= foreign_zscore_threshold(預設 1.0)。
+       候選池太小(< 2 檔)或 std=0 → z=1.0 中性(剛好等於門檻,通過)。
+    3. 千張戶:shareholder_concentration 最新一週 holders_delta_w > 0,且本週 delta_w
+       高於前 holder_rolling_weeks 週(預設 4)mean + holder_sigma_threshold × σ
+       (預設 0.5σ)— 顯著高於近期常態。歷史不足 4 週 → 不入選(避免少樣本誤判)。
+
+    Score 公式(兩個正交信號等權,clip 0~2):
+        foreign_z = (foreign_5d_sum - μ_pool) / σ_pool   # 池內 z-score
+        holder_z  = (delta_w - μ_4w) / σ_4w              # 該檔 4 週 z-score
+        score     = clip(foreign_z × 0.5 + holder_z × 0.5, 0, score_clip_max)
+
+    出場(STRATEGY_RR_PARAMS 設定):target 4% / stop 3% / hold 10 個交易日。
+    雙信號正交 — 短期資金流(外資) + 中期吸籌(千張戶)— 共振即高確信。
+
+    資料來源:institutional + shareholder_concentration + daily_prices。
+    """
+    from datetime import date as _date, timedelta as _td
+    from collections import defaultdict
+    import sqlite3
+
+    p = {**DEFAULT_FOREIGN_X_HOLDER_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "foreign_5d_sum", "foreign_zscore",
+        "holders_delta_w", "holder_zscore",
+        "week_end", "avg_volume_lots", "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    foreign_lookback = int(p["foreign_lookback_days"])
+    foreign_z_thr = float(p["foreign_zscore_threshold"])
+    rolling_weeks = int(p["holder_rolling_weeks"])
+    sigma_thr = float(p["holder_sigma_threshold"])
+    min_avg_lots = float(p["min_avg_volume_lots"])
+    avg_vol_lookback = int(p["avg_volume_lookback"])
+    score_clip_max = float(p["score_clip_max"])
+    needed_weeks = rolling_weeks + 1  # 前期 N 週 + 本週
+
+    as_of_d = _date.fromisoformat(date)
+    # 撈外資資料用的日期範圍(交易日 ~5 天 + 週末/假日緩衝)
+    inst_start_date = (
+        as_of_d - _td(days=foreign_lookback * 3)
+    ).isoformat()
+
+    with db.get_conn() as conn:
+        # 1. name_map
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+
+        # 2. 外資資料
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            inst_rows = conn.execute(
+                f"SELECT stock_id, date, foreign_buy_sell "
+                f"FROM institutional "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, date DESC",
+                (*sids, inst_start_date, date),
+            ).fetchall()
+        else:
+            inst_rows = conn.execute(
+                "SELECT stock_id, date, foreign_buy_sell "
+                "FROM institutional "
+                "WHERE date BETWEEN ? AND ? "
+                "ORDER BY stock_id, date DESC",
+                (inst_start_date, date),
+            ).fetchall()
+
+        # 3. shareholder_concentration:最近 N+1 週的所有目標 sid
+        try:
+            week_rows = conn.execute(
+                "SELECT DISTINCT week_end FROM shareholder_concentration "
+                "WHERE week_end <= ? "
+                "ORDER BY week_end DESC LIMIT ?",
+                (date, needed_weeks),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return pd.DataFrame(columns=cols)
+        if not week_rows:
+            return pd.DataFrame(columns=cols)
+        last_weeks = [r["week_end"] for r in week_rows]  # DESC
+        latest_week = last_weeks[0]
+
+        wk_placeholders = ",".join(["?"] * len(last_weeks))
+        if len(sids) <= 500:
+            sid_placeholders = ",".join(["?"] * len(sids))
+            sc_rows = conn.execute(
+                f"SELECT sid, week_end, holders_delta_w "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end IN ({wk_placeholders}) "
+                f"  AND sid IN ({sid_placeholders})",
+                (*last_weeks, *sids),
+            ).fetchall()
+        else:
+            sc_rows = conn.execute(
+                f"SELECT sid, week_end, holders_delta_w "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end IN ({wk_placeholders})",
+                tuple(last_weeks),
+            ).fetchall()
+
+        # 4. 撈 60 日均量需要 avg_vol_lookback 個交易日 + 緩衝
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date, lookback_days=avg_vol_lookback + 20,
+        )
+
+    # 外資:每 sid 取最近 foreign_lookback 個交易日的 foreign_buy_sell
+    foreign_by_sid: dict[str, list[int]] = {}
+    for r in inst_rows:
+        sid = r["stock_id"]
+        if sid not in foreign_by_sid:
+            foreign_by_sid[sid] = []
+        if len(foreign_by_sid[sid]) >= foreign_lookback:
+            continue
+        foreign_by_sid[sid].append(int(r["foreign_buy_sell"] or 0))
+
+    # 千張戶:每 sid 收集所有 weeks 的 delta_w(ASC 排序)
+    holder_per_sid: dict[str, list[dict]] = defaultdict(list)
+    for r in sc_rows:
+        holder_per_sid[r["sid"]].append({
+            "week_end": r["week_end"],
+            "delta": r["holders_delta_w"],
+        })
+    for sid in holder_per_sid:
+        holder_per_sid[sid].sort(key=lambda x: x["week_end"])
+
+    # 第一輪:套硬條件(外資 sum > 0 + 千張戶 4 週突破 + 流動性),收 candidate
+    cand: list[dict] = []
+    for sid in sids:
+        # 流動性
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or len(price_df) < avg_vol_lookback:
+            continue
+        recent_vol = price_df["volume"].tail(avg_vol_lookback)
+        avg_vol_lots = float(recent_vol.mean()) / 1000.0
+        if pd.isna(avg_vol_lots) or avg_vol_lots < min_avg_lots:
+            continue
+        close = float(price_df["close"].iloc[-1])
+        if close <= 0:
+            continue
+
+        # 外資 5 日累計 > 0(z-score 留到下面整體算)
+        foreign_window = foreign_by_sid.get(sid, [])
+        if len(foreign_window) < foreign_lookback:
+            continue
+        foreign_sum = sum(foreign_window)
+        if foreign_sum <= 0:
+            continue
+
+        # 千張戶:本週 delta_w > 0 + 突破前 4 週 mean + 0.5σ
+        rows_for_sid = holder_per_sid.get(sid, [])
+        if not rows_for_sid:
+            continue
+        latest_row = next(
+            (r for r in rows_for_sid if r["week_end"] == latest_week),
+            None,
+        )
+        if latest_row is None or latest_row["delta"] is None:
+            continue
+        latest_delta = int(latest_row["delta"])
+        if latest_delta <= 0:
+            continue
+        prior_deltas = [
+            r["delta"] for r in rows_for_sid
+            if r["week_end"] != latest_week and r["delta"] is not None
+        ]
+        if len(prior_deltas) < rolling_weeks:
+            continue  # 歷史不足 → skip(避免少樣本誤判)
+        window = prior_deltas[-rolling_weeks:]
+        s = pd.Series(window, dtype=float)
+        mu_h = float(s.mean())
+        sigma_h = float(s.std(ddof=1))
+        if pd.isna(sigma_h):
+            sigma_h = 0.0
+        threshold = mu_h + sigma_thr * sigma_h
+        if latest_delta <= threshold:
+            continue
+        # 個股 holder z-score(sigma_h=0 → 視為大幅突破,z=sigma_thr 剛好過門檻)
+        holder_z = (
+            (latest_delta - mu_h) / sigma_h
+            if sigma_h > 0 else float(sigma_thr)
+        )
+
+        cand.append({
+            "sid": sid,
+            "foreign_sum": foreign_sum,
+            "holder_delta": latest_delta,
+            "holder_z": holder_z,
+            "avg_vol_lots": avg_vol_lots,
+            "close": close,
+        })
+
+    if not cand:
+        return pd.DataFrame(columns=cols)
+
+    # 外資 z-score 在候選池內計算(< 2 檔 / std=0 → 中性 1.0,剛好等於預設門檻)
+    sums = pd.Series([c["foreign_sum"] for c in cand], dtype=float)
+    if len(sums) >= 2:
+        mu_f = float(sums.mean())
+        sigma_f = float(sums.std(ddof=1))
+    else:
+        mu_f, sigma_f = 0.0, 0.0
+    use_zscore = sigma_f > 0
+
+    rows: list[dict] = []
+    for c in cand:
+        if use_zscore:
+            foreign_z = (c["foreign_sum"] - mu_f) / sigma_f
+        else:
+            # 池太小 / std=0 → 已通過 sum > 0 hard filter,視為中性過門檻
+            foreign_z = float(foreign_z_thr)
+        if foreign_z < foreign_z_thr:
+            continue
+
+        # score = (foreign_z + holder_z) / 2,clip 0~score_clip_max
+        raw_score = foreign_z * 0.5 + c["holder_z"] * 0.5
+        score = max(0.0, min(score_clip_max, raw_score))
+
+        rows.append({
+            "stock_id": c["sid"],
+            "name": name_map.get(c["sid"], c["sid"]),
+            "close": c["close"],
+            "foreign_5d_sum": c["foreign_sum"],
+            "foreign_zscore": foreign_z,
+            "holders_delta_w": c["holder_delta"],
+            "holder_zscore": c["holder_z"],
+            "week_end": latest_week,
+            "avg_volume_lots": c["avg_vol_lots"],
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -2277,6 +2554,8 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "ex_dividend_swing": screen_ex_dividend_swing,
     # 事件驅動:月營收公佈前佈局(5 號前夕 YoY 高 + 法人連買)
     "revenue_announce_anticipation": screen_revenue_announce_anticipation,
+    # 籌碼共振:外資 5d 累計買超 z>1.0 + 千張戶本週突破 4w mean+0.5σ
+    "foreign_x_holder_alignment": screen_foreign_x_holder_alignment,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -2303,6 +2582,8 @@ STRATEGY_LABELS: dict[str, str] = {
     "ex_dividend_swing": "除權息搶反彈",
     # 事件驅動:月營收公佈前佈局
     "revenue_announce_anticipation": "營收公佈前佈局",
+    # 籌碼共振:外資 + 千張戶
+    "foreign_x_holder_alignment": "外資千張共振",
 }
 
 
@@ -2411,6 +2692,10 @@ STRATEGY_RR_PARAMS: dict[str, tuple[float, float, int]] = {
     # target 4%(中位)、stop 3%(reward/risk ~1.33)、hold 10(萬一公佈延後仍安全)。
     # 待累積 N 個月 fires 後 Plan G 校準。
     "revenue_announce_anticipation": (0.04, 0.03, 10),
+    # foreign_x_holder_alignment:外資 + 千張戶共振屬中期籌碼信號,
+    # target 4%、stop 3%(R:R ~1.33)、hold 10(spec)。
+    # 待累積 fires 後 Plan G 校準。
+    "foreign_x_holder_alignment": (0.04, 0.03, 10),
 }
 
 # Default 給沒在 STRATEGY_RR_PARAMS 內的策略用(volume_kd / ma_squeeze_breakout
@@ -2634,6 +2919,8 @@ STRATEGY_CATEGORY: dict[str, str] = {
     # 事件驅動:月營收公佈前佈局 — 同 ex_dividend_swing 屬事件,歸「基本面」類
     # (YoY 強 = 基本面動能),sideways/bear regime 也想留)
     "revenue_announce_anticipation": "基本面",
+    # 籌碼共振:外資 + 千張戶,跟 big_holder_inflow / inst_consensus 同類
+    "foreign_x_holder_alignment": "籌碼",
 }
 
 # regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
@@ -2665,6 +2952,7 @@ __all__ = [
     "screen_big_holder_inflow",
     "screen_ex_dividend_swing",
     "screen_revenue_announce_anticipation",
+    "screen_foreign_x_holder_alignment",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
@@ -2692,6 +2980,7 @@ __all__ = [
     "DEFAULT_BIG_HOLDER_PARAMS",
     "DEFAULT_EX_DIVIDEND_SWING_PARAMS",
     "DEFAULT_REVENUE_ANNOUNCE_PARAMS",
+    "DEFAULT_FOREIGN_X_HOLDER_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
     "STOP_LOSS_MULT",
