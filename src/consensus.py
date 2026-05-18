@@ -98,6 +98,7 @@ STRATEGY_NATURE: dict[str, str] = {
     "ex_dividend_swing": "neutral",
     "eps_acceleration": "neutral",
     "revenue_acceleration": "neutral",
+    "revenue_announce_anticipation": "neutral",
 }
 
 
