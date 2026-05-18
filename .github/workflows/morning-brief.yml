@@ -1,17 +1,28 @@
 name: Morning Brief (pre-market)
 
-# 盤前快訊:每交易日 08:30 Asia/Taipei(00:30 UTC)推播
+# 盤前快訊:每交易日 ~08:00 Asia/Taipei 推播
 #
-# 目的:主公開盤前 30 分鐘掌握隔夜變動(警示更新 / 重大 news / 推薦變動 / 美股情緒),
-# 不重複推昨晚 22:13 那一輪 — 只推「變動 + 重要警示」,無變動推極簡訊。
+# 為什麼用兩班 cron(2026-05-18 修):
+#   2026-05-18 主公盤前快訊延遲 4h 18min — GHA 把 00:30 UTC 那班 cron 延後到
+#   04:48 UTC 才執行(同帳號 news-notify hourly 常延 18-55 min,intraday
+#   30-min cron 也整輪漏跑)。GHA docs 明示 schedule event 在 high load 時
+#   會延後/漏跑,整半點 boundary(:00 / :30)最嚴重 — 全 GitHub 一堆 user
+#   排在那。修法:
+#     - 主班移到 off-boundary 23:47 UTC(= 07:47 TW)
+#     - 30 分鐘後再跑一班 safety net 00:17 UTC(= 08:17 TW)當保險
+#     - safety net 用 gh api 查最近 8h 已有成功 run → skip 不重複推
+#     - concurrency group 確保主班+補班序列執行,不會雙開競爭推播
 #
 # Kill-switch:MORNING_BRIEF_ENABLED=false → script 自己 exit 0 不推。
 
 on:
   schedule:
-    # 00:30 UTC = 08:30 Asia/Taipei,週一到週五(台股不開的週末跳過)
-    # 比 daily-notify 22:13 慢 ~10 小時,有時間讓 MOPS 凌晨更新 + 美股收盤
-    - cron: "30 0 * * 1-5"
+    # 主班 — 07:47 TW(off-boundary 避開 GHA cron 壅塞 :00 / :30)
+    # cron weekday 0-4 = UTC 週日到週四,加 8h 後 = TW 週一到週五
+    - cron: "47 23 * * 0-4"
+    # 補班 — 08:17 TW (主班 +30min),safety net for GHA cron drop
+    # weekday 1-5 = UTC 週一到週五,加 8h = TW 週一到週五同一天
+    - cron: "17 0 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -23,10 +34,16 @@ on:
         required: false
         default: ""
 
-# 同 group 同時最多 1 個,避免兩輪 cron 重疊
+# 同 group 同時最多 1 個 — 主班還在跑時補班 queue 等待,完成後補班的 dedup
+# step 會偵測「已成功推過」 → skip,確保只推一次
 concurrency:
   group: morning-brief
   cancel-in-progress: false
+
+# actions:read 給 dedup step 跑 gh api 撈 workflow runs
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   brief:
@@ -37,19 +54,47 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Dedup — schedule trigger 才檢查,workflow_dispatch 永遠跑(主公手動補推用)
+      # 8h 窗口可同時 cover 主班(23:47 UTC) + 補班(00:17 UTC)
+      # 主班正常完成 → 補班看到 prior success → skip
+      # 主班 GHA drop / fail → 補班看不到 prior success → 接著推
+      - name: Skip if already pushed in past 8h
+        id: dedup
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cutoff=$(date -u -d '8 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          self_id="${{ github.run_id }}"
+          repo="${{ github.repository }}"
+          prior=$(gh api \
+            "/repos/$repo/actions/workflows/morning-brief.yml/runs?per_page=20&status=success" \
+            --jq ".workflow_runs[] | select(.id != $self_id) | select(.created_at > \"$cutoff\") | .id" \
+            | wc -l)
+          if [ "$prior" -gt 0 ]; then
+            echo "[MORNING_BRIEF] $prior prior successful run(s) since $cutoff — skip"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "[MORNING_BRIEF] no prior successful run in past 8h — proceed"
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Python 3.11
+        if: steps.dedup.outputs.skip != '1'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
       - name: Install dependencies
+        if: steps.dedup.outputs.skip != '1'
         run: pip install -r requirements.txt
 
       # 雲端 runner 是 fresh container — preload data/twse_snapshot/ CSV 進 SQLite
       # 確保 compute_top_picks(走 _select_top_picks) 有 daily_prices / daily_picks
       # 歷史可比對,否則 yesterday_picks 永遠空,diff 永遠是「沒變動」失去意義。
       - name: Preload snapshots into SQLite
+        if: steps.dedup.outputs.skip != '1'
         run: |
           python -c "
           from src import database as db
@@ -59,6 +104,7 @@ jobs:
           "
 
       - name: Run morning brief
+        if: steps.dedup.outputs.skip != '1'
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
