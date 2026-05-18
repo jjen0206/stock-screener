@@ -57,6 +57,8 @@ STRATEGY_CATEGORIES: dict[str, str] = {
     # 基本面
     "eps_acceleration": "基本面",
     "revenue_acceleration": "基本面",
+    # PEAD 事件驅動歸基本面類(語義跟 eps_acceleration / revenue_acceleration 親)
+    "earnings_surprise_followthrough": "基本面",
     # 殖利率
     "high_yield_stable": "殖利率",
     # 大盤相對
@@ -100,6 +102,7 @@ STRATEGY_NATURE: dict[str, str] = {
     "revenue_acceleration": "neutral",
     "revenue_announce_anticipation": "neutral",
     "foreign_x_holder_alignment": "neutral",     # 籌碼共振,跟方向訊號正交
+    "earnings_surprise_followthrough": "neutral",  # 事件驅動 PEAD,跟方向訊號正交
 }
 
 
