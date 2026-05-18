@@ -885,8 +885,11 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         except (TypeError, ValueError):
             theme_badge = ""
 
+    # Watchlist 命中 → ⭐ 前綴(放在 rank 後 / sid 前,跟 consensus badge 在
+    # sid 後分開,避免兩顆 ⭐ 黏一起)。flag 由 prioritize_watchlist 注入。
+    watchlist_star = "⭐ " if pick.get("is_watchlist") else ""
     lines = [
-        f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"
+        f"▎{b(f'#{rank}', channel)}  {watchlist_star}{b(f'{sid} {name}', channel)}"
         f"{badge_suffix}{theme_badge}"
     ]
     # 收盤 + 漲跌
@@ -1194,7 +1197,8 @@ def format_premium_picks_block(
             close_str = f"{float(close):.2f}" if close is not None else "—"
         except (TypeError, ValueError):
             close_str = "—"
-        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        wl_star = "⭐ " if r.get("is_watchlist") else ""
+        header = f"{i}. [{sid}] {wl_star}{b(name, channel)} {close_str}"
         sub_parts = [f"🏛️ 法人連買 {int(cd)} 天", f"🐋 千張戶 +{int(dw)}"]
         if ml is not None:
             try:
@@ -1239,7 +1243,8 @@ def format_big_holder_movers_block(
             close_str = f"{float(close):.2f}" if close is not None else "—"
         except (TypeError, ValueError):
             close_str = "—"
-        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        wl_star = "⭐ " if r.get("is_watchlist") else ""
+        header = f"{i}. [{sid}] {wl_star}{b(name, channel)} {close_str}"
         try:
             dw_int = int(dw)
         except (TypeError, ValueError):
@@ -1744,6 +1749,12 @@ def format_top_picks_message(
                 "[NOTIFIER] get_top_shareholder_movers 失敗,略過該 section"
             )
             big_holder_movers = []
+    # 個人化:movers 也套 watchlist 重排(各 sub-section 一致)
+    try:
+        from src.watchlist_priority import prioritize_watchlist as _wl_prio
+        big_holder_movers = _wl_prio(list(big_holder_movers or []))
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] movers watchlist 重排失敗,維持原序")
     movers_block = format_big_holder_movers_block(
         big_holder_movers or [], channel=channel,
     )
@@ -1778,6 +1789,15 @@ def format_top_picks_message(
     gating_caption = _regime_gating_caption(picks)
     if gating_caption:
         parts.append(gating_caption)
+
+    # Watchlist 命中 caption(2026-05-18 加)— 只要任一 section 有命中就顯。
+    # 不擋訊息:import / check 失敗都 silent skip。
+    try:
+        from src.watchlist_priority import any_watchlist_hit
+        if any_watchlist_hit(picks, premium_picks, big_holder_movers):
+            parts.append("⭐ 表示在你的自選股內")
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] watchlist caption 檢查失敗,略過")
 
     # Drawdown 警報(2026-05-17 加)— 從 user_positions 撈整體損益,
     # > 10% 黃燈 / > 20% 紅燈。RISK_MGMT_ENABLED=false 或無持倉 → skip。
@@ -2022,6 +2042,17 @@ def notify_top_picks(
         date, top_n=top_n, confluence_n=confluence_n, params=params,
     )
 
+    # 個人化:watchlist 命中置頂(2026-05-18 加)— 不動 picks 計算邏輯,只動排序
+    # + 注入 is_watchlist flag 給 format_pick_block 加 ⭐。watchlist 為空 → 排序
+    # 不變,等同舊版行為。重排後重新分配 rank,讓訊息 #1 = 推播第一順位。
+    try:
+        from src.watchlist_priority import prioritize_watchlist
+        picks = prioritize_watchlist(picks)
+        for i, p in enumerate(picks, start=1):
+            p["rank"] = i
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] watchlist priority 重排失敗,picks 維持原序")
+
     # SHAP 解釋性 enrich + cache(2026-05-14 加)— picks list in-place 加
     # "shap_reason" 給 format_pick_block 顯示。失敗不擋主推播(每筆 graceful skip)。
     try:
@@ -2058,6 +2089,13 @@ def notify_top_picks(
     except Exception:  # noqa: BLE001
         logger.exception("[NOTIFIER] get_strong_follower_premium 失敗,略過該 section")
         premium_picks = []
+
+    # 個人化:premium picks 也套 watchlist 重排(各 sub-section 一致)
+    try:
+        from src.watchlist_priority import prioritize_watchlist as _wl_prio
+        premium_picks = _wl_prio(premium_picks)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] premium_picks watchlist 重排失敗,維持原序")
 
     results: dict[str, bool] = {}
     tg_msg = format_top_picks_message(
