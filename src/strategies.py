@@ -2111,7 +2111,16 @@ DEPRECATED_STRATEGIES: dict[str, str] = {
 # 信號重疊的問題確認被 per-strategy 重訓化解。
 #
 # Threshold 對照(per-strategy 校準 30d / 60d / 126d):
-#   bias_convergence    0.65 → 100% WR (30d: 97 fires)
+#   bias_convergence    0.55 → 92.6% WR (126d: 408 fires) ⬇ 2026-05-18 0.65→0.55
+#                       Cost-aware retrain (apply_costs=True explicit) + sweep:
+#                       baseline    fires=8081 WR=33.7% ROI=-0.64% (cost-adj)
+#                       thr=0.65 OLD model 97f WR=87.6% ROI=+2.92%
+#                       thr=0.55 NEW model 408 WR=92.6% ROI=+2.92% ← 採用
+#                                              total_return=+1191% (best)
+#                       thr=0.60 NEW model 282 WR=96.1% ROI=+3.24%
+#                       thr=0.70 NEW model 70  WR=100%  ROI=+3.68% (太嚴)
+#                       詳見 docs/strategy-rescue-bias-convergence-2026-05-18.md
+#                       與 scripts/audit/sweep_bias_convergence_threshold.py
 #   macd_golden         0.60 → 100% WR (30d: 30 fires)
 #   bb_lower_rebound    0.50 → 75.8% WR (30d: 33 fires)
 #   volume_breakout     0.65 → 100% WR (30d: 74 fires)
@@ -2132,7 +2141,7 @@ DEPRECATED_STRATEGIES: dict[str, str] = {
 # 詳見 docs/gap-up-decision-2026-05-15.md。
 STRATEGY_ML_THRESHOLDS: dict[str, float] = {
     "ma_alignment": 0.55,
-    "bias_convergence": 0.65,
+    "bias_convergence": 0.55,
     "macd_golden": 0.60,
     "bb_lower_rebound": 0.50,
     "volume_breakout": 0.65,
