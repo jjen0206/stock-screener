@@ -154,16 +154,20 @@ SCHEMA: list[str] = [
     """,
     """
     CREATE TABLE IF NOT EXISTS financials (
-        stock_id    TEXT NOT NULL,
-        period_type TEXT NOT NULL,
-        period      TEXT NOT NULL,
-        revenue     REAL,
-        revenue_yoy REAL,
-        eps         REAL,
-        roe         REAL,
+        stock_id      TEXT NOT NULL,
+        period_type   TEXT NOT NULL,
+        period        TEXT NOT NULL,
+        revenue       REAL,
+        revenue_yoy   REAL,
+        eps           REAL,
+        eps_yoy       REAL,
+        roe           REAL,
+        announce_date TEXT,
         PRIMARY KEY (stock_id, period_type, period)
     )
     """,
+    # idx_financials_announce_date 在 _migrate_financials_add_announce_date 內建
+    # — 避免舊 schema(沒 announce_date 欄)init_db SCHEMA 階段就因 column 不存在炸掉。
     """
     CREATE TABLE IF NOT EXISTS dividend (
         stock_id         TEXT NOT NULL,
@@ -670,6 +674,33 @@ def init_db(db_path: str | Path | None = None) -> None:
         _migrate_ml_walkforward_add_split_method(conn)
         _migrate_vbt_grid_add_sharpe_daily(conn)
         _migrate_user_positions_add_trailing(conn)
+        _migrate_financials_add_announce_date(conn)
+
+
+def _migrate_financials_add_announce_date(conn) -> None:
+    """P2-4 PEAD 策略 prerequisite(2026-05-19):加 announce_date / eps_yoy 欄。
+
+      announce_date TEXT  FinMind 原始 r["date"] — 季報實際公佈日,給 PEAD 算
+                          「公佈後 1-5 日進場窗口」用。舊資料 NULL,backfill 重抓補。
+      eps_yoy       REAL  同 stock_id 比前年同季 EPS 的 YoY(百分比)。
+
+    既有 cache.db 升級時自動 ALTER。SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS,
+    自己 PRAGMA 檢查冪等。Index 也同步 CREATE IF NOT EXISTS(SCHEMA 也有,
+    重複呼叫不會出錯)。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(financials)"
+        ).fetchall()
+    }
+    if "announce_date" not in cols:
+        conn.execute("ALTER TABLE financials ADD COLUMN announce_date TEXT")
+    if "eps_yoy" not in cols:
+        conn.execute("ALTER TABLE financials ADD COLUMN eps_yoy REAL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_financials_announce_date "
+        "ON financials(announce_date)"
+    )
 
 
 def _migrate_user_positions_add_trailing(conn) -> None:
@@ -1705,7 +1736,11 @@ def upsert_dividend(rows: Iterable[dict], db_path: str | Path | None = None) -> 
 
 
 def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -> int:
-    """寫入 / 更新財報(月營收 + 季 EPS/ROE)。"""
+    """寫入 / 更新財報(月營收 + 季 EPS/ROE/announce_date/eps_yoy)。
+
+    P2-4 PEAD prerequisite(2026-05-19):新欄 announce_date / eps_yoy 一起 COALESCE,
+    舊呼叫端不傳這兩欄不會清空既有值。
+    """
     rows_list = list(rows)
     if not rows_list:
         return 0
@@ -1713,14 +1748,18 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
         conn.executemany(
             """
             INSERT INTO financials
-                (stock_id, period_type, period, revenue, revenue_yoy, eps, roe)
+                (stock_id, period_type, period, revenue, revenue_yoy,
+                 eps, eps_yoy, roe, announce_date)
             VALUES
-                (:stock_id, :period_type, :period, :revenue, :revenue_yoy, :eps, :roe)
+                (:stock_id, :period_type, :period, :revenue, :revenue_yoy,
+                 :eps, :eps_yoy, :roe, :announce_date)
             ON CONFLICT(stock_id, period_type, period) DO UPDATE SET
                 revenue=COALESCE(excluded.revenue, financials.revenue),
                 revenue_yoy=COALESCE(excluded.revenue_yoy, financials.revenue_yoy),
                 eps=COALESCE(excluded.eps, financials.eps),
-                roe=COALESCE(excluded.roe, financials.roe)
+                eps_yoy=COALESCE(excluded.eps_yoy, financials.eps_yoy),
+                roe=COALESCE(excluded.roe, financials.roe),
+                announce_date=COALESCE(excluded.announce_date, financials.announce_date)
             """,
             [
                 {
@@ -1730,7 +1769,9 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
                     "revenue": r.get("revenue"),
                     "revenue_yoy": r.get("revenue_yoy"),
                     "eps": r.get("eps"),
+                    "eps_yoy": r.get("eps_yoy"),
                     "roe": r.get("roe"),
+                    "announce_date": r.get("announce_date"),
                 }
                 for r in rows_list
             ],
@@ -2633,7 +2674,17 @@ def preload_snapshots(
                     if pd.notna(r.get("revenue_yoy")) else None
                 ),
                 "eps": float(r["eps"]) if pd.notna(r.get("eps")) else None,
+                # 新欄 announce_date / eps_yoy(P2-4 PEAD prerequisite,2026-05-19)。
+                # 舊 snapshot 沒這兩欄 → r.get() 回 None,upsert COALESCE 不會清空既有值。
+                "eps_yoy": (
+                    float(r["eps_yoy"])
+                    if pd.notna(r.get("eps_yoy")) else None
+                ),
                 "roe": float(r["roe"]) if pd.notna(r.get("roe")) else None,
+                "announce_date": (
+                    str(r["announce_date"])
+                    if pd.notna(r.get("announce_date")) else None
+                ),
             })
         if rows:
             upsert_financials(rows, db_path=db_path)
