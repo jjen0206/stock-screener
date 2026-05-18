@@ -70,6 +70,7 @@ def test_backtest_basic_buy_and_sell(tmp_db, monkeypatch):
     result = bt.backtest_short(
         "2024-01-01", "2024-01-31", hold_days=2,
         universe=[("A", "A股"), ("B", "B股")],
+        apply_costs=False,
     )
 
     trades = result["trades"]
@@ -176,6 +177,7 @@ def test_backtest_summary_stats_arithmetic(tmp_db, monkeypatch):
     result = bt.backtest_short(
         "2024-01-01", "2024-01-31", hold_days=1,
         universe=[("A", "A股"), ("B", "B股")],
+        apply_costs=False,
     )
     s = result["summary"]
     assert s["trades"] == 3
@@ -241,6 +243,7 @@ def test_equity_curve_compounds_correctly(tmp_db, monkeypatch):
     result = bt.backtest_short(
         "2024-01-01", "2024-01-31", hold_days=2,
         universe=[("A", "A股")],
+        apply_costs=False,
     )
     curve = result["equity_curve"]
     # 第 1 天 (2024-01-02): 還沒結算

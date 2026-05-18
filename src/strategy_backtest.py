@@ -24,6 +24,12 @@ from typing import Any, Sequence
 
 import pandas as pd
 
+from src.backtest_costs import (
+    SLIPPAGE_BPS_DEFAULT,
+    apply_buy_cost,
+    apply_sell_cost,
+    round_trip_cost_rate,
+)
 from src.performance_analysis import is_enabled
 
 logger = logging.getLogger(__name__)
@@ -112,6 +118,10 @@ def backtest_combination(
     end_date: str,
     holding_days: int = 5,
     mode: str = "union",
+    *,
+    apply_costs: bool = True,
+    slippage_bps: int = SLIPPAGE_BPS_DEFAULT,
+    broker_fee_discount: float = 1.0,
 ) -> dict[str, Any]:
     """對選定策略組合從 daily_picks 撈歷史推薦,算 holding_days 後實際報酬。
 
@@ -121,6 +131,9 @@ def backtest_combination(
         start_date / end_date: 'YYYY-MM-DD',濾 pick_date 區間(含)。
         holding_days: 持有 N 個**交易日**後出場(預設 5)。
         mode: 'union' = 任一策略命中 / 'intersect' = 所有策略同日同 sid 都命中。
+        apply_costs: True(預設)→ 套用台股交易成本(滑價在價格,手續費+稅在 PnL);
+            False → 不套(unit test / 無成本上限參考用)。
+        slippage_bps / broker_fee_discount: 見 src.backtest_costs。
 
     Returns:
         {strategies, mode, holding_days, n_trades, win_rate,
@@ -178,7 +191,16 @@ def backtest_combination(
         )
         if exit_px is None:
             continue
-        ret_pct = (exit_px - entry) / entry * 100.0
+        # 套用台股交易成本(預設 apply_costs=True):
+        # 1) 滑價在價格 — 進場 ×(1+bps),出場 ×(1−bps)
+        # 2) 手續費 + 證交稅在 PnL — 從 % 報酬扣 round_trip_cost_rate
+        if apply_costs:
+            entry_eff = apply_buy_cost(entry, slippage_bps)
+            exit_eff = apply_sell_cost(exit_px, slippage_bps)
+            gross_pct = (exit_eff - entry_eff) / entry_eff * 100.0
+            ret_pct = gross_pct - round_trip_cost_rate(broker_fee_discount) * 100.0
+        else:
+            ret_pct = (exit_px - entry) / entry * 100.0
         trades.append({
             "pick_date": pick_date,
             "sid": sid,

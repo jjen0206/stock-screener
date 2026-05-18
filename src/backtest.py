@@ -26,6 +26,12 @@ import pandas as pd
 
 from src import database as db
 from src._bulk_load import bulk_load_prices
+from src.backtest_costs import (
+    SLIPPAGE_BPS_DEFAULT,
+    adjust_pnl,
+    apply_buy_cost,
+    apply_sell_cost,
+)
 from src.strategies import ALL_STRATEGIES
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,10 @@ def simulate_outcome(
     entry_price: float,
     target_pct: float = 0.05,
     stop_pct: float = 0.03,
+    *,
+    apply_costs: bool = True,
+    slippage_bps: int = SLIPPAGE_BPS_DEFAULT,
+    broker_fee_discount: float = 1.0,
 ) -> tuple[str, float]:
     """模擬持有 N 天的結局 — 回 (outcome, return_pct)。
 
@@ -44,10 +54,12 @@ def simulate_outcome(
         entry_price: 進場價(D 收盤)
         target_pct: 目標 % (default 0.05 = +5%)
         stop_pct: 停損 % (default 0.03 = -3%)
+        apply_costs: True → 套用台股交易成本;False → 不套(舊邏輯)。
+        slippage_bps / broker_fee_discount: 見 src.backtest_costs。
 
     Returns:
         outcome: 'win' | 'lose'
-        return_pct: 報酬率(decimal,e.g. 0.05 = +5%)
+        return_pct: 報酬率(decimal,e.g. 0.05 = +5%);apply_costs=True 時已扣成本。
 
     決策規則:
         1. 逐日掃 D+1 ~ D+N
@@ -56,13 +68,25 @@ def simulate_outcome(
         4. 同日兩個都觸 → 保守視為先觸停損(lose)
         5. N 天結束都沒觸 → close at D+N close,(close-entry)/entry,
            > 0 → win,else → lose
+
+    成本模型(apply_costs=True):
+        - 進場價套滑價 ×(1+bps),出場價套滑價 ×(1−bps)。
+        - target / stop 觸發後,從 return 扣 round_trip_cost_rate
+          (e.g. +5% → +4.415%; -3% → -3.585%)。
+        - 觸停損可能讓 win 變 lose(若 gross_ret < cost),反之亦然。
     """
     if entry_price <= 0:
         # 邊角:沒 entry → 視為 lose 0(避免除零),caller 通常會先 filter
         return ("lose", 0.0)
 
-    target_price = entry_price * (1 + target_pct)
-    stop_price = entry_price * (1 - stop_pct)
+    # 套滑價:進場價往上、出場價往下
+    if apply_costs:
+        entry_eff = apply_buy_cost(entry_price, slippage_bps)
+    else:
+        entry_eff = entry_price
+
+    target_price = entry_eff * (1 + target_pct)
+    stop_price = entry_eff * (1 - stop_pct)
 
     last_close = entry_price
     for _, row in ohlc_future.iterrows():
@@ -74,14 +98,30 @@ def simulate_outcome(
         hit_stop = low <= stop_price
         # 同日兩邊都觸 → 保守視為先觸停損(intra-day path 不可知,壞情境)
         if hit_stop:
+            # 出場價 = stop_price × (1−slippage) → 已含滑價,再扣稅費
+            if apply_costs:
+                exit_eff = apply_sell_cost(stop_price, slippage_bps)
+                gross = (exit_eff - entry_eff) / entry_eff
+                return ("lose", adjust_pnl(gross, broker_fee_discount))
             return ("lose", -stop_pct)
         if hit_target:
+            if apply_costs:
+                exit_eff = apply_sell_cost(target_price, slippage_bps)
+                gross = (exit_eff - entry_eff) / entry_eff
+                ret_net = adjust_pnl(gross, broker_fee_discount)
+                # 扣完成本可能變負,但仍判 win(觸目標的路徑)
+                return ("win", ret_net)
             return ("win", target_pct)
 
     # N 天結束沒觸 → 看 D+N close vs entry
     if last_close <= 0:
         return ("lose", 0.0)
-    final_return = (last_close - entry_price) / entry_price
+    if apply_costs:
+        exit_eff = apply_sell_cost(last_close, slippage_bps)
+        gross = (exit_eff - entry_eff) / entry_eff
+        final_return = adjust_pnl(gross, broker_fee_discount)
+    else:
+        final_return = (last_close - entry_price) / entry_price
     if final_return > 0:
         return ("win", final_return)
     return ("lose", final_return)
@@ -114,6 +154,10 @@ def backtest_strategy(
     ml_filter: float | None = None,
     ml_model=None,
     strategy_model=None,
+    *,
+    apply_costs: bool = True,
+    slippage_bps: int = SLIPPAGE_BPS_DEFAULT,
+    broker_fee_discount: float = 1.0,
 ) -> dict:
     """跑單一 strategy 在過去 lookback_days 日的回測。
 
@@ -221,6 +265,9 @@ def backtest_strategy(
             outcome, ret = simulate_outcome(
                 future, entry_price,
                 target_pct=target_pct, stop_pct=stop_pct,
+                apply_costs=apply_costs,
+                slippage_bps=slippage_bps,
+                broker_fee_discount=broker_fee_discount,
             )
             n_fires += 1
             total_return += ret
@@ -249,6 +296,10 @@ def backtest_all_strategies(
     ml_filter: float | None = None,
     per_strategy_ml: bool = False,
     disable_per_strategy_models: bool = False,
+    *,
+    apply_costs: bool = True,
+    slippage_bps: int = SLIPPAGE_BPS_DEFAULT,
+    broker_fee_discount: float = 1.0,
 ) -> list[dict]:
     """跑全部(或指定子集)strategies — 回 list[dict] 餵 db.dump_strategy_backtest。
 
@@ -319,6 +370,9 @@ def backtest_all_strategies(
             hold_days=hold_days, params=params,
             ml_filter=this_filter, ml_model=ml_model,
             strategy_model=this_strategy_model,
+            apply_costs=apply_costs,
+            slippage_bps=slippage_bps,
+            broker_fee_discount=broker_fee_discount,
         )
         results.append({
             "strategy": name,
