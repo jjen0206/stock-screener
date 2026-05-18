@@ -100,6 +100,7 @@ STRATEGY_NATURE: dict[str, str] = {
     "revenue_acceleration": "neutral",
     "revenue_announce_anticipation": "neutral",
     "foreign_x_holder_alignment": "neutral",     # 籌碼共振,跟方向訊號正交
+    "earnings_surprise_followthrough": "neutral",  # PEAD 事件,跟方向訊號正交
 }
 
 
