@@ -73,9 +73,21 @@ def _is_quota_exceeded(exc: BaseException) -> bool:
 
 
 def _is_not_configured_error(exc: BaseException) -> bool:
-    """偵測 SDK / API key 缺失 — generate_with_gemini 自己拋的 RuntimeError。"""
+    """偵測 SDK / API key 缺失或失效。
+
+    涵蓋兩類:
+    - generate_with_gemini 自己拋的 RuntimeError(訊息含 GEMINI_API_KEY /
+      google-generativeai)— 整個 SDK 沒裝 / env 沒設
+    - Gemini API 回 400 API_KEY_INVALID(key 形狀對但實際失效 / 被撤銷)—
+      訊息形如 `400 API key not valid. Please pass a valid API key.`
+      → 此情況 fail-fast 整批,免得 500 檔 ×3s 全打一輪才發現
+    """
     msg = str(exc)
-    return "GEMINI_API_KEY" in msg or "google-generativeai" in msg
+    if "GEMINI_API_KEY" in msg or "google-generativeai" in msg:
+        return True
+    if "API_KEY_INVALID" in msg or "API key not valid" in msg:
+        return True
+    return False
 
 
 def _safe_get_session_state():
