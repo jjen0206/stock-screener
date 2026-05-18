@@ -1127,12 +1127,154 @@ def _render_regime_gating_badge(location: str = "page") -> None:
         )
 
 
+# === Verdict banner(首頁 / 系統結論頁共用)===
+#
+# 設計重點(2026-05-18 主公拍板):
+#   - 首頁第一行讓主公看到「今天系統覺得能不能進場」一行,綠 / 黃 / 紅 metric
+#     + Top 3 🟢 一覽,不用點四五層。
+#   - 系統結論頁同 banner 但展開三段 Top(綠 3 / 黃 5 / 紅 3)。
+#   - 雲端 cold load 不能 build_summary live(50 sids × ~200ms),
+#     優先讀 data/twse_snapshot/daily_verdict_summary.csv(daily-notify 預跑 + commit),
+#     CSV 不存在 / trade_date 對不上 → fallback live build(慢但永遠拿得到結果)。
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_verdict_summary_cached(trade_date: str) -> dict:
+    """讀 daily_verdict_summary.csv(快);沒命中或日期對不上 → live build_summary。
+
+    ttl=300 — 雲端 5 分鐘內 hit 同份 cache,daily 重跑覆寫 CSV 後 5 分鐘內全頁同步。
+    """
+    from src.verdict_summary import build_summary, load_from_csv
+
+    csv_path = (
+        config.PROJECT_ROOT / "data" / "twse_snapshot" / "daily_verdict_summary.csv"
+    )
+    cached = load_from_csv(csv_path)
+    if cached is not None and cached.get("trade_date") == trade_date:
+        return cached
+
+    # Fallback:CSV 沒有 / 日期不對 → live 算(慢)
+    try:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT p.sid, s.name FROM daily_picks p "
+                "LEFT JOIN stocks s ON s.stock_id = p.sid "
+                "WHERE p.trade_date=?",
+                (trade_date,),
+            ).fetchall()
+        universe = [{"sid": r["sid"], "name": r["name"]} for r in rows]
+    except Exception:  # noqa: BLE001
+        universe = []
+    # union watchlist
+    try:
+        wl = db.get_watchlist() or []
+        seen = {u["sid"] for u in universe}
+        for it in wl:
+            sid = str(it.get("stock_id", "")).strip()
+            if sid and sid not in seen:
+                universe.append({"sid": sid, "name": None})
+    except Exception:  # noqa: BLE001
+        pass
+
+    return build_summary(universe, trade_date)
+
+
+def _verdict_banner_metrics(summary: dict) -> None:
+    """三個 metric 並排 — 首頁 / 系統結論共用。手機自動 stack。"""
+    counts = summary.get("counts") or {"green": 0, "yellow": 0, "red": 0}
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🟢 可進場", counts.get("green", 0))
+    col2.metric("🟡 觀望", counts.get("yellow", 0))
+    col3.metric("🔴 不進場", counts.get("red", 0))
+
+
+_BANNER_COLUMNS = ["sid", "name", "score", "main_reason"]
+_BANNER_COL_LABEL = {
+    "sid": "代號",
+    "name": "名稱",
+    "score": "信心",
+    "main_reason": "主因",
+}
+
+
+def _banner_df(items: list[dict]) -> "pd.DataFrame":
+    if not items:
+        return pd.DataFrame(columns=list(_BANNER_COL_LABEL.values()))
+    df = pd.DataFrame(items)
+    # 只留 banner 用欄位 + 重命名為中文
+    keep = [c for c in _BANNER_COLUMNS if c in df.columns]
+    df = df[keep].rename(columns=_BANNER_COL_LABEL)
+    return df
+
+
+def _render_verdict_banner_compact(summary: dict) -> None:
+    """首頁精簡 banner — 三 metric + Top 3 🟢 一表。"""
+    _verdict_banner_metrics(summary)
+    top_green = summary.get("top_green") or []
+    if top_green:
+        st.caption("🟢 可進場 Top 3")
+        st.dataframe(
+            _banner_df(top_green),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("🟢 今日無可進場標的 — 等下一輪訊號")
+
+
+def _render_verdict_banner_full(summary: dict) -> None:
+    """系統結論完整 banner — 三 metric + 三段 Top 表(綠 3 / 黃 5 / 紅 3)。"""
+    _verdict_banner_metrics(summary)
+
+    top_green = summary.get("top_green") or []
+    top_yellow = summary.get("top_yellow") or []
+    top_red = summary.get("top_red") or []
+
+    st.subheader("🟢 可進場 Top 3")
+    if top_green:
+        st.dataframe(
+            _banner_df(top_green),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無可進場標的")
+
+    st.subheader("🟡 觀望 Top 5")
+    if top_yellow:
+        st.dataframe(
+            _banner_df(top_yellow),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無觀望標的")
+
+    st.subheader("🔴 不進場警示 Top 3")
+    if top_red:
+        st.dataframe(
+            _banner_df(top_red),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無不進場警示")
+
+
 # === 首頁 Dashboard ===
 
 def _page_dashboard() -> None:
-    """4 區塊速覽:大盤 / 今日推薦 Top 3 / 關注 Top 3 / 系統狀態。"""
+    """5 區塊速覽:軍師判讀 banner / 大盤 / 今日推薦 Top 3 / 關注 Top 3 / 系統狀態。"""
     st.header("🏠 今日速覽")
     st.caption("一頁看完台股最新狀況。詳細分析請切上方 tabs。")
+
+    # === 0. 軍師判讀 banner — 第一行先給結論(2026-05-18 主公拍板)===
+    trade_date = _get_latest_data_date()
+    if trade_date:
+        try:
+            summary = _get_verdict_summary_cached(trade_date)
+            _render_verdict_banner_compact(summary)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"📊 軍師判讀 banner 暫不可用:{type(e).__name__}")
 
     # === 1. 大盤速覽 ===
     st.markdown("### 📊 大盤速覽")
@@ -7843,6 +7985,16 @@ def _page_system_brief() -> None:
 
     # 大盤 regime gating badge — 系統結論頁標題下方,讓主公一眼看到當前 gating 狀態
     _render_regime_gating_badge(location="page")
+
+    # === 0. 軍師判讀 banner(三段 Top — 2026-05-18 主公拍板)===
+    trade_date = _get_latest_data_date()
+    if trade_date:
+        st.markdown("### 🎯 今日軍師判讀")
+        try:
+            summary = _get_verdict_summary_cached(trade_date)
+            _render_verdict_banner_full(summary)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"📊 軍師判讀 banner 暫不可用:{type(e).__name__}")
 
     db.init_db()
     with db.get_conn() as conn:
