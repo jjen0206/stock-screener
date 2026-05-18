@@ -233,6 +233,29 @@ def _date_to_quarter(d: str) -> str:
     return f"{dt.year}-Q{q}"
 
 
+def _prev_year_quarter(period: str) -> str | None:
+    """'2024-Q3' → '2023-Q3'。format 不對則回 None。"""
+    try:
+        year_str, q = period.split("-Q", 1)
+        return f"{int(year_str) - 1}-Q{int(q)}"
+    except (ValueError, AttributeError):
+        return None
+
+
+def _compute_eps_yoy(curr: float | None, prev: float | None) -> float | None:
+    """(curr - prev) / abs(prev) * 100。
+
+    邊界:
+    - prev = 0 或 ~0(|prev| < 1e-9):無意義,回 None(分母爆 / 數學上 undefined)
+    - 任一邊 None:回 None
+    """
+    if curr is None or prev is None:
+        return None
+    if abs(prev) < 1e-9:
+        return None
+    return (curr - prev) / abs(prev) * 100.0
+
+
 # === 對外 API ===
 
 def list_tw_stocks(force_refresh: bool = False) -> pd.DataFrame:
@@ -407,17 +430,24 @@ def fetch_quarterly_financials(stock_id: str, start: str, end: str) -> pd.DataFr
                     "季財報抓取失敗(可能需要 FinMind token):%s", ex
                 )
                 return pd.DataFrame()
+            # P2-4 PEAD prerequisite(2026-05-19):key 用 (stock_id, announce_date)
+            # 保留 r["date"](FinMind 原始公佈日),寫入新 announce_date 欄。
+            # 舊版 key collapse 成 quarter bucket 後丟掉了公佈日,PEAD 無法算
+            # 「公佈後 N 日進場窗口」。
             grouped: dict[tuple[str, str], dict] = {}
             for r in raw:
-                key = (r["stock_id"], r["date"])
+                ann = r["date"]
+                key = (r["stock_id"], ann)
                 if key not in grouped:
                     grouped[key] = {
                         "stock_id": r["stock_id"],
                         "period_type": "quarterly",
-                        "period": _date_to_quarter(r["date"]),
+                        "period": _date_to_quarter(ann),
+                        "announce_date": ann,
                         "revenue": None,
                         "revenue_yoy": None,
                         "eps": None,
+                        "eps_yoy": None,
                         "roe": None,
                     }
                 t = (r.get("type") or "").upper()
@@ -426,6 +456,30 @@ def fetch_quarterly_financials(stock_id: str, start: str, end: str) -> pd.DataFr
                     grouped[key]["eps"] = v
                 elif t == "ROE":
                     grouped[key]["roe"] = v
+
+            # 算 eps_yoy:同 stock_id 比前年同季 EPS。
+            # 為了處理本 batch 沒涵蓋前一年的 case,也讀 DB 既有 EPS 進 lookup table。
+            eps_by_period: dict[str, float] = {}
+            with db.get_conn() as conn:
+                existing = conn.execute(
+                    "SELECT period, eps FROM financials "
+                    "WHERE stock_id=? AND period_type='quarterly' "
+                    "AND eps IS NOT NULL",
+                    (stock_id,),
+                ).fetchall()
+            for row in existing:
+                eps_by_period[row["period"]] = row["eps"]
+            # 本 batch 新值覆蓋既有(EPS 可能 restated)
+            for v in grouped.values():
+                if v["eps"] is not None:
+                    eps_by_period[v["period"]] = v["eps"]
+            for v in grouped.values():
+                prev_period = _prev_year_quarter(v["period"])
+                if prev_period is not None:
+                    v["eps_yoy"] = _compute_eps_yoy(
+                        v["eps"], eps_by_period.get(prev_period),
+                    )
+
             db.upsert_financials(list(grouped.values()))
         db.update_synced_range(stock_id, DATASET_FINANCIAL, start, end)
 
