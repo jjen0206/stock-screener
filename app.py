@@ -1475,6 +1475,8 @@ _STRATEGY_CATEGORY: dict[str, str] = {
     "revenue_acceleration": "基本面",
     # 籌碼:千張戶進場(TDCC 千張大戶週快照)
     "big_holder_inflow": "籌碼",
+    # 事件驅動:除權息搶反彈(歸到「殖利率」類)
+    "ex_dividend_swing": "殖利率",
 }
 
 
