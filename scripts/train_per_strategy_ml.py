@@ -10,6 +10,14 @@ fire 的 picks 抽 features + simulate_outcome 算 label(+5%/-3%/5 day hold,
 - per-strategy 版只看「該 strategy 真的 fire 那些 picks」+ %-based label
   (跟 strategy_backtest 表的 win_rate 同口徑)
 
+**Cost-aligned labels(2026-05-18 強化)** — `simulate_outcome(..., apply_costs=True)`
+**顯式**呼叫(原本走預設值,改顯式以防有人改 default 而靜默失準):
+  - target 觸到:gross +5% → net +4.415%(扣 0.585% round-trip cost)→ label=1
+  - stop  觸到:gross -3% → net -3.585% → label=0
+  - hold 過期:close vs entry 扣 cost 後 > 0 才 label=1
+  → model 學的是「淨報酬為正」的真實樣本,不是「沒扣費的虛胖版」。
+詳見 docs/strategy-rescue-bias-convergence-2026-05-18.md。
+
 樣本量低於 MIN_TRAIN_SAMPLES(預設 100)的 strategy → 標記 fallback,不存
 pkl(只存 meta.json with status="fallback");inference 時 fallback 到通用
 模型。
@@ -57,6 +65,13 @@ TARGET_PCT = 0.05
 STOP_PCT = 0.03
 HOLD_DAYS = 5
 MODEL_DIR = _ROOT / "models" / "per_strategy"
+
+# === Cost-aligned labels(2026-05-18 強化)===
+# True = 顯式呼叫 simulate_outcome(apply_costs=True),label 反映「扣完手續費 + 證交
+# 稅 + 滑價後 net 報酬為正」。
+# False = 走 raw gross 報酬(舊行為,只在 debug / ablation 對比用)。
+# 跟 src.backtest_costs.round_trip_cost_rate() = 0.585% 一致。
+COST_AWARE_LABELS: bool = True
 
 # RandomForest 預設 hyperparams(其餘 strategy 用)
 DEFAULT_RF_PARAMS = {
@@ -154,9 +169,13 @@ def gather_training_set(
             if len(future) < hold_days:
                 continue
 
+            # Cost-aware label:顯式 apply_costs=COST_AWARE_LABELS。
+            # True (default) → label 反映扣費後 net > 0 的真實樣本(避免「沒扣費虛胖」)。
+            # 詳見 module docstring 第 14-21 行。
             outcome, _ = simulate_outcome(
                 future, entry_price,
                 target_pct=target_pct, stop_pct=stop_pct,
+                apply_costs=COST_AWARE_LABELS,
             )
             label = 1 if outcome == "win" else 0
 
@@ -215,6 +234,7 @@ def train_one(
             "target_pct": TARGET_PCT,
             "stop_pct": STOP_PCT,
             "hold_days": HOLD_DAYS,
+            "cost_aware_labels": COST_AWARE_LABELS,
         }
         meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -332,6 +352,7 @@ def train_one(
         "n_estimators": rf_params["n_estimators"],
         "max_depth": rf_params["max_depth"],
         "min_samples_leaf": rf_params["min_samples_leaf"],
+        "cost_aware_labels": COST_AWARE_LABELS,
     }
     if calibration_info:
         meta["calibration"] = calibration_info
