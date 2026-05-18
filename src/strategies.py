@@ -139,6 +139,21 @@ DEFAULT_BIG_HOLDER_PARAMS: dict[str, Any] = {
     "min_delta_floor": 5,          # Phase 2 絕對下限:本週 delta 必須 ≥ 此值,過濾小型股雜訊
 }
 
+# 策略 18:填權息(ex_dividend_swing,事件驅動)
+# 進場:除權息前 1-N 個日曆日(臨界進場吃填權第一天)。
+# 篩選:當前殖利率 ≥ yield_min_pct AND 過去 N 年填權成功率 ≥ fill_history_min。
+# 出場:沿用 STRATEGY_RR_PARAMS — 目標(填權)/ 停損 / hold-N 天。
+# Caveat:依賴 dividend.ex_dividend_date 覆蓋。目前 backfill 只覆蓋少量股票,
+#   完整 backfill 補齊後策略命中率會大幅提升。
+DEFAULT_EX_DIV_SWING_PARAMS: dict[str, Any] = {
+    "entry_lead_calendar_days": 7,  # 候選窗:date < ex_dividend_date ≤ date + N 日曆日
+    "yield_min_pct": 3.0,           # 當前殖利率門檻
+    "fill_history_min": 0.60,       # 過去 N 年填權成功率門檻
+    "fill_history_years": 3,        # 看過去幾年
+    "fill_check_days": 5,           # 除權後 N 個交易日內回到 ex_date 前 close → 填權成功
+    "require_history": False,       # True → 沒歷史不選;False → 中性 0.5 給 score
+}
+
 
 # === 策略 1:量價 + KD + 法人(包裝既有 screen_short) ===
 
@@ -1721,6 +1736,217 @@ def screen_big_holder_inflow(
     return _enrich_with_targets(raw, date)
 
 
+# === 策略 18:填權息(ex_dividend_swing,事件驅動) ===
+
+def _compute_fill_rate(
+    history_ex_dates: list[str],
+    price_df: pd.DataFrame | None,
+    fill_check_days: int,
+) -> tuple[float, int]:
+    """算歷史填權成功率。
+
+    填權定義:ex_date 後 fill_check_days 個交易日內,任一日 close ≥ ex_date
+    前一日 close → 該年填權成功。
+
+    Returns:
+        (fill_rate, n_total)。n_total = 0(沒可評估的歷史)→ fill_rate = 0.0,
+        caller 用 fill_n 判斷是否走 fallback(中性 score)。
+    """
+    if price_df is None or price_df.empty or not history_ex_dates:
+        return (0.0, 0)
+    dates = price_df["date"].tolist()
+    closes = price_df["close"].tolist()
+
+    wins = 0
+    total = 0
+    for ex_date in history_ex_dates:
+        prev_close = None
+        ex_idx = None
+        for i, d in enumerate(dates):
+            if d < ex_date:
+                prev_close = closes[i]
+            elif d >= ex_date:
+                ex_idx = i
+                break
+        if prev_close is None or ex_idx is None or prev_close <= 0:
+            continue
+        window = closes[ex_idx : ex_idx + fill_check_days]
+        if not window:
+            continue
+        total += 1
+        if any(c is not None and c >= prev_close for c in window):
+            wins += 1
+    if total == 0:
+        return (0.0, 0)
+    return (wins / total, total)
+
+
+def screen_ex_dividend_swing(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 18:填權息(事件驅動)— 除權息前 1-N 個日曆日進場,吃填權第一天。
+
+    意義:歷史台股填權息現象顯著(預期 WR 55-65%)。除權息日股價 mechanical
+    下跌約等於配息率;有持續獲利支撐 + 過去多次填權成功的股,常在 N 個
+    交易日內回到 ex_date 前 close。
+
+    進場:date < ex_dividend_date ≤ date + entry_lead_calendar_days。
+    篩選:
+      - **Forward 殖利率** = cash_dividend / entry close ≥ yield_min_pct
+        (現算自 dividend.cash_dividend + 當日 close,backtest 跨歷史可用)
+      - 過去 fill_history_years 年填權成功率 ≥ fill_history_min(沒歷史 →
+        require_history=True 跳過,False 視為中性 0.5)
+    score:dividend_yield × fill_rate(沒歷史 → yield × 0.5)。
+
+    資料來源:dividend(cash_dividend + ex_dividend_date) + daily_prices(entry
+    close + 回算填權成功率)。
+
+    Caveat:目前 dividend 表 backfill 只覆蓋少量股票(2026-05 snapshot ~7 檔),
+    完整 backfill 補齊後策略命中率會大幅提升。架構上策略已準備好。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_EX_DIV_SWING_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "ex_dividend_date", "cash_dividend", "dividend_yield",
+        "fill_rate", "fill_history_n", "days_to_ex",
+        "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    yield_min = float(p["yield_min_pct"])
+    fill_min = float(p["fill_history_min"])
+    lead_days = int(p["entry_lead_calendar_days"])
+    history_years = int(p["fill_history_years"])
+    fill_check_days = int(p["fill_check_days"])
+    require_history = bool(p["require_history"])
+
+    today = _date.fromisoformat(date)
+    upper_bound = (today + _td(days=lead_days)).isoformat()
+    history_lower = (today - _td(days=history_years * 365 + 30)).isoformat()
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            upcoming = conn.execute(
+                f"SELECT stock_id, year, cash_dividend, ex_dividend_date "
+                f"FROM dividend "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND ex_dividend_date IS NOT NULL "
+                f"AND ex_dividend_date > ? AND ex_dividend_date <= ?",
+                (*sids, date, upper_bound),
+            ).fetchall()
+            history_rows = conn.execute(
+                f"SELECT stock_id, ex_dividend_date "
+                f"FROM dividend "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND ex_dividend_date IS NOT NULL "
+                f"AND ex_dividend_date BETWEEN ? AND ?",
+                (*sids, history_lower, date),
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            upcoming = conn.execute(
+                "SELECT stock_id, year, cash_dividend, ex_dividend_date "
+                "FROM dividend "
+                "WHERE ex_dividend_date IS NOT NULL "
+                "AND ex_dividend_date > ? AND ex_dividend_date <= ?",
+                (date, upper_bound),
+            ).fetchall()
+            history_rows = conn.execute(
+                "SELECT stock_id, ex_dividend_date "
+                "FROM dividend "
+                "WHERE ex_dividend_date IS NOT NULL "
+                "AND ex_dividend_date BETWEEN ? AND ?",
+                (history_lower, date),
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        # 一次拉歷史 price(同時用於 entry close + 填權回算)
+        bulk_lookback = history_years * 365 + 30
+        prices_by_sid = bulk_load_prices(conn, sids, date, bulk_lookback)
+
+    upcoming_by_sid: dict[str, dict] = {}
+    for r in upcoming:
+        sid = r["stock_id"]
+        cur = upcoming_by_sid.get(sid)
+        # 同 sid 多筆(極罕見) → 取最近 ex_date
+        if cur is None or r["ex_dividend_date"] < cur["ex_dividend_date"]:
+            upcoming_by_sid[sid] = {
+                "ex_dividend_date": r["ex_dividend_date"],
+                "cash_dividend": (
+                    float(r["cash_dividend"])
+                    if r["cash_dividend"] is not None else 0.0
+                ),
+            }
+    history_by_sid: dict[str, list[str]] = {}
+    for r in history_rows:
+        history_by_sid.setdefault(r["stock_id"], []).append(
+            r["ex_dividend_date"]
+        )
+
+    rows: list[dict] = []
+    for sid, ev in upcoming_by_sid.items():
+        ex_date = ev["ex_dividend_date"]
+        cash_div = ev["cash_dividend"]
+
+        # entry close 先算 — 用於 forward yield 算式(cash_div / close)
+        price_df = prices_by_sid.get(sid)
+        close = 0.0
+        if price_df is not None and not price_df.empty:
+            sub = price_df[price_df["date"] <= date]
+            if not sub.empty:
+                close = float(sub["close"].iloc[-1])
+        if close <= 0 or cash_div <= 0:
+            continue
+
+        # forward yield % = cash_dividend / entry close × 100
+        y = (cash_div / close) * 100
+        if y < yield_min:
+            continue
+
+        history_dates = history_by_sid.get(sid, [])
+        fill_rate, fill_n = _compute_fill_rate(
+            history_dates, price_df, fill_check_days,
+        )
+        if require_history and fill_n == 0:
+            continue
+        if fill_n > 0 and fill_rate < fill_min:
+            continue
+
+        days_to_ex = (_date.fromisoformat(ex_date) - today).days
+        score_fill = fill_rate if fill_n > 0 else 0.5
+        score = float(y) * float(score_fill)
+
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "ex_dividend_date": ex_date,
+            "cash_dividend": cash_div,
+            "dividend_yield": float(y),
+            "fill_rate": float(fill_rate) if fill_n > 0 else None,
+            "fill_history_n": int(fill_n),
+            "days_to_ex": int(days_to_ex),
+            "score": float(score),
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -1798,6 +2024,8 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "revenue_acceleration": screen_revenue_acceleration,
     # 籌碼:千張戶進場(TDCC 千張大戶週快照)
     "big_holder_inflow": screen_big_holder_inflow,
+    # 事件驅動:填權息(除權息前進場吃填權第一天)
+    "ex_dividend_swing": screen_ex_dividend_swing,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -1820,6 +2048,8 @@ STRATEGY_LABELS: dict[str, str] = {
     "revenue_acceleration": "營收加速",
     # 籌碼:千張戶進場
     "big_holder_inflow": "千張戶進場",
+    # 事件驅動:填權息
+    "ex_dividend_swing": "填權息",
 }
 
 
@@ -1892,6 +2122,14 @@ STRATEGY_RR_PARAMS: dict[str, tuple[float, float, int]] = {
     "inst_silent_accum": (0.15, 0.05, 10),
     "volume_breakout": (0.15, 0.04, 3),
     "gap_up": (0.15, 0.03, 5),
+    # ex_dividend_swing(事件驅動,2026-05-18 加):
+    # 進場 = ex_date 前 1-N 個日曆日,D+1 起股價會 mechanical drop ~yield%
+    # (對 3-6% 殖利率股,D+1 close ≈ -3 ~ -6%)。stop_pct 必須夠寬避免
+    # 一進場就被 mechanical drop 觸發停損 → 設 10% 給予回填空間。
+    # target_pct 8% = 填權(回到 D close)+ alpha；hold 10 個交易日符合 spec
+    # 「除權後 5 個交易日內填權成功 → 出場;沒填 → hold ≤ 15」中位數。
+    # 待累積 ≥ 30 fires 後跑 optimize_strategy_rr.py 校準。
+    "ex_dividend_swing": (0.08, 0.10, 10),
 }
 
 # Default 給沒在 STRATEGY_RR_PARAMS 內的策略用(volume_kd / ma_squeeze_breakout
@@ -2099,6 +2337,8 @@ STRATEGY_CATEGORY: dict[str, str] = {
     "revenue_acceleration": "基本面",
     # 籌碼:千張戶進場
     "big_holder_inflow": "籌碼",
+    # 事件驅動:填權息(歸殖利率類 — 跟 high_yield_stable 同性質)
+    "ex_dividend_swing": "殖利率",
 }
 
 # regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
@@ -2128,6 +2368,7 @@ __all__ = [
     "screen_volume_breakout",
     "screen_gap_up",
     "screen_big_holder_inflow",
+    "screen_ex_dividend_swing",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
@@ -2151,6 +2392,7 @@ __all__ = [
     "DEFAULT_VOL_BREAKOUT_PARAMS",
     "DEFAULT_GAP_UP_PARAMS",
     "DEFAULT_BIG_HOLDER_PARAMS",
+    "DEFAULT_EX_DIV_SWING_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
     "STOP_LOSS_MULT",
