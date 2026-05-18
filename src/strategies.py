@@ -7,7 +7,8 @@
 - macd_golden          MACD 黃金交叉 + DIF<0(初升段)+ 量比 ≥ 1.0
 - ma_squeeze_breakout  MA5/MA20/MA60 5 日內糾結 ≤ 2% + 突破 + 量比 ≥ 1.2
 - inst_consensus       外/投/自三家同時買超(net > 0)≥ N 個交易日連續
-- bb_lower_rebound     5 日內觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.0(超賣反彈)
+- bb_lower_rebound     5 日內觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.5x(20MA) + regime gating
+                       (2026-05-18 收緊:bear regime 不跑;弱多/盤整/多頭才入選)
 - rsi_recovery         14 日內 RSI < 30 + 今日 RSI > 50 + 從低點 monotonic 上升
 - inst_silent_accum    5/10/20 日法人累計皆 > 0 + 今日平盤 ±1% + BB 位置 < 50%
 - volume_breakout      今日量 ≥ 5 日均量 × 2.5 + close 突破 20 日新高
@@ -23,7 +24,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from src import database as db, indicators as ind
+from src import database as db, indicators as ind, market_regime
 from src._bulk_load import bulk_load_institutional_totals, bulk_load_prices
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
@@ -64,10 +65,25 @@ DEFAULT_INST_CONSENSUS_PARAMS: dict[str, Any] = {
 DEFAULT_BB_REBOUND_PARAMS: dict[str, Any] = {
     # 用獨立 key:跟 RSI 的 rsi_window_days 區分(各自獨立 lookback)
     "bb_touch_lookback": 5,    # 過去 N 日內任一日要碰到下軌
-    "bb_vol_ratio_min": 1.0,   # 紅 K 那天的量比下限(獨立,跟 bias 1.2 不同)
+    # 量比拉到 1.5x(2026-05-18 strategy upgrade):原 1.0x WR 22.84% / 5d ROI
+    # -1.72% — false signal 太多。拉門檻 + 改用 20MA(成交量 vs 中期均量,比
+    # 5MA 抗近期量能升溫,更能濾掉 dead-cat 反彈)。預期 fires 砍半 / WR > 35%。
+    "bb_vol_ratio_min": 1.5,
+    "bb_vol_ma_window": 20,    # 量比 baseline 用過去 N 日 vol MA(原 5,改 20)
     "bb_period": 20,
     "bb_num_std": 2.0,
 }
+
+# === bb_lower_rebound regime 限縮(2026-05-18 strategy upgrade) ===
+# 只在「下軌反彈有理由發生」的 regime 開:盤整 / 弱多 / 多頭。空頭(bear)的下軌
+# 通常是繼續破而非反彈,WR 嚴重偏低 → 直接 mute。unknown 保守放行,避免 boot
+# 期 TAIEX 不足 60 天時整個策略被靜音。對應 src.market_regime.compute_regime
+# 的 4-tier(bull / weak_bull / sideways / bear / unknown)。
+BB_REBOUND_ALLOWED_REGIMES: frozenset[str] = frozenset({
+    "sideways",   # 「range」盤整
+    "weak_bull",  # 「弱多」
+    "bull",       # 多頭(下軌觸碰罕見但偶發,仍允許)
+})
 
 DEFAULT_RSI_RECOVERY_PARAMS: dict[str, Any] = {
     "rsi_oversold": 30.0,      # 14 日內曾 < 此值
@@ -683,11 +699,20 @@ def screen_bb_lower_rebound(
     date: str,
     params: dict | None = None,
     stock_ids: list[str] | None = None,
+    regime: str | None = None,
 ) -> pd.DataFrame:
-    """策略 7:過去 N 日內任一日 close 觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.0。
+    """策略 7:過去 N 日內任一日 close 觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.5x(20MA)。
 
     意義:超賣後反彈訊號。先碰下軌(超賣),再反手收紅 K(止跌),代表
     賣壓消化、籌碼換手完成。
+
+    2026-05-18 升級:
+    - 量比門檻 1.0 → 1.5,改用 20 日量均(過濾 dead-cat 反彈)
+    - regime 限縮:只在 {sideways, weak_bull, bull} 跑;bear 強制空
+      ('unknown' 為保守放行,避免 TAIEX 資料不足整個策略被 mute)
+
+    regime 參數:呼叫端可顯式傳入(回測 / 測試會 fix regime),預設 None →
+    讀 TAIEX 推導當下 regime。
     """
     p = {**DEFAULT_BB_REBOUND_PARAMS, **(params or {})}
     sids = stock_ids or [s for s, _ in TW_TOP_50]
@@ -695,10 +720,32 @@ def screen_bb_lower_rebound(
         "stock_id", "name", "close", "open",
         "bb_lower", "bb_mid", "vol_ratio", "matched_at",
     ]
+
+    # === regime 限縮 ===
+    # 顯式傳入 → 嚴格按 whitelist 判;None → 讀 TAIEX,'unknown' 保守放行。
+    resolved_regime = regime
+    if resolved_regime is None:
+        try:
+            resolved_regime = market_regime.compute_regime(date).get(
+                "regime", "unknown",
+            )
+        except Exception:
+            logger.warning(
+                "bb_lower_rebound: compute_regime 失敗,fallback unknown 放行",
+                exc_info=True,
+            )
+            resolved_regime = "unknown"
+    if (
+        resolved_regime != "unknown"
+        and resolved_regime not in BB_REBOUND_ALLOWED_REGIMES
+    ):
+        return _enrich_with_targets(pd.DataFrame(columns=cols), date)
+
     raw = _evaluate_strategy(
         date, sids, cols,
         evaluate_fn=lambda df, name: _evaluate_bb_rebound(df, name, date, p),
-        lookback_days=40,  # BB 20 + 5 日 lookback + 緩衝
+        # BB 20 + 20 日量均 lookback + 緩衝;舊版 40 對 5 日均量足夠,新版仍夠
+        lookback_days=40,
         min_required=22,
     )
     return _enrich_with_targets(raw, date)
@@ -726,12 +773,13 @@ def _evaluate_bb_rebound(
     today_close = float(df["close"].iloc[-1])
     if today_close <= today_open:
         return None
-    # 量比 ≥ bb_vol_ratio_min
+    # 量比 ≥ bb_vol_ratio_min(2026-05-18:1.0 → 1.5,baseline 改 20 日均量)
+    ma_window = int(p["bb_vol_ma_window"])
     today_vol = float(df["volume"].iloc[-1])
-    prev_5_vol = df["volume"].iloc[-6:-1]
-    if len(prev_5_vol) < 5:
+    prev_vol = df["volume"].iloc[-(ma_window + 1):-1]
+    if len(prev_vol) < ma_window:
         return None
-    ma_vol = float(prev_5_vol.mean())
+    ma_vol = float(prev_vol.mean())
     vol_ratio = today_vol / ma_vol if ma_vol > 0 else 0.0
     if vol_ratio < p["bb_vol_ratio_min"]:
         return None
@@ -2146,6 +2194,7 @@ __all__ = [
     "DEFAULT_INST_CONSENSUS_PARAMS",
     "DEFAULT_BIAS_PARAMS",
     "DEFAULT_BB_REBOUND_PARAMS",
+    "BB_REBOUND_ALLOWED_REGIMES",
     "DEFAULT_RSI_RECOVERY_PARAMS",
     "DEFAULT_INST_SILENT_PARAMS",
     "DEFAULT_VOL_BREAKOUT_PARAMS",
