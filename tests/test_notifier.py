@@ -419,7 +419,7 @@ def _make_top_pick(
 
 
 def test_format_pick_block_telegram_includes_all_fields():
-    """單張 pick 區塊含 sid 名 / 收盤 / 命中策略 list / ML / 目標 / 期望值。"""
+    """單張 pick 區塊含 sid 名 / 收盤 / 命中策略 list / ML / 目標 / EV。"""
     pick = _make_top_pick()
     block = notifier.format_pick_block(pick, channel="telegram")
 
@@ -434,7 +434,8 @@ def test_format_pick_block_telegram_includes_all_fields():
     assert "ML 機率 72%" in block
     assert "保守 893" in block
     assert "停損 825" in block
-    assert "期望值" in block
+    # EV(2026-05-18 改名,原「期望值」)— score_to_ev 校準後從 pick_outcomes 算
+    assert "EV " in block
     assert "R:R 2.0:1" in block
     # Telegram bold = single asterisk
     assert "*#1*" in block
@@ -458,7 +459,9 @@ def test_format_pick_block_no_ml_prob_skips_line():
     pick = _make_top_pick(ml_prob=None)
     block = notifier.format_pick_block(pick)
     assert "ML 機率" not in block
-    assert "期望值" not in block  # ev 也算不出
+    # EV 行需要 pick["ev"] 不為 None — _make_top_pick 在 ml_prob=None 時
+    # 連帶不算 ev,所以該行不渲。檢查 "📈 EV " 開頭(避免誤觸 commit 注解)。
+    assert "📈 EV " not in block
 
 
 # === 產業 badge(2026-05-06 主公拍板加) ===
@@ -602,7 +605,7 @@ def test_format_pick_block_shareholder_handles_zero_count():
 
 
 def test_format_pick_block_shareholder_does_not_break_other_fields():
-    """加千張戶行不該影響原有欄位(ML / 目標 / 期望值 / 勝率)。"""
+    """加千張戶行不該影響原有欄位(ML / 目標 / EV / 勝率)。"""
     pick = _make_top_pick()
     pick["holders_1000up_count"] = 1500
     pick["holders_delta_w"] = 10
@@ -613,7 +616,7 @@ def test_format_pick_block_shareholder_does_not_break_other_fields():
     assert "ML 機率 72%" in block
     assert "保守 893" in block
     assert "停損 825" in block
-    assert "期望值" in block
+    assert "EV " in block  # 2026-05-18 從「期望值」改名 EV
     assert "勝率" in block
     # 新欄位也在
     assert "千張戶 1500" in block
@@ -669,7 +672,7 @@ def test_format_top_picks_message_includes_separator_and_stats():
     assert "今日 picks 統計" in msg
     assert "高信心 + ≥2 策略:  3 張" in msg
     assert "平均 ML 機率" in msg
-    assert "平均期望值" in msg
+    assert "平均 EV" in msg  # 2026-05-18 從「平均期望值」改名
     # 警語
     assert "僅供研究" in msg
 

@@ -44,19 +44,27 @@ jobs:
           if [ -z "$DAYS" ]; then DAYS="15"; fi
           python scripts/backtest_picks.py --days "$DAYS" --dump-csv
 
+      # 接著用剛 evaluate 出來的 pick_outcomes 重算 score → EV 校準表
+      # (strategy upgrade #5,2026-05-18)— 失敗 continue-on-error,本表
+      # 缺失時 score_to_ev 自動 fallback 線性公式,不影響推播。
+      - name: Precompute score → EV mapping
+        continue-on-error: true
+        run: python scripts/precompute_score_ev_mapping.py
+
       # push race retry:跟其他 workflow 同 pattern,跨 workflow 同時段推 main
       # 用 rebase + retry 5 次避免 [rejected] (fetch first) 把 CSV 吃掉。
-      - name: Commit pick_outcomes snapshot CSV if changed
+      - name: Commit pick_outcomes + score_to_ev snapshot CSV if changed
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/twse_snapshot/pick_outcomes.csv || true
+          git add data/twse_snapshot/score_to_ev.csv || true
           if git diff --quiet --staged; then
-            echo "No pick_outcomes snapshot changes to commit"
+            echo "No snapshot changes to commit"
             exit 0
           fi
-          git commit -m "chore(snapshot): weekly pick outcomes backtest [skip ci]"
+          git commit -m "chore(snapshot): weekly pick outcomes + score_to_ev [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main || true
             if git push origin HEAD:main; then

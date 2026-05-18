@@ -636,11 +636,18 @@ def _select_top_picks(
             (close - prev_close) / prev_close * 100
             if prev_close and prev_close > 0 else None
         )
-        # EV 估算:固定 5% target / 3% stop × ml_prob 期望
-        ev = (
-            prob * 0.05 - (1 - prob) * 0.03
-            if prob is not None else None
-        )
+        # EV 估算 — 優先用 score_to_ev 校準表(從 pick_outcomes 算出
+        # 的 score → realized return 對照),失敗 fallback 固定 5%/3% 公式。
+        # score_to_ev_for_pick 在 mapping 缺失時自己會走 linear fallback,
+        # 等同原公式 — 所以對外行為向前相容。
+        ev = None
+        if prob is not None:
+            try:
+                from src.score_to_ev import score_to_ev_for_pick
+                ev = score_to_ev_for_pick(prob, matched)
+            except Exception:  # noqa: BLE001
+                # 任何 mapping 載入失敗 → 退回原線性公式
+                ev = prob * 0.05 - (1 - prob) * 0.03
         industry = industries_map.get(sid)
         industry_heat = industry_counts.get(industry, 0) if industry else 0
         # win_rate:命中策略 backtest WR 算術平均(跟 _enrich_df_with_win_rate 同邏輯)
@@ -988,11 +995,12 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         lines.append(
             f"   🎯 保守 {target_low:.0f} / 積極 {target_high:.0f} / 停損 {stop:.0f}"
         )
-    # 期望值 + R:R
+    # EV(期望報酬,從 pick_outcomes 校準的 score_to_ev mapping)+ R:R
+    # 主公拍板:用 "EV" 取代「期望值」— 跟 spec roadmap 一致,更直白
     if ev is not None:
         rr_str = f"  (R:R {rr:.1f}:1)" if rr else ""
         sign = "+" if ev >= 0 else ""
-        lines.append(f"   📈 期望值 {sign}{ev * 100:.1f}%{rr_str}")
+        lines.append(f"   📈 EV {sign}{ev * 100:.1f}%{rr_str}")
     # 千張大戶(TDCC 週快照)— 主公拍板:不納入 ML,只當附加資訊
     # 沒資料(該檔當週沒公布 / 還沒抓過) → 整行 graceful skip 不顯
     # delta_w=None(第一次抓,沒上週可比) → 省略「週變」段
@@ -1945,7 +1953,7 @@ def _format_footer_block(
         lines.append(f"   平均 ML 機率:    {avg_ml * 100:.0f}%")
     if evs:
         sign = "+" if avg_ev >= 0 else ""
-        lines.append(f"   平均期望值:      {sign}{avg_ev * 100:.1f}%")
+        lines.append(f"   平均 EV:         {sign}{avg_ev * 100:.1f}%")
     lines.append("")
     lines.append("⚠️ 僅供研究,非投資建議。目標價為 ATR 統計參考,非實際預測。")
     return "\n".join(lines)
