@@ -656,27 +656,113 @@ def compute_label(
     return 1 if max_high >= target_price else 0
 
 
+def compute_multitask_label(
+    stock_id: str,
+    target_date: str,
+    horizons: tuple[int, ...] = (1, 3, 5, 10),
+    atr_mult: float = LABEL_ATR_MULT,
+    db_path: str | Path | None = None,
+) -> dict[int, int | None]:
+    """對單一 (sid, target_date) 同時算多 horizons 的 label,共享一次 SQL pull。
+
+    Phase 2 #P2-5 multi-task supervision:讓 LightGBM 同時學 1d/3d/5d/10d 報酬,
+    共享 representation。傳入的 horizons 任一個資料不足 → 該 horizon 回 None。
+
+    Args:
+      horizons:tuple of int days(預設 1/3/5/10)
+      atr_mult:仍用 1.5 ATR 當 target,跟 compute_label 一致
+
+    Returns:
+      dict {horizon: 1|0|None};entry features / ATR 不可得 → 全部 horizons 都 None。
+    """
+    out: dict[int, int | None] = {int(h): None for h in horizons}
+    if not horizons:
+        return out
+
+    max_h = max(int(h) for h in horizons)
+
+    df_entry = _load_history(stock_id, target_date, days=90, db_path=db_path)
+    if len(df_entry) < 15:
+        return out
+    if df_entry["date"].iloc[-1] != target_date:
+        return out
+
+    entry_close = float(df_entry["close"].iloc[-1])
+    atr14 = ind.atr(df_entry, period=14).iloc[-1]
+    if pd.isna(atr14) or atr14 <= 0 or entry_close <= 0:
+        return out
+    target_price = entry_close + atr_mult * float(atr14)
+
+    with db.get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT high FROM daily_prices "
+            "WHERE stock_id=? AND date > ? "
+            "ORDER BY date ASC LIMIT ?",
+            (stock_id, target_date, max_h),
+        ).fetchall()
+
+    highs = [float(r["high"]) for r in rows if r["high"] is not None]
+    # Cumulative max(就地算)
+    running_max = float("-inf")
+    cum_max: list[float] = []
+    for h in highs:
+        if h > running_max:
+            running_max = h
+        cum_max.append(running_max)
+
+    for h in horizons:
+        h_int = int(h)
+        if len(cum_max) < h_int:
+            out[h_int] = None  # 該 horizon 資料不夠
+        else:
+            out[h_int] = 1 if cum_max[h_int - 1] >= target_price else 0
+    return out
+
+
 def build_training_dataset(
     stock_ids: list[str] | None = None,
     db_path: str | Path | None = None,
-) -> tuple[pd.DataFrame, pd.Series]:
+    multitask_horizons: tuple[int, ...] | None = None,
+    return_dates: bool = False,
+) -> tuple:
     """對每檔 stock_id 跑 sliding window,構造 (X, y) 訓練資料。
 
     對每個合法 trade_date(該檔有 ≥60 天歷史 + 後 5 天有資料):
         extract_features → X row
-        compute_label → y row
+        compute_label → y row(LABEL_LOOKAHEAD_DAYS=5d ATR target hit)
 
     沒傳 stock_ids → 用 TW_TOP_50(限制訓練時間)。
+
+    multitask_horizons(Phase 2 #P2-5):若傳 tuple of int(例如 (1, 3, 5, 10)),
+      額外回 dict {horizon: y_series(NaN 表該 row 該 horizon 資料不可得)}。
+      呼叫端拿這個 dict 餵 train_stacking_ensemble(multitask_y=...)。
+      None(預設)→ 維持舊行為(2-tuple return),不破壞既有 caller。
+
+    return_dates(Phase 2 #P2-5,walk-forward eval 用):True → tuple 多回一個
+      'dates' pd.Series(每 row 對應的 entry trading date,可作 split_by='date')。
+      Default False → 維持舊行為。
     """
     from src.universe import TW_TOP_50
 
     if stock_ids is None:
         stock_ids = [s for s, _ in TW_TOP_50]
 
+    use_multitask = multitask_horizons is not None and len(multitask_horizons) > 0
+    horizons = tuple(int(h) for h in (multitask_horizons or ()))
+    # 主 5d label 取 horizons 內含的 LABEL_LOOKAHEAD_DAYS(=5);若 caller 傳 horizons
+    # 不含 5,仍走 compute_label 的 5 day 行為(主 model 訓 5d)
+    if use_multitask and 5 not in horizons:
+        horizons = tuple(sorted(set(horizons) | {5}))
+
     feats_list: list[dict] = []
     labels: list[int] = []
+    dates_list: list[str] = []
+    # 每 horizon 一個 list[label|None],跟 feats_list 對齊 index
+    mt_labels: dict[int, list[int | None]] = (
+        {h: [] for h in horizons} if use_multitask else {}
+    )
+
     for sid in stock_ids:
-        # 拿該檔所有 dates 來 sliding window
         with db.get_conn(db_path) as conn:
             dates = [
                 r["date"] for r in conn.execute(
@@ -687,22 +773,62 @@ def build_training_dataset(
             ]
         if len(dates) < MIN_HISTORY_DAYS + LABEL_LOOKAHEAD_DAYS:
             continue
-        # 跳過前 MIN_HISTORY_DAYS - 1 個(features 不足) +
-        # 最後 LABEL_LOOKAHEAD_DAYS 個(label 沒未來資料)
         for d in dates[MIN_HISTORY_DAYS - 1: -LABEL_LOOKAHEAD_DAYS]:
             f = extract_features(sid, d, db_path=db_path)
             if f is None:
                 continue
-            y = compute_label(sid, d, db_path=db_path)
-            if y is None:
-                continue
-            feats_list.append(f)
-            labels.append(y)
+
+            if use_multitask:
+                mt = compute_multitask_label(
+                    sid, d, horizons=horizons, db_path=db_path,
+                )
+                # 主 5d label 仍是 gate:5d 不可得 → 整 row 丟掉(對齊舊行為)
+                y5 = mt.get(5)
+                if y5 is None:
+                    continue
+                feats_list.append(f)
+                labels.append(int(y5))
+                dates_list.append(d)
+                for h in horizons:
+                    mt_labels[h].append(mt.get(h))
+            else:
+                y = compute_label(sid, d, db_path=db_path)
+                if y is None:
+                    continue
+                feats_list.append(f)
+                labels.append(int(y))
+                dates_list.append(d)
 
     if not feats_list:
-        return pd.DataFrame(columns=FEATURE_NAMES), pd.Series([], dtype=int)
+        empty_X = pd.DataFrame(columns=FEATURE_NAMES)
+        empty_y = pd.Series([], dtype=int)
+        empty_dates = pd.Series([], dtype=str)
+        if use_multitask and return_dates:
+            return empty_X, empty_y, empty_dates, {h: pd.Series([], dtype=float) for h in horizons}
+        if use_multitask:
+            return empty_X, empty_y, {h: pd.Series([], dtype=float) for h in horizons}
+        if return_dates:
+            return empty_X, empty_y, empty_dates
+        return empty_X, empty_y
+
     X = pd.DataFrame(feats_list)[FEATURE_NAMES]
     y = pd.Series(labels)
+    dates = pd.Series(dates_list)
+    mt_series: dict[int, pd.Series] | None = None
+    if use_multitask:
+        # NaN 保留:LightGBM multitask head 訓練時 mask out
+        mt_series = {
+            h: pd.Series([float("nan") if v is None else float(v) for v in mt_labels[h]])
+            for h in horizons
+        }
+
+    # 4-/3-/2-tuple dispatch — 依 use_multitask × return_dates 排列組合
+    if use_multitask and return_dates:
+        return X, y, dates, mt_series
+    if use_multitask:
+        return X, y, mt_series
+    if return_dates:
+        return X, y, dates
     return X, y
 
 
@@ -934,6 +1060,28 @@ def dump_model_meta(
             "raw_brier": float(cal.get("raw_brier", 0.0)),
             "calibrated_brier": float(cal.get("calibrated_brier", 0.0)),
         }
+    # ensemble block(Phase 2 #P2-5):若 train flow 走 stacking,寫 OOF AUC
+    # + multitask horizons + top-5 lgbm feature importance 給 system_brief
+    ens = metrics.get("ensemble")
+    if ens:
+        meta["ensemble"] = {
+            "type": ens.get("ensemble_type", "stacking_v1"),
+            "cv_folds": int(ens.get("cv_folds", 5)),
+            "n_train": int(ens.get("n_train", 0)),
+            "oof_auc_per_learner": {
+                k: float(v) for k, v in (ens.get("oof_auc_per_learner") or {}).items()
+            },
+            "meta_oof_auc": float(ens.get("meta_oof_auc", 0.0)),
+            "meta_oof_brier": float(ens.get("meta_oof_brier", 0.0)),
+            "multitask_horizons": list(ens.get("multitask_horizons") or []),
+        }
+        # 只寫 lgbm top-N(rf / lr 視需求加;省 disk + 對齊 short_pick.meta 風格)
+        lgbm_imps = (ens.get("feature_importances") or {}).get("lgbm") or {}
+        if lgbm_imps:
+            top = sorted(lgbm_imps.items(), key=lambda kv: -kv[1])[:10]
+            meta["ensemble"]["lgbm_top_features"] = [
+                {"name": n, "importance_gain": float(imp)} for n, imp in top
+            ]
     p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
 
@@ -1185,6 +1333,7 @@ __all__ = [
     "_new_features_enabled",
     "extract_features",
     "compute_label",
+    "compute_multitask_label",
     "build_training_dataset",
     "train_short_pick_model",
     "train_with_calibration",
