@@ -88,3 +88,9 @@ jobs:
             sleep $((i * 5))
           done
           echo "::warning::stock_warnings push 失敗 5 次"
+
+      # cron heartbeat — fail-loud 監控,if: always() 記成功 / 失敗
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh stock_warnings 24 ${{ job.status }}

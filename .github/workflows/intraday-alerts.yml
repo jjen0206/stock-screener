@@ -34,11 +34,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write  # 收尾 heartbeat step 要 commit + push sync_log_heartbeat.csv
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # heartbeat commit + rebase 需完整歷史
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -64,3 +67,10 @@ jobs:
           fi
           echo "Running: python scripts/intraday_alerts.py $ARGS"
           python scripts/intraday_alerts.py $ARGS
+
+      # cron heartbeat — interval=0.5h(weekdays */30)
+      # 48 次/天 commit 是已知 trade-off,主公決定接受(spec)。stale threshold = 1h。
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh intraday_alerts 0.5 ${{ job.status }}

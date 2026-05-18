@@ -642,6 +642,20 @@ SCHEMA: list[str] = [
         updated_at  TEXT NOT NULL
     )
     """,
+    # cron heartbeat:每個排程任務的最後成功/失敗時間。
+    # 來源:src/system_monitoring/heartbeat.record_success / record_failure
+    # 持久化:CSV (data/twse_snapshot/sync_log_heartbeat.csv) 由 GHA commit + push
+    # boot 時透過 preload_snapshots 從 CSV 載入。
+    """
+    CREATE TABLE IF NOT EXISTS sync_log_heartbeat (
+        task_name               TEXT PRIMARY KEY,
+        last_success_at         TEXT,
+        last_failure_at         TEXT,
+        last_failure_reason     TEXT,
+        expected_interval_hours REAL NOT NULL,
+        updated_at              TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -3160,6 +3174,16 @@ def preload_snapshots(
                     records,
                 )
             counts["pick_outcomes"] = len(records)
+
+    # 11. sync_log_heartbeat(cron task 心跳)— 每個排程任務最後成功/失敗時間;
+    # cloud boot 後讓 Streamlit Dashboard / cron_health_alert.py 看到 cron task
+    # 健康度,沒這個 preload 表永遠空 → stale 警告永遠不會推。
+    hb_csv = snapshot_dir / "sync_log_heartbeat.csv"
+    if hb_csv.exists() and hb_csv.stat().st_size > 0:
+        from src.system_monitoring import heartbeat as _hb
+        n = _hb.load_from_csv(db_path=db_path, csv_path=hb_csv)
+        if n > 0:
+            counts["sync_log_heartbeat"] = n
 
     return counts
 

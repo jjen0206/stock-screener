@@ -190,3 +190,11 @@ jobs:
             sleep $((i * 5))
           done
           echo "::warning::backtest snapshot push 失敗 5 次"
+
+      # === Step 7: Heartbeat — 寫 sync_log_heartbeat.csv + commit + push ===
+      # if: always() 確保不論 daily_notify 跑掛沒掛,都記一筆(success / failure)
+      # → 隔天 18:00 heartbeat-check.yml 看「24h 內沒成功」就推警告。
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh daily_notify 24 ${{ job.status }}
