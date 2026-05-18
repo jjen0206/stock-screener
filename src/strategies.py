@@ -193,6 +193,24 @@ DEFAULT_FOREIGN_X_HOLDER_PARAMS: dict[str, Any] = {
     "score_clip_max": 2.0,             # score 上限 clip(下限 0)
 }
 
+# 策略 21:財報後 5 日延續(earnings_surprise_followthrough)— PEAD event-driven
+# 學術上 Post-Earnings Announcement Drift:大幅 surprise 後 1-5 個交易日延續走勢。
+# 進場窗口:announce_date 後第 1-5 個交易日(用 daily_prices 反推,避假日 / 週末)。
+# 篩選:eps_yoy > 50% OR gap_open_pct > 3%(任一條件命中)— 兩條路捕捉
+#   surprise 訊號:eps_yoy 是「年比基本面跳升」、gap_open_pct 是「市場對公佈的
+#   立即反應」(announce_date 收盤 → 下一交易日開盤 gap)。
+# Score = max(eps_yoy/100, gap_pct/5),clip 0~2。事件型 → STRATEGY_NATURE='neutral'
+# 出場(STRATEGY_RR_PARAMS):target 5% / stop 4% / hold 5(配合 PEAD 5 日窗口)。
+DEFAULT_EARNINGS_SURPRISE_PARAMS: dict[str, Any] = {
+    "window_start": 1,             # 公佈後第 N1 個交易日(含)
+    "window_end": 5,               # 公佈後第 N2 個交易日(含)
+    "eps_yoy_threshold": 50.0,     # eps_yoy > 此值 → 條件 A 命中
+    "gap_pct_threshold": 3.0,      # gap_open_pct > 此值 → 條件 B 命中
+    "min_avg_volume_lots": 1000,   # 60 日均量門檻(張)— 流動性過濾
+    "avg_volume_lookback": 60,
+    "score_clip_max": 2.0,         # score 上限 clip(下限 0)
+}
+
 
 # === 策略 1:量價 + KD + 法人(包裝既有 screen_short) ===
 
@@ -296,6 +314,54 @@ def _compute_atr_for_stock(
     with db.get_conn() as conn:
         history = bulk_load_prices(conn, [stock_id], target_date, lookback)
     return _compute_atr_from_df(history.get(stock_id), period)
+
+
+# === 事件型策略共用 helper:用 daily_prices 反推「公佈後第 N 個交易日」 ===
+
+def _next_trading_day(
+    price_df: pd.DataFrame | None,
+    after_date: str,
+) -> str | None:
+    """回傳 price_df 中第一個嚴格大於 after_date 的交易日(ISO date string)。
+
+    Why: PEAD / earnings event 策略需要「公佈日後第一個 open」。announce_date 可能
+    落在週末 / 假日(financials.announce_date 是 FinMind 原始 r["date"]),不能用
+    calendar +1。price_df 是 bulk_load_prices 已 sort by date ASC 出來的子集 —
+    只含實際有交易資料的日子,自然跳過週末 / 假日。
+
+    缺資料(price_df None / 空 / 沒有大於 after_date 的列)→ None。
+    """
+    if price_df is None or price_df.empty:
+        return None
+    dates = price_df["date"].astype(str)
+    later = dates[dates > after_date]
+    if later.empty:
+        return None
+    return str(later.iloc[0])
+
+
+def _trading_days_after(
+    price_df: pd.DataFrame | None,
+    reference: str,
+    target: str,
+) -> int | None:
+    """計算 target 是 reference 之後的第幾個交易日(以 price_df 含的日為準)。
+
+    e.g. reference='2026-05-15' (五), target='2026-05-19' (二) → 2(一=1、二=2)
+
+    要求 target > reference;target == reference → 回 None(同日不算延續)。
+    price_df 須已 sort by date ASC(bulk_load_prices 出來的格式)。
+
+    語意:嚴格大於 reference 且 ≤ target 的交易日列數。如果 reference 或
+    target 落在非交易日(假日 / 週末),計數仍以 price_df 內實際出現的日為準 —
+    這正是 PEAD「公佈後 1-5 個交易日」最需要的精確度,避免被 calendar 天數誤導。
+    """
+    if price_df is None or price_df.empty:
+        return None
+    if target <= reference:
+        return None
+    dates = price_df["date"].astype(str)
+    return int(((dates > reference) & (dates <= target)).sum())
 
 
 def compute_target_prices(
@@ -2473,6 +2539,195 @@ def screen_foreign_x_holder_alignment(
     return _enrich_with_targets(raw, date)
 
 
+# === 策略 21:財報後 5 日延續(earnings_surprise_followthrough)PEAD ===
+
+def screen_earnings_surprise_followthrough(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 21(事件驅動 / PEAD):季報後第 1-5 個交易日延續策略。
+
+    篩選條件(都要符合):
+    1. 個股最近一筆 quarterly 財報的 announce_date 落在 date 之前 window_end
+       個交易日內,且 window_start <= 第 N 個交易日 <= window_end
+       (預設 1-5,announce_date 當日不算 / 同日 → skip)。
+    2. eps_yoy > eps_yoy_threshold(預設 50%) OR
+       gap_open_pct > gap_pct_threshold(預設 3%) — 兩條 OR 路徑:
+         * eps_yoy:單純基本面 YoY 跳升,即使 gap 沒明顯也算 PEAD 候選
+         * gap_open_pct:announce 收盤 → 公佈後第 1 交易日 open 的跳空 %
+           (capture「市場對公佈的立即反應」)
+    3. avg_volume_lookback 日(預設 60)均量 >= min_avg_volume_lots
+       (預設 1000 張)— 流動性過濾,避小型股滑價。
+
+    Score 公式(clip [0, score_clip_max]):
+        eps_score = eps_yoy / 100.0  (None → 0)
+        gap_score = gap_open_pct / 5.0  (None → 0)
+        score = clip(max(eps_score, gap_score), 0, score_clip_max)
+
+    出場(STRATEGY_RR_PARAMS):target 5% / stop 4% / hold 5 個交易日 —
+    PEAD 學術上 1-5 日效應最強,hold=5 跟進場窗口同步,避被 day 6+ noise 反轉。
+
+    資料來源:financials.announce_date / financials.eps_yoy(P2-4 prerequisite
+    PR #19 加,quarterly 才有)+ daily_prices(取 gap_open_pct + 流動性)。
+    announce_date IS NULL → 跳過(該股還沒 backfill 到新欄)。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_EARNINGS_SURPRISE_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "announce_date", "eps_yoy", "gap_open_pct",
+        "days_after_announce", "avg_volume_lots",
+        "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    window_start = int(p["window_start"])
+    window_end = int(p["window_end"])
+    eps_thr = float(p["eps_yoy_threshold"])
+    gap_thr = float(p["gap_pct_threshold"])
+    min_avg_lots = float(p["min_avg_volume_lots"])
+    avg_vol_lookback = int(p["avg_volume_lookback"])
+    score_clip_max = float(p["score_clip_max"])
+
+    # 撈財報 announce_date 的下限:window_end 個交易日 ≈ window_end × 2 + 7
+    # 天日曆緩衝(週末 / 連假 / 兩季公佈間隔)。
+    as_of_d = _date.fromisoformat(date)
+    earliest_announce = (
+        as_of_d - _td(days=window_end * 2 + 7)
+    ).isoformat()
+
+    with db.get_conn() as conn:
+        # name_map + 財報
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            fin_rows = conn.execute(
+                f"SELECT stock_id, period, announce_date, eps_yoy "
+                f"FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='quarterly' "
+                f"AND announce_date IS NOT NULL "
+                f"AND announce_date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, announce_date DESC",
+                (*sids, earliest_announce, date),
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            fin_rows = conn.execute(
+                "SELECT stock_id, period, announce_date, eps_yoy "
+                "FROM financials "
+                "WHERE period_type='quarterly' "
+                "AND announce_date IS NOT NULL "
+                "AND announce_date BETWEEN ? AND ? "
+                "ORDER BY stock_id, announce_date DESC",
+                (earliest_announce, date),
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        # bulk prices:含 60 日均量 + announce 前後 gap 算用
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date, lookback_days=avg_vol_lookback + 20,
+        )
+
+    # 取每 sid 最近一筆 announce(已 announce_date DESC,第一筆即最新)
+    latest_fin_by_sid: dict[str, dict] = {}
+    for r in fin_rows:
+        if r["stock_id"] not in latest_fin_by_sid:
+            latest_fin_by_sid[r["stock_id"]] = {
+                "announce_date": r["announce_date"],
+                "eps_yoy": r["eps_yoy"],
+            }
+
+    rows: list[dict] = []
+    for sid in sids:
+        fin = latest_fin_by_sid.get(sid)
+        if fin is None:
+            continue
+        announce_date = fin["announce_date"]
+        eps_yoy_raw = fin.get("eps_yoy")
+
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or len(price_df) < avg_vol_lookback:
+            continue
+
+        # 流動性
+        recent_vol = price_df["volume"].tail(avg_vol_lookback)
+        avg_vol_lots = float(recent_vol.mean()) / 1000.0
+        if pd.isna(avg_vol_lots) or avg_vol_lots < min_avg_lots:
+            continue
+
+        # 公佈後第 N 個交易日(用 price_df 反推 — 避假日 / 週末誤判)
+        n_after = _trading_days_after(price_df, announce_date, date)
+        if n_after is None or not (window_start <= n_after <= window_end):
+            continue
+
+        # gap_open_pct:announce_date 當天(含)或之前最近一筆 close,
+        # vs 之後第 1 個交易日 open。announce_date 落假日也安全 —
+        # mask 自然取到最近的實際交易日。
+        date_series = price_df["date"].astype(str)
+        pre_mask = date_series <= announce_date
+        post_mask = date_series > announce_date
+        if not pre_mask.any() or not post_mask.any():
+            continue
+        pre_close_val = price_df.loc[pre_mask[pre_mask].index[-1], "close"]
+        post_open_val = price_df.loc[post_mask[post_mask].index[0], "open"]
+        if (
+            pre_close_val is None or post_open_val is None
+            or pd.isna(pre_close_val) or pd.isna(post_open_val)
+            or float(pre_close_val) <= 0
+        ):
+            gap_open_pct = None
+        else:
+            gap_open_pct = (
+                (float(post_open_val) - float(pre_close_val))
+                / float(pre_close_val) * 100.0
+            )
+
+        # 過濾:eps_yoy > 50 OR gap_open_pct > 3(兩條 OR 路徑)
+        eps_yoy = (
+            float(eps_yoy_raw)
+            if eps_yoy_raw is not None and not pd.isna(eps_yoy_raw)
+            else None
+        )
+        eps_pass = eps_yoy is not None and eps_yoy > eps_thr
+        gap_pass = gap_open_pct is not None and gap_open_pct > gap_thr
+        if not (eps_pass or gap_pass):
+            continue
+
+        # score = max(eps_yoy/100, gap_pct/5),clip [0, score_clip_max]
+        eps_score = (eps_yoy / 100.0) if eps_yoy is not None else 0.0
+        gap_score = (gap_open_pct / 5.0) if gap_open_pct is not None else 0.0
+        score = max(0.0, min(score_clip_max, max(eps_score, gap_score)))
+
+        close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "announce_date": announce_date,
+            "eps_yoy": eps_yoy,
+            "gap_open_pct": gap_open_pct,
+            "days_after_announce": n_after,
+            "avg_volume_lots": avg_vol_lots,
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -2556,6 +2811,8 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "revenue_announce_anticipation": screen_revenue_announce_anticipation,
     # 籌碼共振:外資 5d 累計買超 z>1.0 + 千張戶本週突破 4w mean+0.5σ
     "foreign_x_holder_alignment": screen_foreign_x_holder_alignment,
+    # 事件驅動(PEAD):季報後 1-5 個交易日延續,eps_yoy>50 或 gap_open>3% 入場
+    "earnings_surprise_followthrough": screen_earnings_surprise_followthrough,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -2584,6 +2841,8 @@ STRATEGY_LABELS: dict[str, str] = {
     "revenue_announce_anticipation": "營收公佈前佈局",
     # 籌碼共振:外資 + 千張戶
     "foreign_x_holder_alignment": "外資千張共振",
+    # 事件驅動 PEAD:季報後 5 日延續
+    "earnings_surprise_followthrough": "財報後延續",
 }
 
 
@@ -2696,6 +2955,10 @@ STRATEGY_RR_PARAMS: dict[str, tuple[float, float, int]] = {
     # target 4%、stop 3%(R:R ~1.33)、hold 10(spec)。
     # 待累積 fires 後 Plan G 校準。
     "foreign_x_holder_alignment": (0.04, 0.03, 10),
+    # earnings_surprise_followthrough(PEAD):進場窗口本身就是 announce 後 1-5 日,
+    # target 5%、stop 4%(R:R 1.25)、hold 5(配合 PEAD 學術上 1-5 日效應)。
+    # 待 backfill 完 announce_date / eps_yoy 後累積 fires,再 Plan G 校準。
+    "earnings_surprise_followthrough": (0.05, 0.04, 5),
 }
 
 # Default 給沒在 STRATEGY_RR_PARAMS 內的策略用(volume_kd / ma_squeeze_breakout
@@ -2921,6 +3184,9 @@ STRATEGY_CATEGORY: dict[str, str] = {
     "revenue_announce_anticipation": "基本面",
     # 籌碼共振:外資 + 千張戶,跟 big_holder_inflow / inst_consensus 同類
     "foreign_x_holder_alignment": "籌碼",
+    # 事件驅動 PEAD:同 revenue_announce_anticipation,屬「基本面」類
+    # — YoY 強跳 / 公佈跳空 = 基本面動能。
+    "earnings_surprise_followthrough": "基本面",
 }
 
 # regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
@@ -2953,6 +3219,7 @@ __all__ = [
     "screen_ex_dividend_swing",
     "screen_revenue_announce_anticipation",
     "screen_foreign_x_holder_alignment",
+    "screen_earnings_surprise_followthrough",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
@@ -2981,6 +3248,7 @@ __all__ = [
     "DEFAULT_EX_DIVIDEND_SWING_PARAMS",
     "DEFAULT_REVENUE_ANNOUNCE_PARAMS",
     "DEFAULT_FOREIGN_X_HOLDER_PARAMS",
+    "DEFAULT_EARNINGS_SURPRISE_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
     "STOP_LOSS_MULT",
