@@ -106,3 +106,9 @@ jobs:
             sleep $((i * 5))
           done
           echo "::warning::push 失敗 5 次"
+
+      # cron heartbeat — hourly task,interval=1h
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh news_notify 1 ${{ job.status }}

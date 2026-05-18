@@ -155,3 +155,9 @@ jobs:
           done
           echo "aggregate push failed after 5 retries"
           exit 1
+
+      # cron heartbeat — weekly 8-shard backfill,interval=168h
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh backfill_dividend 168 ${{ job.status }}

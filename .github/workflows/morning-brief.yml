@@ -49,10 +49,15 @@ jobs:
   brief:
     runs-on: ubuntu-latest
     timeout-minutes: 15  # refetch warnings ~30s + news ~5s + yfinance ~5s + 推播 ~3s
+    permissions:
+      contents: write  # 收尾 heartbeat step 要 commit + push sync_log_heartbeat.csv
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # heartbeat commit + rebase 需完整歷史
 
       # Dedup — schedule trigger 才檢查,workflow_dispatch 永遠跑(主公手動補推用)
       # 8h 窗口可同時 cover 主班(23:47 UTC) + 補班(00:17 UTC)
@@ -121,3 +126,9 @@ jobs:
           fi
           echo "Running: python scripts/morning_brief.py $ARGS"
           python scripts/morning_brief.py $ARGS
+
+      # cron heartbeat — interval=24h(每交易日 08:30 一次)
+      - name: Record cron heartbeat
+        if: always()
+        continue-on-error: true
+        run: bash scripts/heartbeat_step.sh morning_brief 24 ${{ job.status }}
