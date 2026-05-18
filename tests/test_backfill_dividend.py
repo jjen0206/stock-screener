@@ -74,10 +74,12 @@ def test_backfill_calls_fetch_dividend_for_shard_sids(tmp_setup, monkeypatch):
         backfill, "pure_stock_universe", lambda min_history=20: fake_universe,
     )
     fetch_calls = []
-    monkeypatch.setattr(
-        backfill, "fetch_dividend",
-        lambda sid, s, e: fetch_calls.append(sid),
-    )
+
+    def _stub(sid, s, e, *, strict=False):
+        fetch_calls.append(sid)
+        return pd.DataFrame()  # 模擬無資料
+
+    monkeypatch.setattr(backfill, "fetch_dividend", _stub)
     # shard 0 → 拿到 sid0(sorted index 0)
     monkeypatch.setattr(
         "sys.argv",
@@ -106,7 +108,8 @@ def test_backfill_dump_shard_csv_contains_only_shard_data(
         lambda min_history=20: ["2330", "2454"],
     )
     monkeypatch.setattr(
-        backfill, "fetch_dividend", lambda sid, s, e: None,
+        backfill, "fetch_dividend",
+        lambda sid, s, e, *, strict=False: pd.DataFrame(),
     )
     # shard 0/2 → 只跑 2330(sorted [2330,2454][0::2] = [2330])
     monkeypatch.setattr(
@@ -130,9 +133,10 @@ def test_backfill_handles_fetch_error(tmp_setup, monkeypatch):
     )
     from src.data_fetcher import FinMindAPIError
 
-    def _flaky_fetch(sid, s, e):
+    def _flaky_fetch(sid, s, e, *, strict=False):
         if sid == "sid0":
             raise FinMindAPIError("FinMind 429")
+        return pd.DataFrame()
     monkeypatch.setattr(backfill, "fetch_dividend", _flaky_fetch)
     monkeypatch.setattr(
         "sys.argv",
@@ -141,6 +145,91 @@ def test_backfill_handles_fetch_error(tmp_setup, monkeypatch):
     code = backfill.main()
     # 1/2 = 50% > 10%,return 0(部分失敗仍 commit)
     assert code == 0
+
+
+# === P0-2 regression: silent fail guards ===
+
+def test_backfill_passes_strict_true_to_fetch(tmp_setup, monkeypatch):
+    """守 silent fail bug:backfill 必須帶 strict=True,否則 fetch_dividend
+    內部會 swallow FinMindAPIError 回空 df → backfill 看不到 → 全市場誤報 ok。"""
+    fake_universe = ["sid0"]
+    monkeypatch.setattr(
+        backfill, "pure_stock_universe", lambda min_history=20: fake_universe,
+    )
+    seen_strict = []
+
+    def _stub(sid, s, e, *, strict=False):
+        seen_strict.append(strict)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(backfill, "fetch_dividend", _stub)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_dividend.py", "--shard", "0", "--total-shards", "1"],
+    )
+    backfill.main()
+    assert seen_strict == [True], (
+        f"backfill 必須以 strict=True 呼叫 fetch_dividend,實際: {seen_strict}"
+    )
+
+
+def test_backfill_quota_error_fail_fast(tmp_setup, monkeypatch):
+    """連續 5 次 FinMindQuotaError → 提前 break,避免占滿 runner。"""
+    fake_universe = [f"sid{i:03d}" for i in range(100)]
+    monkeypatch.setattr(
+        backfill, "pure_stock_universe", lambda min_history=20: fake_universe,
+    )
+    from src.data_fetcher import FinMindQuotaError
+
+    call_count = {"n": 0}
+
+    def _quota_fetch(sid, s, e, *, strict=False):
+        call_count["n"] += 1
+        raise FinMindQuotaError("402 quota 爆")
+
+    monkeypatch.setattr(backfill, "fetch_dividend", _quota_fetch)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_dividend.py", "--shard", "0", "--total-shards", "1"],
+    )
+    backfill.main()
+    # 連續 5 次 quota_fail → break,call_count 應該遠少於 100
+    assert call_count["n"] <= 10, (
+        f"quota fail-fast 沒生效,call_count={call_count['n']}"
+    )
+
+
+def test_backfill_records_delta_rows_in_shard_txt(tmp_setup, monkeypatch):
+    """last_dividend_shard_K.txt 必含 delta_rows / empty / quota_fail 給 aggregator 用。"""
+    snapshot_dir = tmp_setup
+    monkeypatch.setattr(
+        backfill, "pure_stock_universe", lambda min_history=20: ["sid0"],
+    )
+
+    def _stub(sid, s, e, *, strict=False):
+        db.upsert_dividend([{
+            "stock_id": sid, "year": 2025,
+            "cash_dividend": 1.0, "stock_dividend": 0,
+            "ex_dividend_date": None,
+        }])
+        return pd.DataFrame([{
+            "stock_id": sid, "year": 2025,
+            "cash_dividend": 1.0, "stock_dividend": 0,
+            "ex_dividend_date": None,
+        }])
+
+    monkeypatch.setattr(backfill, "fetch_dividend", _stub)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backfill_dividend.py", "--shard", "0", "--total-shards", "1"],
+    )
+    backfill.main()
+
+    txt = (snapshot_dir / "last_dividend_shard_0.txt").read_text(encoding="utf-8")
+    assert "delta_rows=1" in txt
+    assert "empty=0" in txt
+    assert "quota_fail=0" in txt
+    assert "ok=1" in txt
 
 
 def test_backfill_shard_param_validation(tmp_setup, monkeypatch):
