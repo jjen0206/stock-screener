@@ -33,7 +33,11 @@ if str(_ROOT) not in sys.path:
 from src import database as db  # noqa: E402
 from src import paper_trading as pt  # noqa: E402
 from src.logging_setup import setup_file_logging  # noqa: E402
-from src.notifier import compute_top_picks, notify_top_picks  # noqa: E402
+from src.notifier import (  # noqa: E402
+    compute_top_picks,
+    notify_elite_top_picks,
+    notify_top_picks,
+)
 
 
 def main() -> int:
@@ -69,6 +73,18 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="不真的送,只 print 訊息到 stdout(看排版用)",
     )
+    p.add_argument(
+        "--legacy", action="store_true",
+        help="走 legacy 4-section 完整版(預設關 — 走 elite Top 5 精英版)",
+    )
+    p.add_argument(
+        "--top-n-long", type=int, default=3,
+        help="長線觀察 Top N(elite 模式專用,default 3)",
+    )
+    p.add_argument(
+        "--no-news", action="store_true",
+        help="elite 模式關閉 daily news caption",
+    )
     args = p.parse_args()
 
     # GitHub Actions runner fresh container,SQLite 空 → preload snapshot CSV
@@ -98,15 +114,48 @@ def main() -> int:
 
     params = json.loads(args.params_json) if args.params_json else None
 
-    results = notify_top_picks(
-        date=target_date,
-        params=params,
-        top_n=args.top_n,
-        confluence_n=args.confluence_n,
-        send_telegram=not args.no_telegram,
-        send_discord=not args.no_discord,
-        dry_run=args.dry_run,
-    )
+    # elite 模式為 default(2026-05-19 主公拍板 — 方案 B 精英化)
+    # legacy 路徑保留:--legacy flag(主公手動切回 4-section 完整版的逃生口)
+    if args.legacy:
+        results = notify_top_picks(
+            date=target_date,
+            params=params,
+            top_n=args.top_n,
+            confluence_n=args.confluence_n,
+            send_telegram=not args.no_telegram,
+            send_discord=not args.no_discord,
+            dry_run=args.dry_run,
+        )
+    else:
+        # elite 模式:Top 5 短線 + Top 3 長線觀察 + daily news caption
+        # (砍掉 legacy 「昨日複盤」「高信心交集」「大戶進場」3 個 section)
+        # 觸發前先 refetch news,確保 caption 是最新的(原 news-notify hourly cron
+        # 已砍 — main 推播只在 daily-notify 觸發時抓一次)
+        if not args.no_news:
+            try:
+                from src.news_fetcher import fetch_and_store_news
+                _r, _ins, _sk = fetch_and_store_news()
+                print(
+                    f"[NOTIFY] elite-mode news refetch: inserted={_ins}",
+                    flush=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[NOTIFY] elite-mode news refetch 失敗(non-blocking): "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+        results = notify_elite_top_picks(
+            date=target_date,
+            params=params,
+            top_n_short=args.top_n,
+            top_n_long=args.top_n_long,
+            confluence_n=args.confluence_n,
+            send_telegram=not args.no_telegram,
+            send_discord=not args.no_discord,
+            dry_run=args.dry_run,
+            include_news=not args.no_news,
+        )
 
     # Summary 列印每個通道的結果
     if not results:

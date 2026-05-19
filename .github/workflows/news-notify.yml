@@ -1,14 +1,14 @@
-name: News Notify (hourly)
+name: News Notify (manual / on-demand)
 
-# 每小時整點抓 TWSE 重大訊息,白名單條款過濾後推 Telegram + Discord。
-# 來源:https://openapi.twse.com.tw/v1/opendata/t187ap04_L(免費官方,加 User-Agent)
-# Public repo Actions 分鐘無限,每小時跑沒成本壓力。
+# 2026-05-19 主公拍板(精英化方案 B):
+#   砍 hourly cron — news 改為「每日 daily news brief」合併進 daily_notify caption。
+#   daily_notify.py(elite mode)觸發前會自己 refetch news 一次,確保 caption 最新。
+#   保留 workflow_dispatch 作為手動 backfill / debug 入口。
 #
-# Dedup by url_hash UNIQUE,同一條重訊只推一次(跨小時 cron 看到舊條目跳過)。
+# 歷史:原本每小時跑 fetch + dedup + 推(--no-telegram --no-discord 已關推播),
+# 現改為 on-demand 完全靜默。
 
 on:
-  schedule:
-    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:

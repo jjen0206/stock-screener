@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 # 預設「當日急殺」門檻(%)。負數表跌幅。
 DEFAULT_INTRADAY_DROP_PCT = -3.0
+# 持倉「重大急跌」門檻 — 2026-05-19 主公拍板加(精英化方案 B):
+# 跌 -5%+ 立即推「⚠️ XXXX 急跌 -5.2%,建議檢視持倉」。
+DEFAULT_HOLDING_SEVERE_DROP_PCT = -5.0
 # 預設「除權息倒數」天數。
 DEFAULT_EX_DIVIDEND_DAYS_AHEAD = 3
 
@@ -272,6 +275,88 @@ def _current_change_pct(
     return (current_price - latest) / latest * 100.0
 
 
+def check_holding_severe_drop(
+    conn: sqlite3.Connection,
+    threshold_pct: float = DEFAULT_HOLDING_SEVERE_DROP_PCT,
+) -> list[dict]:
+    """持倉 + watchlist 急跌警報(2026-05-19 主公拍板加,精英化方案 B):
+    跌 ≤ -5% 立即推「⚠️ XXXX 急跌 -5.2%,建議檢視持倉(停損 XX.XX)」。
+
+    來源:user_positions(is_open=1) ∪ watchlist。系統算的(無對應 price_alerts
+    row),alert_type='holding_severe_drop'。caller 走 alert_dedup 防同日重推。
+
+    跟既有 check_intraday_drop(-3% 一般警報、只持倉)分開:
+    - 門檻較嚴(-5% vs -3%)
+    - 來源較廣(holdings + watchlist vs 只 holdings)
+    - 訊息更急(「急跌」字眼)
+    """
+    if not is_enabled():
+        return []
+    sids: set[str] = set()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT stock_id FROM user_positions WHERE is_open=1"
+        ).fetchall()
+        for r in rows:
+            sid = str(r["stock_id"] or "").strip()
+            if sid:
+                sids.add(sid)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        rows = conn.execute("SELECT stock_id FROM watchlist").fetchall()
+        for r in rows:
+            sid = str(r["stock_id"] or "").strip()
+            if sid:
+                sids.add(sid)
+    except sqlite3.OperationalError:
+        pass
+    if not sids:
+        return []
+
+    # 同 stop_loss 撈一份(open position 才有自己的停損)— 缺則略
+    stop_map: dict[str, float] = {}
+    try:
+        for r in conn.execute(
+            "SELECT stock_id, stop_loss FROM user_positions "
+            "WHERE is_open=1 AND stop_loss IS NOT NULL"
+        ).fetchall():
+            try:
+                stop_map[str(r["stock_id"])] = float(r["stop_loss"])
+            except (TypeError, ValueError):
+                continue
+    except sqlite3.OperationalError:
+        pass
+
+    out: list[dict] = []
+    for sid in sorted(sids):
+        cur = _latest_close(conn, sid)
+        if cur is None:
+            continue
+        change = _current_change_pct(conn, sid, cur)
+        if change is None or change > threshold_pct:
+            continue
+        name = _stock_name(conn, sid)
+        stop_val = stop_map.get(sid)
+        stop_part = f"(停損 {stop_val:.2f})" if stop_val else ""
+        # 訊息精簡(spec):「⚠️ 2330 急跌 -5.2%,建議檢視持倉」
+        sid_label = f"{sid} {name}".strip() if name else sid
+        msg = (
+            f"⚠️ {sid_label} 急跌 {change:.1f}%,建議檢視持倉{stop_part}"
+        )
+        out.append({
+            "alert_id": None,
+            "stock_id": sid,
+            "name": name,
+            "alert_type": "holding_severe_drop",
+            "target_value": float(threshold_pct),
+            "current_price": cur,
+            "change_pct": change,
+            "message": msg,
+        })
+    return out
+
+
 def check_intraday_drop(
     conn: sqlite3.Connection,
     threshold_pct: float = DEFAULT_INTRADAY_DROP_PCT,
@@ -398,10 +483,12 @@ def check_ex_dividend_alerts(
 
 __all__ = [
     "DEFAULT_INTRADAY_DROP_PCT",
+    "DEFAULT_HOLDING_SEVERE_DROP_PCT",
     "DEFAULT_EX_DIVIDEND_DAYS_AHEAD",
     "is_enabled",
     "check_price_alerts",
     "check_intraday_drop",
+    "check_holding_severe_drop",
     "check_ex_dividend_alerts",
     "format_alert_message",
 ]

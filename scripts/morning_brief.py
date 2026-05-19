@@ -454,20 +454,27 @@ def format_brief_message(
     pick_diff: dict,
     sentiment: dict,
     channel: str = "telegram",
+    elite_picks: list[dict] | None = None,
 ) -> str:
     """組盤前快訊訊息。Telegram 走 HTML(parse_mode="HTML"),Discord 走 Markdown。
 
-    無任何變動 → 回極簡訊。
+    無任何變動 + 無 elite picks → 回極簡訊。elite_picks 不空仍顯完整版(主公
+    早上一定要看到今日 Top 5,即使無變動)。
     """
-    if not has_any_change(newly_warned, important_news, pick_diff, sentiment):
+    if (
+        not has_any_change(newly_warned, important_news, pick_diff, sentiment)
+        and not elite_picks
+    ):
         return _format_no_change(today_iso, channel=channel)
 
     if channel == "telegram":
         return _format_full_telegram(
             today_iso, newly_warned, important_news, pick_diff, sentiment,
+            elite_picks=elite_picks,
         )
     return _format_full_discord(
         today_iso, newly_warned, important_news, pick_diff, sentiment,
+        elite_picks=elite_picks,
     )
 
 
@@ -663,14 +670,57 @@ def _build_take_profit_alert_lines(channel: str) -> list[str]:
     return lines
 
 
+def _format_elite_top_picks_section(today_picks: list[dict], channel: str) -> list[str]:
+    """組「今日 Top 5 elite」section(精英化方案 B + B.1.d 排序 + B.2 7 欄)。
+
+    從 today_picks(已套 _select_elite_top_picks)組精簡 block。
+    picks 為空 → []。
+    """
+    if not today_picks:
+        return []
+    try:
+        from src.notifier import format_elite_pick_block
+    except Exception:  # noqa: BLE001
+        return []
+    is_html = (channel == "telegram")
+    header = (
+        f"🎯 <b>今日 Top {len(today_picks)} 精選</b>"
+        if is_html else f"🎯 **今日 Top {len(today_picks)} 精選**"
+    )
+    out = [header]
+    for p in today_picks:
+        out.append(format_elite_pick_block(p, channel=channel))
+    out.append("")
+    return out
+
+
+def _regime_header_line(channel: str) -> str:
+    """訊息開頭 1 行大盤 regime + TAIEX 預期(可空)。"""
+    try:
+        from src.notifier import _format_regime_header
+        cap = _format_regime_header(date="", channel=channel)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not cap:
+        return ""
+    return f"📊 {_h(cap)}" if channel == "telegram" else f"📊 {cap}"
+
+
 def _format_full_telegram(
     today_iso: str,
     newly_warned: list[dict],
     important_news: list[dict],
     pick_diff: dict,
     sentiment: dict,
+    elite_picks: list[dict] | None = None,
 ) -> str:
-    lines: list[str] = [f"🌅 <b>盤前快訊 {_h(today_iso)}</b>", ""]
+    lines: list[str] = [f"🌅 <b>盤前快訊 {_h(today_iso)}</b>"]
+
+    # 大盤 regime 1 行(精英化方案 B — 訊息開頭一次,不在每檔重複)
+    rh = _regime_header_line("telegram")
+    if rh:
+        lines.append(rh)
+    lines.append("")
 
     # B 進場時機強化(2026-05-17):TP/SL 達標警報放最前面(主公看到就要處理)。
     lines.extend(_build_take_profit_alert_lines("telegram"))
@@ -680,6 +730,9 @@ def _format_full_telegram(
 
     # G 個股價格警報快訊(2026-05-17 加)— PRICE_ALERT_ENABLED + 有觸發
     lines.extend(_build_price_alert_lines("telegram"))
+
+    # 精英化 Top 5(2026-05-19 方案 B)— 放在警示之後、變動之前
+    lines.extend(_format_elite_top_picks_section(elite_picks or [], "telegram"))
 
     # 警示更新
     if newly_warned:
@@ -766,14 +819,23 @@ def _format_full_discord(
     important_news: list[dict],
     pick_diff: dict,
     sentiment: dict,
+    elite_picks: list[dict] | None = None,
 ) -> str:
-    lines: list[str] = [f"🌅 **盤前快訊 {today_iso}**", ""]
+    lines: list[str] = [f"🌅 **盤前快訊 {today_iso}**"]
+
+    rh = _regime_header_line("discord")
+    if rh:
+        lines.append(rh)
+    lines.append("")
 
     # B 進場時機強化(2026-05-17):TP/SL 達標警報放最前面。
     lines.extend(_build_take_profit_alert_lines("discord"))
 
     lines.extend(_build_drawdown_alert_lines("discord"))
     lines.extend(_build_price_alert_lines("discord"))
+
+    # 精英化 Top 5(2026-05-19 方案 B)
+    lines.extend(_format_elite_top_picks_section(elite_picks or [], "discord"))
 
     if newly_warned:
         lines.append("⚠️ **警示更新 (vs 昨晚)**")
@@ -911,14 +973,37 @@ def run_morning_brief(
         newly_warned, important_news, pick_diff, sentiment,
     )
 
-    # 8. format messages
+    # 8a. 精英化 Top 5(2026-05-19 方案 B + B.1.d 排序 + B.2 7 欄)
+    # 盤前快訊主動推今日精選,跟 daily-notify 同 ranking 邏輯。
+    # 即使無變動仍推 Top 5(主公早上看到今日機會,不漏單)。
+    try:
+        from src.notifier import _select_elite_top_picks
+        # target_date None → 用最新交易日(同 get_last_pushed_picks 邏輯)
+        target = target_date or db.get_latest_trading_date() or today_iso
+        elite_picks = _select_elite_top_picks(
+            date=target, top_n=5, confluence_n=2,
+        )
+        # watchlist 命中標記(同 daily-notify)
+        try:
+            from src.watchlist_priority import prioritize_watchlist as _wl
+            _wl(elite_picks)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as ex:  # noqa: BLE001
+        logger.warning(
+            "[MORNING_BRIEF] elite picks 撈取失敗(graceful skip): %s: %s",
+            type(ex).__name__, ex,
+        )
+        elite_picks = []
+
+    # 8b. format messages
     tg_msg = format_brief_message(
         today_iso, newly_warned, important_news, pick_diff, sentiment,
-        channel="telegram",
+        channel="telegram", elite_picks=elite_picks,
     )
     dc_msg = format_brief_message(
         today_iso, newly_warned, important_news, pick_diff, sentiment,
-        channel="discord",
+        channel="discord", elite_picks=elite_picks,
     )
 
     result: dict = {
