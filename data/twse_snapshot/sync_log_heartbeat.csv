@@ -1,6 +1,6 @@
 task_name,last_success_at,last_failure_at,last_failure_reason,expected_interval_hours,updated_at
 backfill_revenue,2026-05-18T18:10:33Z,,,168.0,2026-05-18T18:10:33Z
-daily_notify,2026-05-19T04:27:16Z,,,24.0,2026-05-19T04:27:16Z
+daily_notify,2026-05-19T17:30:01Z,,,24.0,2026-05-19T17:30:01Z
 intraday_alerts,2026-05-19T16:53:08Z,,,0.5,2026-05-19T16:53:08Z
 morning_brief,2026-05-19T06:07:35Z,,,24.0,2026-05-19T06:07:35Z
 news_notify,2026-05-19T00:12:02Z,,,1.0,2026-05-19T00:12:02Z
