@@ -34,6 +34,11 @@ _COLUMNS = [
     "hold_days", "expected_exit_date",
     "actual_exit_date", "actual_exit_price",
     "status", "return_pct", "notes",
+    # Phase 2 觀察機制(2026-05-19):3 個歸因因子,SQL → CSV 必須一起 dump
+    # 不然 30 天觀察期 dump→push→fresh-container preload 會把這 3 欄洗回 NULL。
+    # 舊 CSV(這 3 欄不存在) preload 時 _ingest_paper_trades_dataframe 寫 NULL,
+    # 不 crash(向後相容)。
+    "consensus_multiplier", "position_pct", "conviction_score",
     "created_at", "updated_at",
 ]
 
@@ -189,6 +194,11 @@ def _ingest_paper_trades_dataframe(
                     status = "active"
 
                 created_at = _opt_str("created_at") or ""
+                # Phase 2 觀察機制(2026-05-19):舊 CSV 沒這 3 欄 → _opt_float
+                # 回 None → SQL 寫 NULL,向後相容。
+                consensus_mult = _opt_float("consensus_multiplier")
+                position_pct = _opt_float("position_pct")
+                conviction_score = _opt_float("conviction_score")
                 try:
                     conn.execute(
                         """
@@ -200,9 +210,11 @@ def _ingest_paper_trades_dataframe(
                              hold_days, expected_exit_date,
                              actual_exit_date, actual_exit_price,
                              status, return_pct, notes,
+                             consensus_multiplier, position_pct,
+                             conviction_score,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             sid,
@@ -222,6 +234,9 @@ def _ingest_paper_trades_dataframe(
                             status,
                             _opt_float("return_pct"),
                             _opt_str("notes"),
+                            consensus_mult,
+                            position_pct,
+                            conviction_score,
                             created_at,
                             _opt_str("updated_at"),
                         ),
