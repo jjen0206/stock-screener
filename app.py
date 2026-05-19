@@ -7265,6 +7265,75 @@ def _page_paper_tracking() -> None:
         )
 
 
+# Phase 2 策略上線里程碑(2026-05-18)— 寫死在這裡,by-date 圖加 vline 標籤
+# 讓主公一眼看出「新策略上線後走勢有沒有變」。
+# commit SHA 來自實際 merge:P2-2=2c940a7 / P2-3=b18196f / P2-4=e3f3e3e /
+# P2-7=8f82475 / P2-8=d6c603c(P2-8 倉位 sizing PR #17 merge sha)。
+_PHASE2_LAUNCH_MARKERS: list[tuple[str, str]] = [
+    ("2026-05-18", "P2-2 營收公告預期"),
+    ("2026-05-18", "P2-3 法人×千張共識"),
+    ("2026-05-18", "P2-4 財報意外延續"),
+    ("2026-05-18", "P2-7 衝突檢測"),
+    ("2026-05-18", "P2-8 倉位 sizing"),
+]
+
+
+def _make_strategy_history_by_date_chart(df: pd.DataFrame) -> "go.Figure":
+    """by-date 圖:D5 平均 (bar) + 命中率 (line) + Phase 2 上線 vline。
+
+    df 需含欄 推播日 / D5 平均 / 命中率(數值,已 *100)。
+    """
+    df_sorted = df.sort_values("推播日")
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=df_sorted["推播日"], y=df_sorted["D5 平均"],
+            name="D5 平均報酬 %",
+            marker_color=[
+                "#26a69a" if v >= 0 else "#ef5350"
+                for v in df_sorted["D5 平均"]
+            ],
+            hovertemplate="%{x}<br>D5: %{y:+.2f}%<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df_sorted["推播日"], y=df_sorted["命中率"],
+            name="命中率 %", mode="lines+markers",
+            line={"color": "#5e35b1", "width": 2},
+            hovertemplate="%{x}<br>命中率: %{y:.1f}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    # Phase 2 上線 marker — 同日多個 marker 疊在一條線上,annotation 換行避免擠
+    grouped: dict[str, list[str]] = {}
+    for d, label in _PHASE2_LAUNCH_MARKERS:
+        grouped.setdefault(d, []).append(label)
+    pick_dates = set(df_sorted["推播日"].astype(str).tolist())
+    for d, labels in grouped.items():
+        if d not in pick_dates:
+            # 該日不在當前資料範圍,跳過 — 避免 vline 跑到圖外觸發 plotly warning
+            continue
+        fig.add_vline(
+            x=d, line_dash="dash", line_color="#ff9800", line_width=1,
+            annotation_text="<br>".join(["🚀 上線"] + labels),
+            annotation_position="top",
+            annotation_font_size=10,
+        )
+
+    fig.update_layout(
+        height=380,
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
+        legend={"orientation": "h", "y": 1.12, "x": 0},
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text="D5 平均 %", secondary_y=False)
+    fig.update_yaxes(title_text="命中率 %", secondary_y=True)
+    return fig
+
+
 def _page_strategy_history() -> None:
     """📊 策略歷史命中 — 把 M4 weekly backtest 落在 pick_outcomes 的後向資料 UI 化。
 
@@ -7335,20 +7404,29 @@ def _page_strategy_history() -> None:
         if not by_date:
             st.info("📭 近 30 日尚無資料")
         else:
-            rows_view = []
-            for r in by_date:
-                rows_view.append({
+            df_date = pd.DataFrame([
+                {
                     "推播日": r["pick_date"],
                     "命中數 N": int(r["n"] or 0),
-                    "D1 平均": f"{(r['avg_d1'] or 0):+.2f}%",
-                    "D5 平均": f"{(r['avg_d5'] or 0):+.2f}%",
-                    "命中率": f"{(r['hit_rate'] or 0) * 100:.1f}%",
-                    "停損率": f"{(r['stop_rate'] or 0) * 100:.1f}%",
-                })
-            st.dataframe(
-                pd.DataFrame(rows_view),
-                use_container_width=True, hide_index=True,
+                    "D1 平均": float(r["avg_d1"] or 0),
+                    "D5 平均": float(r["avg_d5"] or 0),
+                    "命中率": float(r["hit_rate"] or 0) * 100,
+                    "停損率": float(r["stop_rate"] or 0) * 100,
+                }
+                for r in by_date
+            ])
+            fig_date = _make_strategy_history_by_date_chart(df_date)
+            st.plotly_chart(fig_date, use_container_width=True)
+            st.caption(
+                "↑ 垂直虛線標 Phase 2 策略上線日,讓主公一眼看出新策略上線後 "
+                "by-date 走勢有沒有變。"
             )
+            view = df_date.copy()
+            view["D1 平均"] = view["D1 平均"].map(lambda v: f"{v:+.2f}%")
+            view["D5 平均"] = view["D5 平均"].map(lambda v: f"{v:+.2f}%")
+            view["命中率"] = view["命中率"].map(lambda v: f"{v:.1f}%")
+            view["停損率"] = view["停損率"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(view, use_container_width=True, hide_index=True)
 
     # === Tab 3: 明細 ===
     with tab_raw:
