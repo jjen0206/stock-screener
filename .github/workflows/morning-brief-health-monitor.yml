@@ -1,0 +1,73 @@
+name: Morning Brief Health Monitor
+
+# 每天 09:30 TW(預期推播後 1 hr buffer)檢查 morning-brief.yml 過去 24 hr
+# 是否有成功 run, 沒有就推 Telegram 警告主公手動 trigger。
+#
+# 為什麼有這個 monitor:
+#   2026-05-19 GHA schedule 雙班全 drop, 主公延 1 hr 43 min 才收到盤前快訊。
+#   主公拍板:外部 cron-job.org 主班 + GHA 兩條 fallback + 本 health monitor
+#   當第三層守門員(若全失敗就警告主公手動操作)。
+#
+# 雙重保險:本 workflow 也用 GHA schedule(09:30 TW 09:30 + 30min UTC = 01:30 UTC),
+# 萬一 GHA schedule 連這條也 drop → 第二天主公自己沒收到推播會察覺。
+# (不能用 cron-job.org 監控 cron-job.org 本身, 會 chicken-and-egg)
+#
+# Detail:scripts/check_morning_brief_health.py
+
+on:
+  schedule:
+    # 01:30 UTC = 09:30 Asia/Taipei,週一到週五
+    # 預期 morning-brief 08:30 TW 推完, 留 1 hr buffer 給延遲 / retry
+    - cron: "30 1 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      lookback_hours:
+        description: "往回查幾小時(預設 24)"
+        required: false
+        default: "24"
+      dry_run:
+        description: "dry-run(不真送 Telegram, 只 print)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: morning-brief-health-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read  # 必要 — gh api 讀 workflow runs 需要 actions:read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check morning brief health
+        env:
+          # GITHUB_TOKEN 自動由 GHA 注入 — gh CLI 會自動讀, 不用 explicit pass
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.lookback_hours }}" ]; then
+            ARGS="$ARGS --lookback-hours ${{ inputs.lookback_hours }}"
+          fi
+          echo "Running: python scripts/check_morning_brief_health.py $ARGS"
+          python scripts/check_morning_brief_health.py $ARGS

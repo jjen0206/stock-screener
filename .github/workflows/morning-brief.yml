@@ -1,6 +1,17 @@
 name: Morning Brief (pre-market)
 
-# 盤前快訊:每交易日 08:30 Asia/Taipei(00:30 UTC)推播
+# 盤前快訊:每交易日 08:30 Asia/Taipei 推播
+#
+# 觸發架構 (2026-05-19 主公拍板,逃離 GHA schedule 不可靠):
+#   主班 = cron-job.org 外部 cron → GitHub dispatches API trigger workflow_dispatch
+#          時間 08:30 TW (00:30 UTC) — SLA 99.99% 不會被 drop
+#   GHA 第二層 fallback (萬一 cron-job.org 掛了還有保底):
+#     - 07:47 TW (23:47 UTC -1d, 週日-週四) = 提早 43 min
+#     - 08:17 TW (00:17 UTC 週一-週五) = 提早 13 min
+#   兩條 GHA cron 預期常被 delay (這就是當初出事的原因), delay 到 08:30 後
+#   被下方 dedup step 認出「8h 內已有 success run」直接 skip,不會雙推。
+#
+# 詳細 setup SOP:docs/external-cron-morning-brief-setup.md
 #
 # 目的:主公開盤前 30 分鐘掌握隔夜變動(警示更新 / 重大 news / 推薦變動 / 美股情緒),
 # 不重複推昨晚 22:13 那一輪 — 只推「變動 + 重要警示」,無變動推極簡訊。
@@ -9,9 +20,11 @@ name: Morning Brief (pre-market)
 
 on:
   schedule:
-    # 00:30 UTC = 08:30 Asia/Taipei,週一到週五(台股不開的週末跳過)
-    # 比 daily-notify 22:13 慢 ~10 小時,有時間讓 MOPS 凌晨更新 + 美股收盤
-    - cron: "30 0 * * 1-5"
+    # === GHA 第二層 fallback (僅在 cron-job.org 整個失效時才有用) ===
+    # 07:47 TW (23:47 UTC -1d, 週日-週四 UTC = 週一-週五 TW)
+    - cron: "47 23 * * 0-4"
+    # 08:17 TW (00:17 UTC 週一-週五 UTC = 週一-週五 TW)
+    - cron: "17 0 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -22,6 +35,10 @@ on:
         description: "覆寫比對基準日 YYYY-MM-DD(留空走 daily_prices MAX(date))"
         required: false
         default: ""
+      triggered_by:
+        description: "觸發來源 tag(方便看 log 追溯,e.g. external-cron-job-org / manual / health-monitor)"
+        required: false
+        default: "manual"
 
 # 同 group 同時最多 1 個,避免兩輪 cron 重疊
 concurrency:
@@ -29,11 +46,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ============================================================================
+  # Job 1: dedup — 查最近 8h 有沒有成功的 morning-brief run, 有就 skip
+  # ============================================================================
+  # 為何 8h:cron-job.org 08:30 + GHA fallback 07:47 / 08:17 全在 1 小時內,8h
+  # 窗口足以 cover「主班已成功 → fallback 延遲 fire 想雙推」的場景。
+  # 主公手動 EXECUTE NOW 或下 GH UI workflow_dispatch 不會被 skip(因為手動觸發
+  # 通常是 debug / 重跑, 主公自己知道在做什麼)。
+  dedup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      should_skip: ${{ steps.check.outputs.should_skip }}
+    steps:
+      - name: Check recent successful runs (8h window)
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 手動觸發永遠不 skip — 主公自己按的, 一定有原因
+            if (context.eventName === 'workflow_dispatch') {
+              core.info('Manual workflow_dispatch — skip dedup check');
+              core.setOutput('should_skip', 'false');
+              return;
+            }
+            const eightHoursAgoMs = Date.now() - 8 * 3600 * 1000;
+            const eightHoursAgoIso = new Date(eightHoursAgoMs).toISOString();
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'morning-brief.yml',
+              status: 'success',
+              created: `>${eightHoursAgoIso}`,
+              per_page: 10,
+            });
+            const recent = data.workflow_runs.filter(r => r.id !== context.runId);
+            if (recent.length > 0) {
+              const ids = recent.map(r => `${r.id} (${r.created_at})`).join(', ');
+              core.info(`Skip: found ${recent.length} success run(s) in last 8h: ${ids}`);
+              core.setOutput('should_skip', 'true');
+            } else {
+              core.info('No recent success runs — proceed');
+              core.setOutput('should_skip', 'false');
+            }
+
+  # ============================================================================
+  # Job 2: brief — 真正跑盤前快訊
+  # ============================================================================
   brief:
+    needs: dedup
+    if: needs.dedup.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15  # refetch warnings ~30s + news ~5s + yfinance ~5s + 推播 ~3s
 
     steps:
+      - name: Log trigger source
+        run: |
+          echo "[MORNING_BRIEF] event=${{ github.event_name }} triggered_by=${{ inputs.triggered_by || 'schedule' }}"
+
       - name: Checkout repo
         uses: actions/checkout@v4
 
