@@ -21,15 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       start:
-        description: "起始日 (ISO,含)"
+        description: "起始日 (ISO,含;swing 5y 模式填 5 年前如 2021-05-19)"
         required: false
         default: "2024-01-02"
       end:
-        description: "終止日 (ISO,含)"
+        description: "終止日 (ISO,含;傳 'LATEST' 自動代換成今天 — swing 5y 用)"
         required: false
         default: "2025-11-03"
       sleep:
-        description: "每個日期間 sleep 秒數 (預設 2.5,別調太低會被 ban)"
+        description: "每個日期間 sleep 秒數 (預設 2.5,別調太低會被 ban;swing 5y 大量 backfill 建議 1.5 加速)"
         required: false
         default: "2.5"
       dump_format:

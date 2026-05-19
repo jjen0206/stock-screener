@@ -5,6 +5,13 @@
   短線策略需要 14-60 天歷史(MA60 / KD9 / 5 日均量),沒歷史 → 全部 skip → 0 入選。
   Streamlit Cloud 自己 IP 被 TWSE 擋,不能跑這個 backfill,只能在 GH Actions 跑。
 
+Swing 5y backfill 模式(2026-05-19 Phase 0c-B):
+  `python scripts/backfill_history.py --days 1825 --min-existing 1260`
+  - 1825 天 ≈ 5 年(含週末/假日 buffer);1260 是純交易日,當 min_existing 閾值
+  - 預期跑 ~30-90 min / shard(8-shard 並發共用同 FinMind token,慢於線性 8 倍速)
+  - **建議排程**:FinMind quota 6/1 09:00 重置後啟動 — 5y backfill 會吃滿 ~1 hr 配額
+  - 詳見 `docs/swing_backfill_runbook.md`
+
 流程:
   1. 列舉全市場 universe(TWSE + TPEx,~2700 檔)
   2. (shard 模式)依 sorted index 切成 N 份,只跑自己的 shard
@@ -216,6 +223,16 @@ def main() -> int:
         if args.total_shards < 1:
             print("❌ --total-shards 必須 >= 1", flush=True)
             return 2
+
+    # 5y 大 backfill 警示 — 主公手動觸發若不小心填 5000,提早 abort
+    # 避免 emoji(Windows cp950 不吃,純文字保險)
+    if args.days > 1000:
+        print(
+            f"[WARN] [BACKFILL] --days={args.days} > 1000(swing 5y 模式)。"
+            f"預估每 shard 30-90 min,FinMind quota 可能撞牆 — "
+            f"確認在 quota 重置窗口內。詳見 docs/swing_backfill_runbook.md",
+            flush=True,
+        )
 
     db.init_db()
     # Preload 既有 CSV → SQLite(GH runner cache.db 是空的,不 preload 的話:
