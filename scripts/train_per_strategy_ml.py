@@ -2,7 +2,8 @@
 
 設計:對每個 strategy,跑過去 LOOKBACK_DAYS 個交易日,把該 strategy 在每天
 fire 的 picks 抽 features + simulate_outcome 算 label(+5%/-3%/5 day hold,
-跟 backtest 一致),累積成 per-strategy 訓練集 → train RandomForest 存
+跟 backtest 一致),累積成 per-strategy 訓練集 → train **stacking ensemble**
+(Phase 2 #P2-5;LightGBM + LR + RF + LR meta-learner)存
 `models/per_strategy/<strategy>.pkl` + `<strategy>.meta.json`。
 
 跟 `scripts/train_ml_model.py`(通用 short_pick.pkl)的差異:
@@ -10,13 +11,29 @@ fire 的 picks 抽 features + simulate_outcome 算 label(+5%/-3%/5 day hold,
 - per-strategy 版只看「該 strategy 真的 fire 那些 picks」+ %-based label
   (跟 strategy_backtest 表的 win_rate 同口徑)
 
+**Cost-aligned labels(2026-05-18 強化)** — `simulate_outcome(..., apply_costs=True)`
+**顯式**呼叫(原本走預設值,改顯式以防有人改 default 而靜默失準):
+  - target 觸到:gross +5% → net +4.415%(扣 0.585% round-trip cost)→ label=1
+  - stop  觸到:gross -3% → net -3.585% → label=0
+  - hold 過期:close vs entry 扣 cost 後 > 0 才 label=1
+  → model 學的是「淨報酬為正」的真實樣本,不是「沒扣費的虛胖版」。
+詳見 docs/strategy-rescue-bias-convergence-2026-05-18.md。
+
+**Backend 切換**(Phase 2 #P2-5):
+- `--backend ensemble`(預設):樣本 ≥ MIN_STACKING_SAMPLES=300 跑 stacking;
+  < 300 則 graceful fallback 到單 RF(避免 stacking 在小樣本過擬合 + CV 不穩)。
+- `--backend rf`:強制全部走舊單 RF 行為(debug / ablation)。
+
 樣本量低於 MIN_TRAIN_SAMPLES(預設 100)的 strategy → 標記 fallback,不存
 pkl(只存 meta.json with status="fallback");inference 時 fallback 到通用
 模型。
 
 CLI:
-    # 全 11 strategies × 200 day lookback
+    # 全 strategies × 200 day lookback,default = ensemble backend
     python scripts/train_per_strategy_ml.py
+
+    # 強制走舊 RF 路徑
+    python scripts/train_per_strategy_ml.py --backend rf
 
     # 單一 strategy
     python scripts/train_per_strategy_ml.py --strategy ma_alignment
@@ -57,6 +74,13 @@ TARGET_PCT = 0.05
 STOP_PCT = 0.03
 HOLD_DAYS = 5
 MODEL_DIR = _ROOT / "models" / "per_strategy"
+
+# === Cost-aligned labels(2026-05-18 強化)===
+# True = 顯式呼叫 simulate_outcome(apply_costs=True),label 反映「扣完手續費 + 證交
+# 稅 + 滑價後 net 報酬為正」。
+# False = 走 raw gross 報酬(舊行為,只在 debug / ablation 對比用)。
+# 跟 src.backtest_costs.round_trip_cost_rate() = 0.585% 一致。
+COST_AWARE_LABELS: bool = True
 
 # RandomForest 預設 hyperparams(其餘 strategy 用)
 DEFAULT_RF_PARAMS = {
@@ -154,9 +178,13 @@ def gather_training_set(
             if len(future) < hold_days:
                 continue
 
+            # Cost-aware label:顯式 apply_costs=COST_AWARE_LABELS。
+            # True (default) → label 反映扣費後 net > 0 的真實樣本(避免「沒扣費虛胖」)。
+            # 詳見 module docstring 第 14-21 行。
             outcome, _ = simulate_outcome(
                 future, entry_price,
                 target_pct=target_pct, stop_pct=stop_pct,
+                apply_costs=COST_AWARE_LABELS,
             )
             label = 1 if outcome == "win" else 0
 
@@ -182,12 +210,19 @@ def train_one(
     train_df: pd.DataFrame,
     output_dir: Path = MODEL_DIR,
     min_samples: int = MIN_TRAIN_SAMPLES,
+    backend: str = "ensemble",
 ) -> dict:
-    """訓 RandomForest + dump pkl/meta。回 status dict。
+    """訓模型 + dump pkl/meta。回 status dict。
+
+    backend(Phase 2 #P2-5):
+      - 'ensemble'(預設):樣本 ≥ MIN_STACKING_SAMPLES=300 → stacking ensemble;
+        < 300 → fallback 到單 RF(避免 stacking 過擬合)
+      - 'rf':強制走舊單 RF 行為(debug / ablation)
 
     status dict 鍵:
-      strategy / samples / wins / win_rate / status / oob_score / pkl_path
-    status 取值:'trained'(成功) / 'fallback'(樣本不足,只 dump meta)。
+      strategy / samples / wins / win_rate / status / oob_score / pkl_path /
+      calibration / model_type
+    status 取值:'trained'(成功) / 'fallback'(樣本不足 min_samples,只 dump meta)。
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     pkl_path = output_dir / f"{strategy_name}.pkl"
@@ -215,6 +250,7 @@ def train_one(
             "target_pct": TARGET_PCT,
             "stop_pct": STOP_PCT,
             "hold_days": HOLD_DAYS,
+            "cost_aware_labels": COST_AWARE_LABELS,
         }
         meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -228,11 +264,8 @@ def train_one(
             "oob_score": None,
             "pkl_path": None,
             "calibration": None,
+            "model_type": None,
         }
-
-    # 真的訓:RandomForest with OOB
-    from sklearn.ensemble import RandomForestClassifier
-    from src import ml_calibration
 
     # gather_training_set 內 rows 按 (date asc, sid) 序 append,所以 row order
     # 就是時序;最後 20% holdout 走 train_with_calibration 邏輯(time-based)
@@ -240,25 +273,57 @@ def train_one(
     X = train_df[ml_predictor.FEATURE_NAMES].copy()
     y = train_df["label"].astype(int)
 
-    rf_params = _rf_params_for(strategy_name)
-    base_rf_kwargs = {
-        "n_estimators": rf_params["n_estimators"],
-        "max_depth": rf_params["max_depth"],
-        "min_samples_leaf": rf_params["min_samples_leaf"],
-        "class_weight": "balanced",
-        "oob_score": True,
-        "bootstrap": True,
-        "random_state": 42,
-        "n_jobs": -1,
-    }
-    model = RandomForestClassifier(**base_rf_kwargs)
-    model.fit(X, y)
-    oob_score = float(getattr(model, "oob_score_", 0.0))
+    from src import ml_calibration, ml_ensemble
 
-    importances = sorted(
-        zip(ml_predictor.FEATURE_NAMES, model.feature_importances_),
-        key=lambda kv: -kv[1],
+    # ===== Backend dispatch =====
+    use_ensemble = (
+        backend == "ensemble" and n_samples >= ml_ensemble.MIN_STACKING_SAMPLES
     )
+    model_type = "StackingEnsembleModel" if use_ensemble else "RandomForestClassifier"
+    oob_score: float | None = None
+    importances: list[tuple[str, float]] = []
+    ensemble_metrics: dict | None = None
+
+    if use_ensemble:
+        try:
+            model, ensemble_metrics = ml_ensemble.train_stacking_ensemble(
+                X, y, feature_names=ml_predictor.FEATURE_NAMES,
+            )
+            # 用 lgbm gain 當「主」importance source(對齊 RF 介面的 5 個 top)
+            lgbm_imps = (ensemble_metrics.get("feature_importances") or {}).get("lgbm", {})
+            if lgbm_imps:
+                importances = sorted(lgbm_imps.items(), key=lambda kv: -kv[1])
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[TRAIN-PS] {strategy_name}: ensemble 訓練失敗 ({type(e).__name__}: {e})"
+                f" — fallback to RF",
+                flush=True,
+            )
+            use_ensemble = False
+            model_type = "RandomForestClassifier"
+
+    if not use_ensemble:
+        # 單 RF 路徑(舊行為 — 含 OOB score)
+        from sklearn.ensemble import RandomForestClassifier
+
+        rf_params = _rf_params_for(strategy_name)
+        base_rf_kwargs = {
+            "n_estimators": rf_params["n_estimators"],
+            "max_depth": rf_params["max_depth"],
+            "min_samples_leaf": rf_params["min_samples_leaf"],
+            "class_weight": "balanced",
+            "oob_score": True,
+            "bootstrap": True,
+            "random_state": 42,
+            "n_jobs": -1,
+        }
+        model = RandomForestClassifier(**base_rf_kwargs)
+        model.fit(X, y)
+        oob_score = float(getattr(model, "oob_score_", 0.0))
+        importances = sorted(
+            zip(ml_predictor.FEATURE_NAMES, model.feature_importances_),
+            key=lambda kv: -kv[1],
+        )
 
     ml_predictor.save_model(model, pkl_path)
 
@@ -311,7 +376,7 @@ def train_one(
             flush=True,
         )
 
-    meta = {
+    meta: dict = {
         "strategy": strategy_name,
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "samples": n_samples,
@@ -328,11 +393,25 @@ def train_one(
         "target_pct": TARGET_PCT,
         "stop_pct": STOP_PCT,
         "hold_days": HOLD_DAYS,
-        "model_type": "RandomForestClassifier",
-        "n_estimators": rf_params["n_estimators"],
-        "max_depth": rf_params["max_depth"],
-        "min_samples_leaf": rf_params["min_samples_leaf"],
+        "model_type": model_type,
+        "cost_aware_labels": COST_AWARE_LABELS,
     }
+    if not use_ensemble:
+        rf_params = _rf_params_for(strategy_name)
+        meta["n_estimators"] = rf_params["n_estimators"]
+        meta["max_depth"] = rf_params["max_depth"]
+        meta["min_samples_leaf"] = rf_params["min_samples_leaf"]
+    if ensemble_metrics:
+        meta["ensemble"] = {
+            "type": ensemble_metrics.get("ensemble_type", "stacking_v1"),
+            "cv_folds": int(ensemble_metrics.get("cv_folds", 5)),
+            "oof_auc_per_learner": {
+                k: float(v) for k, v in (ensemble_metrics.get("oof_auc_per_learner") or {}).items()
+            },
+            "meta_oof_auc": float(ensemble_metrics.get("meta_oof_auc", 0.0)),
+            "meta_oof_brier": float(ensemble_metrics.get("meta_oof_brier", 0.0)),
+            "multitask_horizons": list(ensemble_metrics.get("multitask_horizons") or []),
+        }
     if calibration_info:
         meta["calibration"] = calibration_info
     meta_path.write_text(
@@ -348,6 +427,8 @@ def train_one(
         "oob_score": oob_score,
         "pkl_path": str(pkl_path),
         "calibration": calibration_info,
+        "model_type": model_type,
+        "ensemble": ensemble_metrics,
     }
 
 
@@ -359,22 +440,33 @@ def _print_summary(results: list[dict]) -> None:
     print("", flush=True)
     print(
         f"{'Strategy':<24s} {'Samples':>8s} {'Wins':>6s} "
-        f"{'WinRate':>8s} {'OOB':>7s} {'Brier raw→cal':>15s} {'Status':>10s}",
+        f"{'WinRate':>8s} {'OOB/AUC':>9s} {'Brier raw→cal':>15s} "
+        f"{'Backend':>12s} {'Status':>10s}",
         flush=True,
     )
-    print("-" * 90, flush=True)
+    print("-" * 105, flush=True)
     for r in results:
-        oob = f"{r['oob_score'] * 100:>6.1f}%" if r["oob_score"] is not None else "    n/a"
+        if r.get("oob_score") is not None:
+            score_str = f"OOB {r['oob_score'] * 100:>5.1f}%"
+        elif r.get("ensemble"):
+            auc = r["ensemble"].get("meta_oof_auc")
+            score_str = f"AUC {auc:>5.3f}" if auc is not None else "      n/a"
+        else:
+            score_str = "      n/a"
         cal = r.get("calibration")
         if cal:
-            brier_str = (
-                f"{cal['raw_brier']:.3f}→{cal['calibrated_brier']:.3f}"
-            )
+            brier_str = f"{cal['raw_brier']:.3f}→{cal['calibrated_brier']:.3f}"
         else:
             brier_str = "n/a"
+        backend_str = (
+            "stacking" if (r.get("model_type") == "StackingEnsembleModel") else "rf"
+        )
+        if r.get("status") == "fallback":
+            backend_str = "-"
         print(
             f"{r['strategy']:<24s} {r['samples']:>8d} {r['wins']:>6d} "
-            f"{r['win_rate'] * 100:>7.1f}% {oob} {brier_str:>15s} {r['status']:>10s}",
+            f"{r['win_rate'] * 100:>7.1f}% {score_str:>9s} {brier_str:>15s} "
+            f"{backend_str:>12s} {r['status']:>10s}",
             flush=True,
         )
     print("", flush=True)
@@ -397,6 +489,14 @@ def main() -> int:
     p.add_argument(
         "--as-of",
         help="period_end YYYY-MM-DD;留空 = SQLite daily_prices MAX(date)",
+    )
+    p.add_argument(
+        "--backend", choices=["ensemble", "rf"], default="ensemble",
+        help=(
+            "預設 ensemble(LightGBM + LR + RF stacking,Phase 2 #P2-5)。"
+            "rf 強制走舊單 RF 行為(debug)。樣本 < MIN_STACKING_SAMPLES=300 "
+            "自動 fallback 到 RF。"
+        ),
     )
     args = p.parse_args()
 
@@ -457,11 +557,22 @@ def main() -> int:
         )
 
         t0 = time.time()
-        result = train_one(name, train_df, min_samples=args.min_samples)
+        result = train_one(
+            name, train_df, min_samples=args.min_samples, backend=args.backend,
+        )
         train_secs = time.time() - t0
         if result["status"] == "trained":
+            mt = result.get("model_type", "?")
+            if result.get("oob_score") is not None:
+                summary = f"OOB={result['oob_score']:.3f}"
+            else:
+                ens = result.get("ensemble") or {}
+                meta_auc = ens.get("meta_oof_auc")
+                summary = (
+                    f"meta_OOF_AUC={meta_auc:.3f}" if meta_auc is not None else "no-eval"
+                )
             print(
-                f"[TRAIN-PS] {name}: trained → OOB={result['oob_score']:.3f} "
+                f"[TRAIN-PS] {name}: trained ({mt}) → {summary} "
                 f"({train_secs:.1f}s)",
                 flush=True,
             )

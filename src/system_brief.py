@@ -181,6 +181,138 @@ def _build_strategy_performance(
     return out
 
 
+# === Phase 2 Q4 — 多視窗趨勢對比（30d / 60d / 90d） ===
+
+def _build_strategy_window_summary(
+    conn: sqlite3.Connection,
+    days: int,
+) -> dict[str, Any]:
+    """過去 N 天 pick_outcomes 全策略聚合 — N / WR / AvgRet。
+
+    跟 _build_strategy_performance 不同:那個 by-strategy break-down,這個是
+    *跨策略整體*單一數值,讓週報 30d/60d/90d 三個視窗能並排比較趨勢。
+    """
+    today_iso = _today_iso()
+    start_iso = (date.fromisoformat(today_iso) - timedelta(days=days)).isoformat()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   AVG(CASE WHEN return_d5 > 0 THEN 1.0 ELSE 0.0 END) AS wr,
+                   AVG(return_d5) AS avg_d5
+            FROM pick_outcomes
+            WHERE pick_date >= ?
+              AND return_d5 IS NOT NULL
+            """,
+            (start_iso,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {"days": days, "n": 0, "wr": None, "avg_d5": None}
+    n = int(row["n"] or 0) if row else 0
+    wr = float(row["wr"]) if row and row["wr"] is not None else None
+    avg_d5 = float(row["avg_d5"]) if row and row["avg_d5"] is not None else None
+    return {"days": days, "n": n, "wr": wr, "avg_d5": avg_d5}
+
+
+def _build_trend_windows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """回 3 個視窗(30d / 60d / 90d)整體 N / WR / AvgRet,讓主公看 Phase 2 上線
+    後是否短期波動 vs 長期穩定。
+
+    順序固定 30 → 60 → 90 給 formatter 直接讀。
+    """
+    return [_build_strategy_window_summary(conn, d) for d in (30, 60, 90)]
+
+
+# === Phase 2 Q4 — P2-7 multiplier 歸因 ===
+
+# multiplier 三段對應 P2-7 衝突檢測規則:
+#   1.00 = solo / no consensus(沒共識,base 倉)
+#   1.25 = mid-consensus(法人/籌碼 OR 趨勢 wins)
+#   1.50 = strong consensus(法人 AND 籌碼 AND 趨勢 三者全對齊)
+# 歸 bucket 用 ±0.01 容忍(SQL round 後正規化）。
+_MULTIPLIER_BUCKETS: list[tuple[float, str]] = [
+    (1.0, "1.0× solo"),
+    (1.25, "1.25× mid"),
+    (1.5, "1.5× strong"),
+]
+
+
+def _bucket_label_for(mult: float | None) -> str | None:
+    """把 raw consensus_multiplier 歸到 bucket label。
+    None / 距任一 bucket > 0.05 → None(不算進歸因)。
+    """
+    if mult is None:
+        return None
+    for target, label in _MULTIPLIER_BUCKETS:
+        if abs(mult - target) < 0.05:
+            return label
+    return None
+
+
+def _build_multiplier_attribution(
+    conn: sqlite3.Connection,
+    days: int = 30,
+) -> list[dict[str, Any]]:
+    """P2-7 衝突檢測 multiplier × 勝率歸因。
+
+    讀 paper_trades 已平倉(status IN win/lose/timeout_*) AND
+    consensus_multiplier IS NOT NULL,按 1.0 / 1.25 / 1.5 三 bucket GROUP,
+    算各段 N / WR(status IN win/timeout_win)/ AvgRet(return_pct)。
+
+    時間窗 days 從 entry_date 算起(預設 30 天),樣本不足回空 list。
+    """
+    today_iso = _today_iso()
+    start_iso = (date.fromisoformat(today_iso) - timedelta(days=days)).isoformat()
+    try:
+        rows = conn.execute(
+            """
+            SELECT consensus_multiplier AS mult,
+                   status,
+                   return_pct
+            FROM paper_trades
+            WHERE entry_date >= ?
+              AND consensus_multiplier IS NOT NULL
+              AND status IN ('win', 'lose', 'timeout_win', 'timeout_lose')
+            """,
+            (start_iso,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    buckets: dict[str, dict[str, Any]] = {
+        label: {"label": label, "mult": target, "n": 0, "wins": 0,
+                "ret_sum": 0.0, "ret_count": 0}
+        for target, label in _MULTIPLIER_BUCKETS
+    }
+    for r in rows:
+        label = _bucket_label_for(r["mult"])
+        if label is None:
+            continue
+        b = buckets[label]
+        b["n"] += 1
+        if r["status"] in ("win", "timeout_win"):
+            b["wins"] += 1
+        rp = r["return_pct"]
+        if rp is not None:
+            b["ret_sum"] += float(rp)
+            b["ret_count"] += 1
+
+    out: list[dict[str, Any]] = []
+    for target, label in _MULTIPLIER_BUCKETS:
+        b = buckets[label]
+        n = b["n"]
+        wr = (b["wins"] / n) if n > 0 else None
+        avg_ret = (b["ret_sum"] / b["ret_count"]) if b["ret_count"] > 0 else None
+        out.append({
+            "label": label,
+            "mult": target,
+            "n": n,
+            "wr": wr,
+            "avg_return_pct": avg_ret,
+        })
+    return out
+
+
 # === Phase 1.3 — ML 校準 ===
 
 def _build_ml_performance(
@@ -608,6 +740,8 @@ def build_system_brief(
     """
     health = _build_health(conn)
     strategy_perf = _build_strategy_performance(conn)
+    trend_windows = _build_trend_windows(conn)
+    multiplier_attr = _build_multiplier_attribution(conn)
     ml_perf = _build_ml_performance(conn, models_dir=models_dir)
     market_state = _build_market_state(conn)
     watchlist = _build_watchlist_today(conn)
@@ -619,6 +753,8 @@ def build_system_brief(
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "health": health,
         "strategy_performance": strategy_perf,
+        "trend_windows": trend_windows,
+        "multiplier_attribution": multiplier_attr,
         "ml_performance": ml_perf,
         "market_state": market_state,
         "watchlist_today": watchlist,
@@ -705,6 +841,40 @@ def format_brief_for_telegram(brief: dict[str, Any]) -> str:
         lines.append(f"三維精選：{pp} 檔")
     lines.append("")
 
+    # === 趨勢對比 30d / 60d / 90d（Phase 2 Q4） ===
+    windows = brief.get("trend_windows") or []
+    if windows and any(w.get("n", 0) > 0 for w in windows):
+        lines.append("📈 *趨勢對比 30d / 60d / 90d*")
+        for w in windows:
+            n = int(w.get("n") or 0)
+            if n == 0:
+                lines.append(f"{w.get('days')}d · N=0 · —")
+                continue
+            wr = w.get("wr")
+            avg = w.get("avg_d5")
+            wr_str = f"{int(wr * 100)}%" if wr is not None else "—"
+            avg_str = f"{avg:+.2f}%" if avg is not None else "—"
+            lines.append(
+                f"{w.get('days')}d · N={n} · WR {wr_str} / D5 {avg_str}"
+            )
+        lines.append("")
+
+    # === 共識倍率歸因（P2-7 衝突檢測效用驗證） ===
+    mult_attr = brief.get("multiplier_attribution") or []
+    if any(b.get("n", 0) > 0 for b in mult_attr):
+        lines.append("🎯 *共識倍率 vs 勝率*")
+        parts: list[str] = []
+        for b in mult_attr:
+            n = int(b.get("n") or 0)
+            if n == 0:
+                continue
+            wr = b.get("wr")
+            wr_str = f"{int(wr * 100)}%" if wr is not None else "—"
+            parts.append(f"{b['label']}: N={n} WR={wr_str}")
+        if parts:
+            lines.append(" / ".join(parts))
+        lines.append("")
+
     # === 觀察清單 ===
     wl = brief.get("watchlist_today") or []
     if wl:
@@ -754,4 +924,6 @@ def format_brief_for_telegram(brief: dict[str, Any]) -> str:
 __all__ = [
     "build_system_brief",
     "format_brief_for_telegram",
+    "_build_trend_windows",
+    "_build_multiplier_attribution",
 ]

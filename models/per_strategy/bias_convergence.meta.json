@@ -1,75 +1,115 @@
 {
   "strategy": "bias_convergence",
-  "trained_at": "2026-05-16T20:08:45+00:00",
-  "samples": 3602,
-  "wins": 1124,
-  "win_rate": 0.31204886174347585,
+  "trained_at": "2026-05-18T12:38:26+00:00",
+  "samples": 2358,
+  "wins": 556,
+  "win_rate": 0.2357930449533503,
   "status": "trained",
-  "oob_score": 0.6338145474736258,
+  "oob_score": 0.7137404580152672,
   "feature_importances": [
     {
       "name": "atr_normalized",
-      "importance": 0.1431534067797668
+      "importance": 0.15977978884376143
     },
     {
       "name": "macd_osc",
-      "importance": 0.13115904815527626
+      "importance": 0.07941777497899093
     },
     {
-      "name": "macd_dif",
-      "importance": 0.1260279960933881
-    },
-    {
-      "name": "bias_pct",
-      "importance": 0.11272713705792965
-    },
-    {
-      "name": "vol_ratio",
-      "importance": 0.11257300929313896
-    },
-    {
-      "name": "kd_k",
-      "importance": 0.11121222824325501
-    },
-    {
-      "name": "kd_d",
-      "importance": 0.10895025219578545
+      "name": "momentum_5d",
+      "importance": 0.07438194271788535
     },
     {
       "name": "bb_position",
-      "importance": 0.10788325093627847
+      "importance": 0.07341418343473398
     },
     {
-      "name": "inst_5d",
-      "importance": 0.010815515160674596
+      "name": "momentum_20d",
+      "importance": 0.07162826228884424
     },
     {
-      "name": "ma_alignment",
-      "importance": 0.009001378415070744
+      "name": "industry_relative_strength",
+      "importance": 0.07082471088384985
     },
     {
-      "name": "inst_10d",
-      "importance": 0.008721677102445924
+      "name": "macd_dif",
+      "importance": 0.06780640338899403
     },
     {
-      "name": "holders_pct_change_4w",
-      "importance": 0.0072546265897087785
+      "name": "industry_rank_pct",
+      "importance": 0.06564885646966485
     },
     {
-      "name": "inst_5d_zscore",
-      "importance": 0.005824582331639702
+      "name": "vol_ratio",
+      "importance": 0.06370576534379607
     },
     {
-      "name": "holders_delta_w_zscore",
-      "importance": 0.002459414377318143
+      "name": "kd_d",
+      "importance": 0.05879685248123062
     },
     {
-      "name": "regime_dummy",
-      "importance": 0.0022364772683234496
+      "name": "bias_pct",
+      "importance": 0.058569047288523836
+    },
+    {
+      "name": "kd_k",
+      "importance": 0.05795560671290596
+    },
+    {
+      "name": "ma5_above_ma20_pct",
+      "importance": 0.052650459364872344
     },
     {
       "name": "is_theme_member",
-      "importance": 0.0
+      "importance": 0.014211071571347312
+    },
+    {
+      "name": "ma_alignment",
+      "importance": 0.005399514639543157
+    },
+    {
+      "name": "inst_5d_zscore",
+      "importance": 0.004987637413285265
+    },
+    {
+      "name": "inst_5d",
+      "importance": 0.003961645520019844
+    },
+    {
+      "name": "inst_10d",
+      "importance": 0.003888998488423045
+    },
+    {
+      "name": "holders_pct_change_4w",
+      "importance": 0.0029354219426538024
+    },
+    {
+      "name": "concentration_change_rate",
+      "importance": 0.002505121774028024
+    },
+    {
+      "name": "ma20_above_ma60_pct",
+      "importance": 0.00242458849180654
+    },
+    {
+      "name": "momentum_60d",
+      "importance": 0.0022895546898208208
+    },
+    {
+      "name": "holders_delta_w_zscore",
+      "importance": 0.0012948361149658757
+    },
+    {
+      "name": "inst_divergence",
+      "importance": 0.0006701922214864696
+    },
+    {
+      "name": "regime_dummy",
+      "importance": 0.0005487839372867562
+    },
+    {
+      "name": "institutional_continuity",
+      "importance": 0.00030297899727965585
     }
   ],
   "feature_names": [
@@ -88,7 +128,17 @@
     "inst_5d_zscore",
     "regime_dummy",
     "holders_pct_change_4w",
-    "is_theme_member"
+    "is_theme_member",
+    "concentration_change_rate",
+    "institutional_continuity",
+    "inst_divergence",
+    "ma5_above_ma20_pct",
+    "ma20_above_ma60_pct",
+    "momentum_5d",
+    "momentum_20d",
+    "momentum_60d",
+    "industry_relative_strength",
+    "industry_rank_pct"
   ],
   "min_train_samples": 100,
   "lookback_days": 200,
@@ -99,11 +149,12 @@
   "n_estimators": 200,
   "max_depth": 10,
   "min_samples_leaf": 5,
+  "cost_aware_labels": true,
   "calibration": {
-    "method": "isotonic",
-    "n_holdout": 720,
-    "raw_brier": 0.1788491284770327,
-    "calibrated_brier": 0.09327752363805632,
-    "pkl_path": "/home/runner/work/stock-screener/stock-screener/models/calibrators/bias_convergence.pkl"
+    "method": "platt",
+    "n_holdout": 472,
+    "raw_brier": 0.14327925806591968,
+    "calibrated_brier": 0.09527514743328437,
+    "pkl_path": "D:\\Claude-workspace\\projects\\stock-screener\\.claude\\worktrees\\sad-swartz-69e43d\\models\\calibrators\\bias_convergence.pkl"
   }
 }

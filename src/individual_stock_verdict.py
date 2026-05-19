@@ -401,6 +401,11 @@ def compute_verdict(sid: str, db_path: str | Path | None = None) -> dict:
         "stop_loss": None,
         "take_profit": None,
         "signals": {},
+        # P2-8:EV-based 半 Kelly 倉位 — 從 ml_prob → score_to_ev → position
+        # ev: EV fraction (None 表沒 ml_prob);
+        # suggested_position_pct: fraction ∈ [0, 0.05] (0 表不該進 / 無 EV)
+        "ev": None,
+        "suggested_position_pct": 0.0,
     }
     if not enabled:
         out["action_suggestion"] = "軍師判讀已停用(STOCK_VERDICT_ENABLED=false)"
@@ -468,15 +473,37 @@ def compute_verdict(sid: str, db_path: str | Path | None = None) -> dict:
     elif rs < 0:
         reasons_con.append(f"{regime_emoji} 大盤{regime_label}(逆風,全市場降溫)")
 
-    # === 4. ML calibrated 機率 ===
+    # === 4. ML calibrated 機率 + EV(score_to_ev 翻譯) ===
     if ml_prob is not None:
         prob_pct = ml_prob * 100
         ms = _ml_score(ml_prob)
         score += ms
+        # EV 校準後同步顯示 — 讓主公看到「進場期望賺/賠 X%」
+        ev_suffix = ""
+        try:
+            from src.score_to_ev import score_to_ev, render_ev_str
+            ev_val = score_to_ev(ml_prob)
+            if ev_val is not None:
+                ev_suffix = f" · {render_ev_str(ev_val)}"
+                out["ev"] = float(ev_val)
+                # P2-8:EV → 建議倉位(半 Kelly 分段)
+                try:
+                    from src.position_sizing import compute_suggested_position
+                    out["suggested_position_pct"] = float(
+                        compute_suggested_position(ev_val)
+                    )
+                except Exception:  # noqa: BLE001
+                    out["suggested_position_pct"] = 0.0
+        except Exception:  # noqa: BLE001
+            pass
         if ml_prob >= 0.65:
-            reasons_pro.append(f"🎯 AI 勝率 {prob_pct:.0f}%(偏高)")
+            reasons_pro.append(
+                f"🎯 AI 勝率 {prob_pct:.0f}%(偏高){ev_suffix}"
+            )
         elif ml_prob < 0.50:
-            reasons_con.append(f"🎯 AI 勝率 {prob_pct:.0f}%(偏低)")
+            reasons_con.append(
+                f"🎯 AI 勝率 {prob_pct:.0f}%(偏低){ev_suffix}"
+            )
 
     # === 5. K 線形態 ===
     bullish_total = sum(
@@ -686,6 +713,25 @@ def render_stock_verdict(sid: str) -> dict:
         cols[2].markdown(
             f"**🚀 停利**\n\n<span style='color:#1f77b4;"
             f"font-size:18px;font-weight:600'>{take:.2f}</span>",
+            unsafe_allow_html=True,
+        )
+
+    # P2-8:EV-based 半 Kelly 建議倉位 — 有正 EV 才顯,讓主公一眼看「該投多少」。
+    # 跟 entry/stop/profit 同層級顯示(主公拍板:EV→倉位 是進場決策的一部分)。
+    pos_pct = float(verdict.get("suggested_position_pct") or 0.0)
+    ev_val = verdict.get("ev")
+    if pos_pct > 0:
+        from src.position_sizing import render_position_str as _rps
+        ev_str = ""
+        if ev_val is not None:
+            try:
+                ev_str = f"(EV {'+' if float(ev_val) >= 0 else ''}{float(ev_val) * 100:.1f}%)"
+            except (TypeError, ValueError):
+                ev_str = ""
+        st.markdown(
+            f"<div style='font-size:14px;color:#1f77b4;margin:6px 0 8px 0'>"
+            f"💼 <strong>{_rps(pos_pct)}</strong> {ev_str}"
+            f"</div>",
             unsafe_allow_html=True,
         )
 

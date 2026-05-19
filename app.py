@@ -1127,12 +1127,154 @@ def _render_regime_gating_badge(location: str = "page") -> None:
         )
 
 
+# === Verdict banner(首頁 / 系統結論頁共用)===
+#
+# 設計重點(2026-05-18 主公拍板):
+#   - 首頁第一行讓主公看到「今天系統覺得能不能進場」一行,綠 / 黃 / 紅 metric
+#     + Top 3 🟢 一覽,不用點四五層。
+#   - 系統結論頁同 banner 但展開三段 Top(綠 3 / 黃 5 / 紅 3)。
+#   - 雲端 cold load 不能 build_summary live(50 sids × ~200ms),
+#     優先讀 data/twse_snapshot/daily_verdict_summary.csv(daily-notify 預跑 + commit),
+#     CSV 不存在 / trade_date 對不上 → fallback live build(慢但永遠拿得到結果)。
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_verdict_summary_cached(trade_date: str) -> dict:
+    """讀 daily_verdict_summary.csv(快);沒命中或日期對不上 → live build_summary。
+
+    ttl=300 — 雲端 5 分鐘內 hit 同份 cache,daily 重跑覆寫 CSV 後 5 分鐘內全頁同步。
+    """
+    from src.verdict_summary import build_summary, load_from_csv
+
+    csv_path = (
+        config.PROJECT_ROOT / "data" / "twse_snapshot" / "daily_verdict_summary.csv"
+    )
+    cached = load_from_csv(csv_path)
+    if cached is not None and cached.get("trade_date") == trade_date:
+        return cached
+
+    # Fallback:CSV 沒有 / 日期不對 → live 算(慢)
+    try:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT p.sid, s.name FROM daily_picks p "
+                "LEFT JOIN stocks s ON s.stock_id = p.sid "
+                "WHERE p.trade_date=?",
+                (trade_date,),
+            ).fetchall()
+        universe = [{"sid": r["sid"], "name": r["name"]} for r in rows]
+    except Exception:  # noqa: BLE001
+        universe = []
+    # union watchlist
+    try:
+        wl = db.get_watchlist() or []
+        seen = {u["sid"] for u in universe}
+        for it in wl:
+            sid = str(it.get("stock_id", "")).strip()
+            if sid and sid not in seen:
+                universe.append({"sid": sid, "name": None})
+    except Exception:  # noqa: BLE001
+        pass
+
+    return build_summary(universe, trade_date)
+
+
+def _verdict_banner_metrics(summary: dict) -> None:
+    """三個 metric 並排 — 首頁 / 系統結論共用。手機自動 stack。"""
+    counts = summary.get("counts") or {"green": 0, "yellow": 0, "red": 0}
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🟢 可進場", counts.get("green", 0))
+    col2.metric("🟡 觀望", counts.get("yellow", 0))
+    col3.metric("🔴 不進場", counts.get("red", 0))
+
+
+_BANNER_COLUMNS = ["sid", "name", "score", "main_reason"]
+_BANNER_COL_LABEL = {
+    "sid": "代號",
+    "name": "名稱",
+    "score": "信心",
+    "main_reason": "主因",
+}
+
+
+def _banner_df(items: list[dict]) -> "pd.DataFrame":
+    if not items:
+        return pd.DataFrame(columns=list(_BANNER_COL_LABEL.values()))
+    df = pd.DataFrame(items)
+    # 只留 banner 用欄位 + 重命名為中文
+    keep = [c for c in _BANNER_COLUMNS if c in df.columns]
+    df = df[keep].rename(columns=_BANNER_COL_LABEL)
+    return df
+
+
+def _render_verdict_banner_compact(summary: dict) -> None:
+    """首頁精簡 banner — 三 metric + Top 3 🟢 一表。"""
+    _verdict_banner_metrics(summary)
+    top_green = summary.get("top_green") or []
+    if top_green:
+        st.caption("🟢 可進場 Top 3")
+        st.dataframe(
+            _banner_df(top_green),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("🟢 今日無可進場標的 — 等下一輪訊號")
+
+
+def _render_verdict_banner_full(summary: dict) -> None:
+    """系統結論完整 banner — 三 metric + 三段 Top 表(綠 3 / 黃 5 / 紅 3)。"""
+    _verdict_banner_metrics(summary)
+
+    top_green = summary.get("top_green") or []
+    top_yellow = summary.get("top_yellow") or []
+    top_red = summary.get("top_red") or []
+
+    st.subheader("🟢 可進場 Top 3")
+    if top_green:
+        st.dataframe(
+            _banner_df(top_green),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無可進場標的")
+
+    st.subheader("🟡 觀望 Top 5")
+    if top_yellow:
+        st.dataframe(
+            _banner_df(top_yellow),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無觀望標的")
+
+    st.subheader("🔴 不進場警示 Top 3")
+    if top_red:
+        st.dataframe(
+            _banner_df(top_red),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("今日無不進場警示")
+
+
 # === 首頁 Dashboard ===
 
 def _page_dashboard() -> None:
-    """4 區塊速覽:大盤 / 今日推薦 Top 3 / 關注 Top 3 / 系統狀態。"""
+    """5 區塊速覽:軍師判讀 banner / 大盤 / 今日推薦 Top 3 / 關注 Top 3 / 系統狀態。"""
     st.header("🏠 今日速覽")
     st.caption("一頁看完台股最新狀況。詳細分析請切上方 tabs。")
+
+    # === 0. 軍師判讀 banner — 第一行先給結論(2026-05-18 主公拍板)===
+    trade_date = _get_latest_data_date()
+    if trade_date:
+        try:
+            summary = _get_verdict_summary_cached(trade_date)
+            _render_verdict_banner_compact(summary)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"📊 軍師判讀 banner 暫不可用:{type(e).__name__}")
 
     # === 1. 大盤速覽 ===
     st.markdown("### 📊 大盤速覽")
@@ -1475,6 +1617,8 @@ _STRATEGY_CATEGORY: dict[str, str] = {
     "revenue_acceleration": "基本面",
     # 籌碼:千張戶進場(TDCC 千張大戶週快照)
     "big_holder_inflow": "籌碼",
+    # 事件驅動:除權息搶反彈(歸到「殖利率」類)
+    "ex_dividend_swing": "殖利率",
 }
 
 
@@ -7121,6 +7265,75 @@ def _page_paper_tracking() -> None:
         )
 
 
+# Phase 2 策略上線里程碑(2026-05-18)— 寫死在這裡,by-date 圖加 vline 標籤
+# 讓主公一眼看出「新策略上線後走勢有沒有變」。
+# commit SHA 來自實際 merge:P2-2=2c940a7 / P2-3=b18196f / P2-4=e3f3e3e /
+# P2-7=8f82475 / P2-8=d6c603c(P2-8 倉位 sizing PR #17 merge sha)。
+_PHASE2_LAUNCH_MARKERS: list[tuple[str, str]] = [
+    ("2026-05-18", "P2-2 營收公告預期"),
+    ("2026-05-18", "P2-3 法人×千張共識"),
+    ("2026-05-18", "P2-4 財報意外延續"),
+    ("2026-05-18", "P2-7 衝突檢測"),
+    ("2026-05-18", "P2-8 倉位 sizing"),
+]
+
+
+def _make_strategy_history_by_date_chart(df: pd.DataFrame) -> "go.Figure":
+    """by-date 圖:D5 平均 (bar) + 命中率 (line) + Phase 2 上線 vline。
+
+    df 需含欄 推播日 / D5 平均 / 命中率(數值,已 *100)。
+    """
+    df_sorted = df.sort_values("推播日")
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=df_sorted["推播日"], y=df_sorted["D5 平均"],
+            name="D5 平均報酬 %",
+            marker_color=[
+                "#26a69a" if v >= 0 else "#ef5350"
+                for v in df_sorted["D5 平均"]
+            ],
+            hovertemplate="%{x}<br>D5: %{y:+.2f}%<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df_sorted["推播日"], y=df_sorted["命中率"],
+            name="命中率 %", mode="lines+markers",
+            line={"color": "#5e35b1", "width": 2},
+            hovertemplate="%{x}<br>命中率: %{y:.1f}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    # Phase 2 上線 marker — 同日多個 marker 疊在一條線上,annotation 換行避免擠
+    grouped: dict[str, list[str]] = {}
+    for d, label in _PHASE2_LAUNCH_MARKERS:
+        grouped.setdefault(d, []).append(label)
+    pick_dates = set(df_sorted["推播日"].astype(str).tolist())
+    for d, labels in grouped.items():
+        if d not in pick_dates:
+            # 該日不在當前資料範圍,跳過 — 避免 vline 跑到圖外觸發 plotly warning
+            continue
+        fig.add_vline(
+            x=d, line_dash="dash", line_color="#ff9800", line_width=1,
+            annotation_text="<br>".join(["🚀 上線"] + labels),
+            annotation_position="top",
+            annotation_font_size=10,
+        )
+
+    fig.update_layout(
+        height=380,
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
+        legend={"orientation": "h", "y": 1.12, "x": 0},
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text="D5 平均 %", secondary_y=False)
+    fig.update_yaxes(title_text="命中率 %", secondary_y=True)
+    return fig
+
+
 def _page_strategy_history() -> None:
     """📊 策略歷史命中 — 把 M4 weekly backtest 落在 pick_outcomes 的後向資料 UI 化。
 
@@ -7191,20 +7404,29 @@ def _page_strategy_history() -> None:
         if not by_date:
             st.info("📭 近 30 日尚無資料")
         else:
-            rows_view = []
-            for r in by_date:
-                rows_view.append({
+            df_date = pd.DataFrame([
+                {
                     "推播日": r["pick_date"],
                     "命中數 N": int(r["n"] or 0),
-                    "D1 平均": f"{(r['avg_d1'] or 0):+.2f}%",
-                    "D5 平均": f"{(r['avg_d5'] or 0):+.2f}%",
-                    "命中率": f"{(r['hit_rate'] or 0) * 100:.1f}%",
-                    "停損率": f"{(r['stop_rate'] or 0) * 100:.1f}%",
-                })
-            st.dataframe(
-                pd.DataFrame(rows_view),
-                use_container_width=True, hide_index=True,
+                    "D1 平均": float(r["avg_d1"] or 0),
+                    "D5 平均": float(r["avg_d5"] or 0),
+                    "命中率": float(r["hit_rate"] or 0) * 100,
+                    "停損率": float(r["stop_rate"] or 0) * 100,
+                }
+                for r in by_date
+            ])
+            fig_date = _make_strategy_history_by_date_chart(df_date)
+            st.plotly_chart(fig_date, use_container_width=True)
+            st.caption(
+                "↑ 垂直虛線標 Phase 2 策略上線日,讓主公一眼看出新策略上線後 "
+                "by-date 走勢有沒有變。"
             )
+            view = df_date.copy()
+            view["D1 平均"] = view["D1 平均"].map(lambda v: f"{v:+.2f}%")
+            view["D5 平均"] = view["D5 平均"].map(lambda v: f"{v:+.2f}%")
+            view["命中率"] = view["命中率"].map(lambda v: f"{v:.1f}%")
+            view["停損率"] = view["停損率"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(view, use_container_width=True, hide_index=True)
 
     # === Tab 3: 明細 ===
     with tab_raw:
@@ -7843,6 +8065,16 @@ def _page_system_brief() -> None:
 
     # 大盤 regime gating badge — 系統結論頁標題下方,讓主公一眼看到當前 gating 狀態
     _render_regime_gating_badge(location="page")
+
+    # === 0. 軍師判讀 banner(三段 Top — 2026-05-18 主公拍板)===
+    trade_date = _get_latest_data_date()
+    if trade_date:
+        st.markdown("### 🎯 今日軍師判讀")
+        try:
+            summary = _get_verdict_summary_cached(trade_date)
+            _render_verdict_banner_full(summary)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"📊 軍師判讀 banner 暫不可用:{type(e).__name__}")
 
     db.init_db()
     with db.get_conn() as conn:

@@ -980,11 +980,11 @@ def test_short_commit3_new_strategies_sliders_render(isolated_db):
 
 
 def test_short_sixteen_strategies_registered():
-    """run_all_strategies 應認得全 17 套策略 keys(11 短線 + 5 Phase 1 + 1 千張)。"""
+    """run_all_strategies 應認得全 18 套策略 keys(11 短線 + 5 Phase 1 + 1 千張 + 1 事件)。"""
     from src import strategies as strat
 
-    assert len(strat.ALL_STRATEGIES) == 17
-    assert len(strat.STRATEGY_LABELS) == 17
+    assert len(strat.ALL_STRATEGIES) == 18
+    assert len(strat.STRATEGY_LABELS) == 18
     expected = {
         # 短線 11
         "volume_kd", "ma_alignment", "bias_convergence",
@@ -996,13 +996,15 @@ def test_short_sixteen_strategies_registered():
         "taiex_alpha", "revenue_acceleration",
         # 籌碼:千張戶進場(TDCC 千張大戶週快照)
         "big_holder_inflow",
+        # 事件驅動:除權息搶反彈(填權息策略)
+        "ex_dividend_swing",
     }
     assert set(strat.ALL_STRATEGIES.keys()) == expected
     assert set(strat.STRATEGY_LABELS.keys()) == expected
 
 
 def test_short_strategy_category_covers_all_sixteen():
-    """app._STRATEGY_CATEGORY 必須涵蓋全 17 套策略,否則 tabs 篩選會漏。"""
+    """app._STRATEGY_CATEGORY 必須涵蓋全 18 套策略,否則 tabs 篩選會漏。"""
     sys.modules.pop("app", None)
     import app as app_mod
     from src import strategies as strat
@@ -2712,7 +2714,12 @@ def test_apply_per_strategy_ml_filter_no_threshold_strategies_unchanged(
 
 
 def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
-    """pick 同時命中 bias_convergence(0.65)+ ma_alignment(0.55)→ 取最嚴格 0.65 套用。"""
+    """pick 同時命中 volume_breakout(0.65)+ ma_alignment(0.55)→ 取最嚴格 0.65 套用。
+
+    2026-05-18:bias_convergence rescue 後 threshold 改為 0.55(跟 ma_alignment 相同),
+    本測試改用 volume_breakout(0.65)當 strictest 範例。詳見
+    docs/strategy-rescue-bias-convergence-2026-05-18.md。
+    """
     import streamlit as st
     import app as _app
 
@@ -2721,11 +2728,11 @@ def test_apply_per_strategy_ml_filter_strictest_threshold_wins(isolated_db):
     rows = [
         {  # 0.70 ≥ 0.65(strictest) → 留
             "stock_id": "2330", "ml_prob": 0.70,
-            "matched_strategies": ["bias_convergence", "ma_alignment"],
+            "matched_strategies": ["volume_breakout", "ma_alignment"],
         },
         {  # 0.62 < 0.65 → 過濾(雖然 0.62 ≥ 0.55 ma_alignment threshold)
             "stock_id": "2317", "ml_prob": 0.62,
-            "matched_strategies": ["bias_convergence", "ma_alignment"],
+            "matched_strategies": ["volume_breakout", "ma_alignment"],
         },
     ]
     filtered, _ = _app._apply_confidence_filter(rows)
@@ -2751,9 +2758,10 @@ def test_per_strategy_threshold_for_pick_helper(isolated_db):
     """_per_strategy_threshold_for_pick 取最嚴格門檻。"""
     import app as _app
 
-    # bias_convergence 0.65 + ma_alignment 0.55 → 0.65(strictest)
+    # volume_breakout 0.65 + ma_alignment 0.55 → 0.65(strictest)
+    # (2026-05-18:bias_convergence 改 0.55 後跟 ma_alignment 同分,改用 volume_breakout 當範例)
     assert _app._per_strategy_threshold_for_pick(
-        ["bias_convergence", "ma_alignment"]
+        ["volume_breakout", "ma_alignment"]
     ) == 0.65
     # ma_alignment 0.55 + volume_kd(無 threshold)→ 0.55
     assert _app._per_strategy_threshold_for_pick(
@@ -2772,11 +2780,15 @@ def test_strategy_ml_thresholds_contains_calibrated_keys():
 
     2026-05-15:gap_up 從 dict 拿掉(下架 ML 過濾,改走 rule-based);
     詳見 docs/gap-up-decision-2026-05-15.md。
+
+    2026-05-18:bias_convergence rescue — cost-aware retrain + sweep 顯示
+    0.55 是 sweet spot(原 0.65)。詳見
+    docs/strategy-rescue-bias-convergence-2026-05-18.md。
     """
     from src.strategies import STRATEGY_ML_THRESHOLDS
     expected = {
         "ma_alignment": 0.55,
-        "bias_convergence": 0.65,
+        "bias_convergence": 0.55,
         "macd_golden": 0.60,
         "bb_lower_rebound": 0.50,
         "volume_breakout": 0.65,
@@ -2797,10 +2809,11 @@ def test_routing_strategy_for_pick_returns_strictest_threshold_strategy(isolated
     """_routing_strategy_for_pick 取 STRATEGY_ML_THRESHOLDS 內最嚴格 threshold 對應的 strategy_name。"""
     import app as _app
 
-    # bias_convergence(0.65) + ma_alignment(0.55) → 回 bias_convergence(strictest)
+    # volume_breakout(0.65) + ma_alignment(0.55) → 回 volume_breakout(strictest)
+    # (2026-05-18:bias_convergence 改 0.55 後跟 ma_alignment 同分,改用 volume_breakout 當範例)
     assert _app._routing_strategy_for_pick(
-        ["bias_convergence", "ma_alignment"]
-    ) == "bias_convergence"
+        ["volume_breakout", "ma_alignment"]
+    ) == "volume_breakout"
     # ma_alignment(0.55) + volume_kd(無)→ 回 ma_alignment
     assert _app._routing_strategy_for_pick(
         ["ma_alignment", "volume_kd"]

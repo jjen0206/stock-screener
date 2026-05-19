@@ -365,11 +365,26 @@ def compute_top_picks(
 
     內部委派 `_select_top_picks`(notify_top_picks 用的同一隻);保留底線 helper
     當 module-internal 實作細節,公開介面從這裡走。
+
+    Phase 2 觀察機制(2026-05-19):額外跑 _enrich_picks_with_position_advice,
+    讓 daily_notify 的 auto_seed 路徑也能在 pick dict 上拿到 position_pct
+    (P2-8)。notify_top_picks 內也會再 enrich 一次(冪等,只是 overwrite 同值
+    advice),不會 double-charge。任何例外 silent skip,不擋整支腳本。
     """
-    return _select_top_picks(
+    picks = _select_top_picks(
         date, top_n=top_n, confluence_n=confluence_n,
         params=params, universe=universe,
     )
+    try:
+        _enrich_picks_with_position_advice(picks)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[NOTIFIER] compute_top_picks position advice enrich 整體失敗"
+        )
+        for p in picks:
+            p.setdefault("position_advice", None)
+            p.setdefault("position_pct", None)
+    return picks
 
 
 def _select_top_picks(
@@ -636,11 +651,18 @@ def _select_top_picks(
             (close - prev_close) / prev_close * 100
             if prev_close and prev_close > 0 else None
         )
-        # EV 估算:固定 5% target / 3% stop × ml_prob 期望
-        ev = (
-            prob * 0.05 - (1 - prob) * 0.03
-            if prob is not None else None
-        )
+        # EV 估算 — 優先用 score_to_ev 校準表(從 pick_outcomes 算出
+        # 的 score → realized return 對照),失敗 fallback 固定 5%/3% 公式。
+        # score_to_ev_for_pick 在 mapping 缺失時自己會走 linear fallback,
+        # 等同原公式 — 所以對外行為向前相容。
+        ev = None
+        if prob is not None:
+            try:
+                from src.score_to_ev import score_to_ev_for_pick
+                ev = score_to_ev_for_pick(prob, matched)
+            except Exception:  # noqa: BLE001
+                # 任何 mapping 載入失敗 → 退回原線性公式
+                ev = prob * 0.05 - (1 - prob) * 0.03
         industry = industries_map.get(sid)
         industry_heat = industry_counts.get(industry, 0) if industry else 0
         # win_rate:命中策略 backtest WR 算術平均(跟 _enrich_df_with_win_rate 同邏輯)
@@ -819,8 +841,36 @@ def _select_top_picks(
         if cap < effective_top_n:
             effective_top_n = cap
     out = qualified[:effective_top_n]
+    # Phase 2 觀察機制(2026-05-19):把 P2-7 consensus_multiplier 跟原始
+    # composite conviction_score 落到 pick top-level,讓 daily_notify 的
+    # auto_seed_from_picks 能寫進 paper_trades 做 30 天歸因分析。
+    # 計算邏輯跟 _compute_pick_score 的 weighted_ml 對齊:
+    #   conviction = ml_prob × avg(strategy_weights) × consensus_mult × theme_mult
+    # ml_prob 為 None(fallback weak picks)→ conviction = None。
+    from src.consensus import consensus_multiplier as _consensus_mult
     for i, p in enumerate(out, start=1):
         p["rank"] = i
+        cs_mult = _consensus_mult(p.get("consensus"))
+        p["consensus_multiplier"] = float(cs_mult)
+        matched_p = p.get("matched_strategies") or []
+        if strategy_weights and matched_p:
+            avg_w = (
+                sum(strategy_weights.get(s, 1.0) for s in matched_p)
+                / len(matched_p)
+            )
+        else:
+            avg_w = 1.0
+        theme_m = p.get("theme_multiplier", 1.0) or 1.0
+        ml_p = p.get("ml_prob")
+        if ml_p is None:
+            p["conviction_score"] = None
+        else:
+            try:
+                p["conviction_score"] = float(
+                    float(ml_p) * float(avg_w) * float(cs_mult) * float(theme_m)
+                )
+            except (TypeError, ValueError):
+                p["conviction_score"] = None
     if fallback_used:
         # 標 module 級 flag 給 format_top_picks_message 讀(避免 picks 為空時
         # caller 無法分辨「真的空」vs「fallback 也空」)。實際上 caller 只看
@@ -885,8 +935,11 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         except (TypeError, ValueError):
             theme_badge = ""
 
+    # Watchlist 命中 → ⭐ 前綴(放在 rank 後 / sid 前,跟 consensus badge 在
+    # sid 後分開,避免兩顆 ⭐ 黏一起)。flag 由 prioritize_watchlist 注入。
+    watchlist_star = "⭐ " if pick.get("is_watchlist") else ""
     lines = [
-        f"▎{b(f'#{rank}', channel)}  {b(f'{sid} {name}', channel)}"
+        f"▎{b(f'#{rank}', channel)}  {watchlist_star}{b(f'{sid} {name}', channel)}"
         f"{badge_suffix}{theme_badge}"
     ]
     # 收盤 + 漲跌
@@ -985,11 +1038,24 @@ def format_pick_block(pick: dict, channel: str = "telegram") -> str:
         lines.append(
             f"   🎯 保守 {target_low:.0f} / 積極 {target_high:.0f} / 停損 {stop:.0f}"
         )
-    # 期望值 + R:R
+    # EV(期望報酬,從 pick_outcomes 校準的 score_to_ev mapping)+ R:R
+    # 主公拍板:用 "EV" 取代「期望值」— 跟 spec roadmap 一致,更直白
     if ev is not None:
         rr_str = f"  (R:R {rr:.1f}:1)" if rr else ""
         sign = "+" if ev >= 0 else ""
-        lines.append(f"   📈 期望值 {sign}{ev * 100:.1f}%{rr_str}")
+        lines.append(f"   📈 EV {sign}{ev * 100:.1f}%{rr_str}")
+        # P2-8:EV-based 半 Kelly 倉位 — 把「EV +2.3%」翻成「倉位 3.5%」,
+        # 主公一眼看「該投多少」。pos=0 略過(EV<0 不該進,EV ev=None 也不顯)。
+        try:
+            from src.position_sizing import (
+                compute_suggested_position as _csp,
+                render_position_str as _rps,
+            )
+            _pos = _csp(ev)
+            if _pos > 0:
+                lines.append(f"   💼 {_rps(_pos)}")
+        except Exception:  # noqa: BLE001
+            pass  # 不擋整段推播
     # 千張大戶(TDCC 週快照)— 主公拍板:不納入 ML,只當附加資訊
     # 沒資料(該檔當週沒公布 / 還沒抓過) → 整行 graceful skip 不顯
     # delta_w=None(第一次抓,沒上週可比) → 省略「週變」段
@@ -1132,10 +1198,12 @@ def _enrich_picks_with_position_advice(
     for p in picks:
         if not ps_on:
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
         sid = p.get("sid")
         if not sid:
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
         try:
             advice = _ps.suggest_position_size(
@@ -1147,6 +1215,7 @@ def _enrich_picks_with_position_advice(
         except Exception:  # noqa: BLE001
             logger.exception("[NOTIFIER] suggest_position_size 失敗 sid=%s", sid)
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
 
         # 停損停利(用 pick["close"] 當 entry 推估;主公推播當下還沒進場)
@@ -1163,6 +1232,15 @@ def _enrich_picks_with_position_advice(
             except Exception:  # noqa: BLE001
                 logger.exception("[NOTIFIER] ATR stop/tp 失敗 sid=%s", sid)
         p["position_advice"] = advice
+        # Phase 2 觀察機制(2026-05-19):flatten position_pct 到 top-level,
+        # 讓 auto_seed_from_picks / 其他下游不用穿透 position_advice dict。
+        try:
+            p["position_pct"] = (
+                float(advice.get("position_pct"))
+                if advice.get("position_pct") is not None else None
+            )
+        except (TypeError, ValueError):
+            p["position_pct"] = None
 
 
 def format_premium_picks_block(
@@ -1194,7 +1272,8 @@ def format_premium_picks_block(
             close_str = f"{float(close):.2f}" if close is not None else "—"
         except (TypeError, ValueError):
             close_str = "—"
-        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        wl_star = "⭐ " if r.get("is_watchlist") else ""
+        header = f"{i}. [{sid}] {wl_star}{b(name, channel)} {close_str}"
         sub_parts = [f"🏛️ 法人連買 {int(cd)} 天", f"🐋 千張戶 +{int(dw)}"]
         if ml is not None:
             try:
@@ -1239,7 +1318,8 @@ def format_big_holder_movers_block(
             close_str = f"{float(close):.2f}" if close is not None else "—"
         except (TypeError, ValueError):
             close_str = "—"
-        header = f"{i}. [{sid}] {b(name, channel)} {close_str}"
+        wl_star = "⭐ " if r.get("is_watchlist") else ""
+        header = f"{i}. [{sid}] {wl_star}{b(name, channel)} {close_str}"
         try:
             dw_int = int(dw)
         except (TypeError, ValueError):
@@ -1744,6 +1824,12 @@ def format_top_picks_message(
                 "[NOTIFIER] get_top_shareholder_movers 失敗,略過該 section"
             )
             big_holder_movers = []
+    # 個人化:movers 也套 watchlist 重排(各 sub-section 一致)
+    try:
+        from src.watchlist_priority import prioritize_watchlist as _wl_prio
+        big_holder_movers = _wl_prio(list(big_holder_movers or []))
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] movers watchlist 重排失敗,維持原序")
     movers_block = format_big_holder_movers_block(
         big_holder_movers or [], channel=channel,
     )
@@ -1778,6 +1864,15 @@ def format_top_picks_message(
     gating_caption = _regime_gating_caption(picks)
     if gating_caption:
         parts.append(gating_caption)
+
+    # Watchlist 命中 caption(2026-05-18 加)— 只要任一 section 有命中就顯。
+    # 不擋訊息:import / check 失敗都 silent skip。
+    try:
+        from src.watchlist_priority import any_watchlist_hit
+        if any_watchlist_hit(picks, premium_picks, big_holder_movers):
+            parts.append("⭐ 表示在你的自選股內")
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] watchlist caption 檢查失敗,略過")
 
     # Drawdown 警報(2026-05-17 加)— 從 user_positions 撈整體損益,
     # > 10% 黃燈 / > 20% 紅燈。RISK_MGMT_ENABLED=false 或無持倉 → skip。
@@ -1925,7 +2020,7 @@ def _format_footer_block(
         lines.append(f"   平均 ML 機率:    {avg_ml * 100:.0f}%")
     if evs:
         sign = "+" if avg_ev >= 0 else ""
-        lines.append(f"   平均期望值:      {sign}{avg_ev * 100:.1f}%")
+        lines.append(f"   平均 EV:         {sign}{avg_ev * 100:.1f}%")
     lines.append("")
     lines.append("⚠️ 僅供研究,非投資建議。目標價為 ATR 統計參考,非實際預測。")
     return "\n".join(lines)
@@ -2022,6 +2117,17 @@ def notify_top_picks(
         date, top_n=top_n, confluence_n=confluence_n, params=params,
     )
 
+    # 個人化:watchlist 命中置頂(2026-05-18 加)— 不動 picks 計算邏輯,只動排序
+    # + 注入 is_watchlist flag 給 format_pick_block 加 ⭐。watchlist 為空 → 排序
+    # 不變,等同舊版行為。重排後重新分配 rank,讓訊息 #1 = 推播第一順位。
+    try:
+        from src.watchlist_priority import prioritize_watchlist
+        picks = prioritize_watchlist(picks)
+        for i, p in enumerate(picks, start=1):
+            p["rank"] = i
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] watchlist priority 重排失敗,picks 維持原序")
+
     # SHAP 解釋性 enrich + cache(2026-05-14 加)— picks list in-place 加
     # "shap_reason" 給 format_pick_block 顯示。失敗不擋主推播(每筆 graceful skip)。
     try:
@@ -2058,6 +2164,13 @@ def notify_top_picks(
     except Exception:  # noqa: BLE001
         logger.exception("[NOTIFIER] get_strong_follower_premium 失敗,略過該 section")
         premium_picks = []
+
+    # 個人化:premium picks 也套 watchlist 重排(各 sub-section 一致)
+    try:
+        from src.watchlist_priority import prioritize_watchlist as _wl_prio
+        premium_picks = _wl_prio(premium_picks)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER] premium_picks watchlist 重排失敗,維持原序")
 
     results: dict[str, bool] = {}
     tg_msg = format_top_picks_message(

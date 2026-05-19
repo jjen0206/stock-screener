@@ -353,6 +353,27 @@ def render_pick_card(
     ml_prob = row.get("ml_prob")    # Stage 1 加;雲端 enrich 後有值
     analyst_target_mean = row.get("analyst_target_mean")
     analyst_num = row.get("analyst_num")
+    # EV(期望報酬)— notifier 算好就直接用,否則 ml_prob 即時查 score_to_ev
+    # (主公看 raw ml_prob 看不出「賺多少」— EV 直白回答「進場期望賺/賠 X%」)
+    ev_value = row.get("ev")
+    if ev_value is None and ml_prob is not None:
+        try:
+            from src.score_to_ev import score_to_ev_for_pick
+            matched_raw = row.get("matched_strategies")
+            matched_list: list[str] = []
+            if isinstance(matched_raw, list):
+                matched_list = [str(x) for x in matched_raw]
+            elif isinstance(matched_raw, str) and matched_raw:
+                try:
+                    import json as _json
+                    parsed = _json.loads(matched_raw)
+                    if isinstance(parsed, list):
+                        matched_list = [str(x) for x in parsed]
+                except (ValueError, TypeError):
+                    pass
+            ev_value = score_to_ev_for_pick(ml_prob, matched_list or None)
+        except Exception:  # noqa: BLE001
+            ev_value = None
 
     # 產業 badge(2026-05-06 加):caller 傳 row['industry'] / row['industry_heat']
     # 才顯;沒傳該欄(舊 caller) → 不影響 layout
@@ -507,6 +528,7 @@ def render_pick_card(
                     n_signals, risk_reward, ml_prob=ml_prob,
                     analyst_target_mean=analyst_target_mean,
                     analyst_num=analyst_num,
+                    ev=ev_value,
                 )
         else:
             # 沒 add button(watchlist 卡 / 表格附帶卡)— 只 render 詳細 + metadata
@@ -518,6 +540,7 @@ def render_pick_card(
                     n_signals, risk_reward, ml_prob=ml_prob,
                     analyst_target_mean=analyst_target_mean,
                     analyst_num=analyst_num,
+                    ev=ev_value,
                 )
 
         # 展開詳細分析「打開」狀態時,full helper section 還是要在 button 之外
@@ -782,8 +805,15 @@ def _render_card_metadata(
     ml_prob: float | None = None,
     analyst_target_mean: float | None = None,
     analyst_num: int | None = None,
+    ev: float | None = None,
 ) -> None:
-    """卡片 row 3 右側 metadata — 信號數 · R:R · 🤖 ML 機率 · 📊 共識目標。
+    """卡片 row 3 右側 metadata — 信號數 · R:R · 📈 EV · 🤖 ML · 📊 共識目標。
+
+    ev(期望報酬,fraction)染色:
+    - > 0   → 紅 #d62728(看漲,台股慣例好 = 紅)
+    - == 0  → 灰 #888888
+    - < 0   → 綠 #2ca02c(看跌)
+    None / NaN → 整段不渲(同 ml_prob 邏輯,避免誤導 placeholder)。
 
     ml_prob 染色(高 = 好,台股慣例好 = 紅):
     - >= 0.70 → 紅 #d62728
@@ -809,7 +839,39 @@ def _render_card_metadata(
         except (TypeError, ValueError):
             pass
 
-    # ML 機率(有值才顯,沒值整段不渲)
+    # EV(期望報酬 fraction)— 比 raw ML 機率對主公更直白:「進場期望賺 X%」
+    ev_html = ""
+    pos_html = ""  # P2-8:EV-based 建議倉位 badge
+    if ev is not None and not (
+        isinstance(ev, float) and ev != ev  # NaN
+    ):
+        try:
+            e = float(ev)
+            if e > 0:
+                ev_color = "#d62728"  # 紅(正報酬,台股慣例好 = 紅)
+            elif e < 0:
+                ev_color = "#2ca02c"  # 綠(負報酬)
+            else:
+                ev_color = "#888888"  # 灰(平盤)
+            sign = "+" if e >= 0 else ""
+            ev_html = (
+                f"<span style='color:{ev_color}'>📈 EV {sign}{e * 100:.1f}%</span>"
+            )
+            # P2-8:EV → 半 Kelly 建議倉位(只在 pos>0 時顯,EV<0 自然 skip)
+            try:
+                from src.position_sizing import compute_suggested_position
+                _pos = float(compute_suggested_position(e))
+                if _pos > 0:
+                    pos_html = (
+                        f"<span style='color:#1f77b4'>"
+                        f"💼 倉位 {_pos * 100:.1f}%</span>"
+                    )
+            except Exception:  # noqa: BLE001
+                pos_html = ""
+        except (TypeError, ValueError):
+            ev_html = ""
+
+    # ML 機率(有值才顯,沒值整段不渲)— 保留 raw score 給進階使用者
     ml_html = ""
     if ml_prob is not None and not (
         isinstance(ml_prob, float) and ml_prob != ml_prob  # NaN
@@ -849,8 +911,12 @@ def _render_card_metadata(
         except (TypeError, ValueError):
             analyst_html = ""
 
-    if parts or ml_html or analyst_html:
+    if parts or ev_html or pos_html or ml_html or analyst_html:
         text_parts = parts.copy()
+        if ev_html:
+            text_parts.append(ev_html)
+        if pos_html:
+            text_parts.append(pos_html)
         if ml_html:
             text_parts.append(ml_html)
         if analyst_html:

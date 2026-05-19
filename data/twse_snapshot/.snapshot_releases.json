@@ -1,0 +1,14 @@
+{
+  "snapshot-financials-2026-05-18": {
+    "assets": [
+      {
+        "name": "financials_quarterly.parquet",
+        "sha256": "32565f86329360a6dd09a318aeb43433877039dec4b2431e321f66efdd737306",
+        "size": 55447
+      }
+    ],
+    "notes": "financials backfill",
+    "tag": "snapshot-financials-2026-05-18",
+    "updated_at": "2026-05-18T22:51:57+00:00"
+  }
+}

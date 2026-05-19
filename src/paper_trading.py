@@ -64,12 +64,23 @@ def add_paper_trade(
     stop_pct: float = 0.03,
     hold_days: int = 5,
     db_path: str | Path | None = None,
+    consensus_multiplier: float | None = None,
+    position_pct: float | None = None,
+    conviction_score: float | None = None,
 ) -> int | None:
     """寫入 paper trade。同 (sid, entry_date) 已存在 → 回 None(冪等)。
 
     target_price / stop_price 從 entry_price + (target_pct, stop_pct) 算。
     expected_exit_date 從 daily_prices 找 entry_date 之後第 hold_days 個交易
     日;若該 sid 之後沒這麼多天資料 → 留 NULL(evaluate 時動態查)。
+
+    Phase 2 觀察機制三欄(2026-05-19):
+      consensus_multiplier — P2-7 後最終 multiplier(衝突檢測後),供 30 天觀察
+                             歸因「總體勝率上升來自哪個 multiplier 段」。
+      position_pct         — P2-8 建議倉位(decimal),驗證 Kelly 倉位有沒有打中。
+      conviction_score     — raw composite(ml_prob × weight × consensus_mult ×
+                             theme_mult)EV 翻譯前。
+    全為 None → 寫 NULL,跟舊行為相容。
 
     回新建 row id;UNIQUE conflict → 回 None。
     """
@@ -99,13 +110,18 @@ def add_paper_trade(
                 (sid, name, entry_date, entry_price, matched_strategies,
                  ml_prob, target_price, stop_price, current_stop,
                  trailing_level, hold_days,
-                 expected_exit_date, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?)
+                 expected_exit_date, status,
+                 consensus_multiplier, position_pct, conviction_score,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active',
+                    ?, ?, ?, ?)
             """,
             (sid, name, entry_date, entry_price, matched_json,
              ml_prob, target_price, stop_price, stop_price,
              hold_days,
-             expected_exit, now),
+             expected_exit,
+             consensus_multiplier, position_pct, conviction_score,
+             now),
         )
         new_id = cur.lastrowid if cur.rowcount > 0 else None
 
@@ -175,6 +191,23 @@ def bulk_add_paper_trades(
             except (TypeError, ValueError):
                 ml_prob_val = None
 
+            def _coerce_float(key: str) -> float | None:
+                """從 row 取 key,空 / NaN / 非數 → None;有效數字 → float。"""
+                v = r.get(key)
+                if v is None:
+                    return None
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return None
+                if f != f:  # NaN
+                    return None
+                return f
+
+            cm_val = _coerce_float("consensus_multiplier")
+            pp_val = _coerce_float("position_pct")
+            cs_val = _coerce_float("conviction_score")
+
             try:
                 new_id = add_paper_trade(
                     sid=sid, name=name, entry_date=entry_date,
@@ -183,6 +216,9 @@ def bulk_add_paper_trades(
                     ml_prob=ml_prob_val,
                     target_pct=target_pct, stop_pct=stop_pct,
                     hold_days=hold_days, db_path=db_path,
+                    consensus_multiplier=cm_val,
+                    position_pct=pp_val,
+                    conviction_score=cs_val,
                 )
                 if new_id:
                     n_added += 1
@@ -223,12 +259,24 @@ def auto_seed_from_picks(
         sid = str(p.get("sid", "") or "").strip()
         if not sid:
             continue
+        # Phase 2 觀察機制(2026-05-19):從 pick dict 撈 3 個歸因因子。
+        # position_pct 優先吃 top-level(_enrich_picks_with_position_advice
+        # 已 flatten);沒有再 fallback 到 position_advice["position_pct"]。
+        # 三者皆 None / 缺欄 → SQL 寫 NULL,跟舊資料相容。
+        pos_pct = p.get("position_pct")
+        if pos_pct is None:
+            adv = p.get("position_advice")
+            if isinstance(adv, dict):
+                pos_pct = adv.get("position_pct")
         rows.append({
             "stock_id": sid,
             "name": p.get("name", ""),
             "close": p.get("close"),
             "matched_strategies": p.get("matched_strategies") or [],
             "ml_prob": p.get("ml_prob"),
+            "consensus_multiplier": p.get("consensus_multiplier"),
+            "position_pct": pos_pct,
+            "conviction_score": p.get("conviction_score"),
         })
     if not rows:
         return {"added": 0, "skipped": 0, "errors": 0}

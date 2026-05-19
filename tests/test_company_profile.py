@@ -367,6 +367,34 @@ def test_get_company_profile_no_gemini_key_returns_facts_only(
     assert "GEMINI_API_KEY" in profile["llm_error"]
 
 
+def test_get_company_profile_invalid_api_key_classified_as_not_configured(
+    tmp_db, monkeypatch,
+):
+    """Gemini 回 400 API_KEY_INVALID → narrative_status='not_configured'。
+
+    Regression guard:GH Actions backfill workflow #1 (run 26004265959)
+    跑 25m47s 才退,根因是 key 失效但 _is_not_configured_error 沒匹配
+    `API key not valid` 字串,整批走 generic "failed" 跑滿 500 檔。
+    修法後此類錯誤分類為 not_configured → backfill script fail-fast 整批中斷。
+    """
+    _seed_finmind_mock(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "fake-invalid-key")
+    monkeypatch.setattr(cp, "_GEMINI_AVAILABLE", True)
+
+    def _raise_invalid_key(*args, **kwargs):
+        raise RuntimeError(
+            '400 API key not valid. Please pass a valid API key. '
+            '[reason: "API_KEY_INVALID" domain: "googleapis.com"]'
+        )
+    monkeypatch.setattr(cp, "generate_with_gemini", _raise_invalid_key)
+
+    profile = cp.get_company_profile("2330")
+    assert profile["industry"] == "半導體業"
+    assert profile["description"] is None
+    assert profile["narrative_status"] == "not_configured"
+    assert profile["llm_error"] is not None
+
+
 def test_get_company_profile_empty_stock_id_returns_empty(tmp_db):
     """空字串股號 → 回 empty profile,不打任何 API。"""
     profile = cp.get_company_profile("")

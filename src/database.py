@@ -154,16 +154,20 @@ SCHEMA: list[str] = [
     """,
     """
     CREATE TABLE IF NOT EXISTS financials (
-        stock_id    TEXT NOT NULL,
-        period_type TEXT NOT NULL,
-        period      TEXT NOT NULL,
-        revenue     REAL,
-        revenue_yoy REAL,
-        eps         REAL,
-        roe         REAL,
+        stock_id      TEXT NOT NULL,
+        period_type   TEXT NOT NULL,
+        period        TEXT NOT NULL,
+        revenue       REAL,
+        revenue_yoy   REAL,
+        eps           REAL,
+        eps_yoy       REAL,
+        roe           REAL,
+        announce_date TEXT,
         PRIMARY KEY (stock_id, period_type, period)
     )
     """,
+    # idx_financials_announce_date 在 _migrate_financials_add_announce_date 內建
+    # — 避免舊 schema(沒 announce_date 欄)init_db SCHEMA 階段就因 column 不存在炸掉。
     """
     CREATE TABLE IF NOT EXISTS dividend (
         stock_id         TEXT NOT NULL,
@@ -308,6 +312,9 @@ SCHEMA: list[str] = [
                             ('active', 'win', 'lose', 'timeout_win', 'timeout_lose')),
         return_pct          REAL,
         notes               TEXT,
+        consensus_multiplier REAL DEFAULT NULL,
+        position_pct         REAL DEFAULT NULL,
+        conviction_score     REAL DEFAULT NULL,
         created_at          TEXT NOT NULL,
         updated_at          TEXT,
         UNIQUE(sid, entry_date)
@@ -632,6 +639,30 @@ SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_default_settle_daily_date "
     "ON default_settlement_daily(report_date DESC)",
+    # telegram_bot_state(2026-05-18 加,Telegram 雙向問答 daemon)
+    # 通用 key-value 儲存 daemon runtime state,目前只放 last_update_id
+    # (Telegram getUpdates offset)。CSV snapshot 跨 GHA cron run 持久化。
+    """
+    CREATE TABLE IF NOT EXISTS telegram_bot_state (
+        key         TEXT PRIMARY KEY,
+        value       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    )
+    """,
+    # cron heartbeat:每個排程任務的最後成功/失敗時間。
+    # 來源:src/system_monitoring/heartbeat.record_success / record_failure
+    # 持久化:CSV (data/twse_snapshot/sync_log_heartbeat.csv) 由 GHA commit + push
+    # boot 時透過 preload_snapshots 從 CSV 載入。
+    """
+    CREATE TABLE IF NOT EXISTS sync_log_heartbeat (
+        task_name               TEXT PRIMARY KEY,
+        last_success_at         TEXT,
+        last_failure_at         TEXT,
+        last_failure_reason     TEXT,
+        expected_interval_hours REAL NOT NULL,
+        updated_at              TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -642,10 +673,38 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute(stmt)
         _migrate_daily_picks_add_ml_prob(conn)
         _migrate_paper_trades_add_trailing(conn)
+        _migrate_paper_trades_add_p2_columns(conn)
         _migrate_analyst_targets_add_previous(conn)
         _migrate_ml_walkforward_add_split_method(conn)
         _migrate_vbt_grid_add_sharpe_daily(conn)
         _migrate_user_positions_add_trailing(conn)
+        _migrate_financials_add_announce_date(conn)
+
+
+def _migrate_financials_add_announce_date(conn) -> None:
+    """P2-4 PEAD 策略 prerequisite(2026-05-19):加 announce_date / eps_yoy 欄。
+
+      announce_date TEXT  FinMind 原始 r["date"] — 季報實際公佈日,給 PEAD 算
+                          「公佈後 1-5 日進場窗口」用。舊資料 NULL,backfill 重抓補。
+      eps_yoy       REAL  同 stock_id 比前年同季 EPS 的 YoY(百分比)。
+
+    既有 cache.db 升級時自動 ALTER。SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS,
+    自己 PRAGMA 檢查冪等。Index 也同步 CREATE IF NOT EXISTS(SCHEMA 也有,
+    重複呼叫不會出錯)。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(financials)"
+        ).fetchall()
+    }
+    if "announce_date" not in cols:
+        conn.execute("ALTER TABLE financials ADD COLUMN announce_date TEXT")
+    if "eps_yoy" not in cols:
+        conn.execute("ALTER TABLE financials ADD COLUMN eps_yoy REAL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_financials_announce_date "
+        "ON financials(announce_date)"
+    )
 
 
 def _migrate_user_positions_add_trailing(conn) -> None:
@@ -768,6 +827,39 @@ def _migrate_paper_trades_add_trailing(conn) -> None:
     if "trailing_level" not in cols:
         conn.execute(
             "ALTER TABLE paper_trades ADD COLUMN trailing_level INTEGER DEFAULT 0"
+        )
+
+
+def _migrate_paper_trades_add_p2_columns(conn) -> None:
+    """Phase 2 觀察機制(2026-05-19):加 3 欄到既有 paper_trades,把 P2-7
+    consensus_multiplier(衝突檢測後最終 multiplier)/ P2-8 position_pct
+    (Kelly × confidence 後建議倉位)/ conviction_score(EV 翻譯前的原始
+    composite score)從 Telegram 文字落地到 SQL,讓 30 天觀察後可歸因。
+
+      consensus_multiplier REAL    P2-7 後最終 multiplier(例 1.0 / 1.25 / 1.5)
+      position_pct         REAL    P2-8 建議倉位 %(decimal,例 0.035 = 3.5%)
+      conviction_score     REAL    raw composite(ml_prob × strategy_weight ×
+                                   consensus_mult × theme_mult,EV 翻譯前)
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS。冪等(已存在 → no-op)。
+    舊 row 寫 NULL → 觀察期前的 trades 不歸因,只新進 daily_notify seed 的有值。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(paper_trades)"
+        ).fetchall()
+    }
+    if "consensus_multiplier" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN consensus_multiplier REAL"
+        )
+    if "position_pct" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN position_pct REAL"
+        )
+    if "conviction_score" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN conviction_score REAL"
         )
 
 
@@ -1681,7 +1773,11 @@ def upsert_dividend(rows: Iterable[dict], db_path: str | Path | None = None) -> 
 
 
 def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -> int:
-    """寫入 / 更新財報(月營收 + 季 EPS/ROE)。"""
+    """寫入 / 更新財報(月營收 + 季 EPS/ROE/announce_date/eps_yoy)。
+
+    P2-4 PEAD prerequisite(2026-05-19):新欄 announce_date / eps_yoy 一起 COALESCE,
+    舊呼叫端不傳這兩欄不會清空既有值。
+    """
     rows_list = list(rows)
     if not rows_list:
         return 0
@@ -1689,14 +1785,18 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
         conn.executemany(
             """
             INSERT INTO financials
-                (stock_id, period_type, period, revenue, revenue_yoy, eps, roe)
+                (stock_id, period_type, period, revenue, revenue_yoy,
+                 eps, eps_yoy, roe, announce_date)
             VALUES
-                (:stock_id, :period_type, :period, :revenue, :revenue_yoy, :eps, :roe)
+                (:stock_id, :period_type, :period, :revenue, :revenue_yoy,
+                 :eps, :eps_yoy, :roe, :announce_date)
             ON CONFLICT(stock_id, period_type, period) DO UPDATE SET
                 revenue=COALESCE(excluded.revenue, financials.revenue),
                 revenue_yoy=COALESCE(excluded.revenue_yoy, financials.revenue_yoy),
                 eps=COALESCE(excluded.eps, financials.eps),
-                roe=COALESCE(excluded.roe, financials.roe)
+                eps_yoy=COALESCE(excluded.eps_yoy, financials.eps_yoy),
+                roe=COALESCE(excluded.roe, financials.roe),
+                announce_date=COALESCE(excluded.announce_date, financials.announce_date)
             """,
             [
                 {
@@ -1706,7 +1806,9 @@ def upsert_financials(rows: Iterable[dict], db_path: str | Path | None = None) -
                     "revenue": r.get("revenue"),
                     "revenue_yoy": r.get("revenue_yoy"),
                     "eps": r.get("eps"),
+                    "eps_yoy": r.get("eps_yoy"),
                     "roe": r.get("roe"),
+                    "announce_date": r.get("announce_date"),
                 }
                 for r in rows_list
             ],
@@ -2609,7 +2711,17 @@ def preload_snapshots(
                     if pd.notna(r.get("revenue_yoy")) else None
                 ),
                 "eps": float(r["eps"]) if pd.notna(r.get("eps")) else None,
+                # 新欄 announce_date / eps_yoy(P2-4 PEAD prerequisite,2026-05-19)。
+                # 舊 snapshot 沒這兩欄 → r.get() 回 None,upsert COALESCE 不會清空既有值。
+                "eps_yoy": (
+                    float(r["eps_yoy"])
+                    if pd.notna(r.get("eps_yoy")) else None
+                ),
                 "roe": float(r["roe"]) if pd.notna(r.get("roe")) else None,
+                "announce_date": (
+                    str(r["announce_date"])
+                    if pd.notna(r.get("announce_date")) else None
+                ),
             })
         if rows:
             upsert_financials(rows, db_path=db_path)
@@ -2840,6 +2952,18 @@ def preload_snapshots(
             counts["watchlist"] = n_wl
     except Exception as e:  # noqa: BLE001
         logger.warning("[PRELOAD] watchlist load 失敗:%s", e)
+
+    # 8b3. telegram_bot_state(2026-05-18 加,Telegram 雙向問答 daemon)
+    # GHA runner 每次 fresh container,SQLite 空 → 沒這個 preload 看不到
+    # last_update_id,getUpdates 永遠從頭拉,重複處理同一條訊息。
+    # CSV 由 telegram-bot-poll.yml workflow 結尾 commit + push 回 repo。
+    try:
+        from src.telegram_bot.state import load_from_csv as _load_tg_state
+        n_tg = _load_tg_state(db_path=db_path)
+        if n_tg > 0:
+            counts["telegram_bot_state"] = n_tg
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PRELOAD] telegram_bot_state load 失敗:%s", e)
 
     # 8c. analyst_targets(法人目標價)— 平日抓 watchlist+picks / 週日抓全市場
     # 雲端容器重啟還原。表已有資料時 INSERT OR REPLACE 不會覆蓋同 (sid, source) PK,
@@ -3138,6 +3262,16 @@ def preload_snapshots(
                     records,
                 )
             counts["pick_outcomes"] = len(records)
+
+    # 11. sync_log_heartbeat(cron task 心跳)— 每個排程任務最後成功/失敗時間;
+    # cloud boot 後讓 Streamlit Dashboard / cron_health_alert.py 看到 cron task
+    # 健康度,沒這個 preload 表永遠空 → stale 警告永遠不會推。
+    hb_csv = snapshot_dir / "sync_log_heartbeat.csv"
+    if hb_csv.exists() and hb_csv.stat().st_size > 0:
+        from src.system_monitoring import heartbeat as _hb
+        n = _hb.load_from_csv(db_path=db_path, csv_path=hb_csv)
+        if n > 0:
+            counts["sync_log_heartbeat"] = n
 
     return counts
 

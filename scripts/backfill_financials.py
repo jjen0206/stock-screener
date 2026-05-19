@@ -367,7 +367,8 @@ def _dump_snapshot(
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     with db.get_conn() as conn:
         df = pd.read_sql(
-            "SELECT stock_id, period_type, period, revenue, revenue_yoy, eps, roe "
+            "SELECT stock_id, period_type, period, revenue, revenue_yoy, "
+            "eps, eps_yoy, roe, announce_date "
             "FROM financials WHERE period_type='quarterly' "
             "ORDER BY stock_id, period",
             conn,

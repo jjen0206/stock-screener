@@ -150,6 +150,112 @@ def test_upsert_financials_coalesce(tmp_db):
     assert row["roe"] == pytest.approx(27.3)
 
 
+# === P2-4 PEAD prerequisite:announce_date / eps_yoy 欄 ===
+
+def test_financials_has_announce_date_and_eps_yoy_columns(tmp_db):
+    """schema migration 後 financials 應有 announce_date / eps_yoy 欄 + index。"""
+    with db.get_conn() as conn:
+        cols = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(financials)"
+            ).fetchall()
+        }
+        idx = {
+            r["name"] for r in conn.execute(
+                "PRAGMA index_list(financials)"
+            ).fetchall()
+        }
+    assert "announce_date" in cols
+    assert "eps_yoy" in cols
+    assert "idx_financials_announce_date" in idx
+
+
+def test_upsert_financials_writes_announce_date_and_eps_yoy(tmp_db):
+    db.upsert_financials([
+        {
+            "stock_id": "2330", "period_type": "quarterly",
+            "period": "2024-Q1", "eps": 8.5, "roe": 27.3,
+            "announce_date": "2024-04-25", "eps_yoy": 12.34,
+        },
+    ])
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT announce_date, eps_yoy FROM financials "
+            "WHERE stock_id='2330' AND period='2024-Q1'"
+        ).fetchone()
+    assert row["announce_date"] == "2024-04-25"
+    assert row["eps_yoy"] == pytest.approx(12.34)
+
+
+def test_upsert_financials_coalesce_announce_date(tmp_db):
+    """第二次 upsert 不傳 announce_date / eps_yoy 不該蓋掉既有值。"""
+    db.upsert_financials([
+        {"stock_id": "2330", "period_type": "quarterly", "period": "2024-Q1",
+         "eps": 8.5, "announce_date": "2024-04-25", "eps_yoy": 12.34},
+    ])
+    db.upsert_financials([
+        {"stock_id": "2330", "period_type": "quarterly", "period": "2024-Q1",
+         "eps": 9.0},  # 不傳 announce_date / eps_yoy
+    ])
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT eps, announce_date, eps_yoy FROM financials "
+            "WHERE stock_id='2330' AND period='2024-Q1'"
+        ).fetchone()
+    assert row["eps"] == pytest.approx(9.0)
+    assert row["announce_date"] == "2024-04-25"
+    assert row["eps_yoy"] == pytest.approx(12.34)
+
+
+def test_migrate_financials_announce_date_idempotent_on_legacy_schema(tmp_path, monkeypatch):
+    """既有 cache.db(舊 schema 沒 announce_date / eps_yoy 欄)被 init_db 升級時,
+    自動 ALTER COLUMN 不會 crash,且既有 row 變成 NULL(向後相容)。
+    """
+    db_file = tmp_path / "legacy.db"
+    monkeypatch.setattr(config, "DATABASE_PATH", str(db_file))
+    # 建一個沒有 announce_date / eps_yoy 的舊 schema(模擬 2026-05-19 前的 DB)
+    legacy_conn = sqlite3.connect(str(db_file))
+    legacy_conn.row_factory = sqlite3.Row
+    legacy_conn.execute("""
+        CREATE TABLE financials (
+            stock_id    TEXT NOT NULL,
+            period_type TEXT NOT NULL,
+            period      TEXT NOT NULL,
+            revenue     REAL,
+            revenue_yoy REAL,
+            eps         REAL,
+            roe         REAL,
+            PRIMARY KEY (stock_id, period_type, period)
+        )
+    """)
+    legacy_conn.execute(
+        "INSERT INTO financials (stock_id, period_type, period, eps, roe) "
+        "VALUES ('2330', 'quarterly', '2024-Q1', 8.5, 27.3)"
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    # 升級
+    db.init_db()
+    db.init_db()  # 再跑一次:必須冪等
+
+    with db.get_conn() as conn:
+        cols = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(financials)"
+            ).fetchall()
+        }
+        row = conn.execute(
+            "SELECT * FROM financials WHERE stock_id='2330'"
+        ).fetchone()
+    assert "announce_date" in cols
+    assert "eps_yoy" in cols
+    # 既有 row 仍在,新欄為 NULL
+    assert row["eps"] == pytest.approx(8.5)
+    assert row["announce_date"] is None
+    assert row["eps_yoy"] is None
+
+
 # === sync_log ===
 
 def test_sync_log_initial_state(tmp_db):

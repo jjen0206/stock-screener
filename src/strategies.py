@@ -7,7 +7,8 @@
 - macd_golden          MACD 黃金交叉 + DIF<0(初升段)+ 量比 ≥ 1.0
 - ma_squeeze_breakout  MA5/MA20/MA60 5 日內糾結 ≤ 2% + 突破 + 量比 ≥ 1.2
 - inst_consensus       外/投/自三家同時買超(net > 0)≥ N 個交易日連續
-- bb_lower_rebound     5 日內觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.0(超賣反彈)
+- bb_lower_rebound     5 日內觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.5x(20MA) + regime gating
+                       (2026-05-18 收緊:bear regime 不跑;弱多/盤整/多頭才入選)
 - rsi_recovery         14 日內 RSI < 30 + 今日 RSI > 50 + 從低點 monotonic 上升
 - inst_silent_accum    5/10/20 日法人累計皆 > 0 + 今日平盤 ±1% + BB 位置 < 50%
 - volume_breakout      今日量 ≥ 5 日均量 × 2.5 + close 突破 20 日新高
@@ -23,7 +24,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from src import database as db, indicators as ind
+from src import database as db, indicators as ind, market_regime
 from src._bulk_load import bulk_load_institutional_totals, bulk_load_prices
 from src.screener_short import screen_short
 from src.universe import TW_TOP_50
@@ -64,10 +65,25 @@ DEFAULT_INST_CONSENSUS_PARAMS: dict[str, Any] = {
 DEFAULT_BB_REBOUND_PARAMS: dict[str, Any] = {
     # 用獨立 key:跟 RSI 的 rsi_window_days 區分(各自獨立 lookback)
     "bb_touch_lookback": 5,    # 過去 N 日內任一日要碰到下軌
-    "bb_vol_ratio_min": 1.0,   # 紅 K 那天的量比下限(獨立,跟 bias 1.2 不同)
+    # 量比拉到 1.5x(2026-05-18 strategy upgrade):原 1.0x WR 22.84% / 5d ROI
+    # -1.72% — false signal 太多。拉門檻 + 改用 20MA(成交量 vs 中期均量,比
+    # 5MA 抗近期量能升溫,更能濾掉 dead-cat 反彈)。預期 fires 砍半 / WR > 35%。
+    "bb_vol_ratio_min": 1.5,
+    "bb_vol_ma_window": 20,    # 量比 baseline 用過去 N 日 vol MA(原 5,改 20)
     "bb_period": 20,
     "bb_num_std": 2.0,
 }
+
+# === bb_lower_rebound regime 限縮(2026-05-18 strategy upgrade) ===
+# 只在「下軌反彈有理由發生」的 regime 開:盤整 / 弱多 / 多頭。空頭(bear)的下軌
+# 通常是繼續破而非反彈,WR 嚴重偏低 → 直接 mute。unknown 保守放行,避免 boot
+# 期 TAIEX 不足 60 天時整個策略被靜音。對應 src.market_regime.compute_regime
+# 的 4-tier(bull / weak_bull / sideways / bear / unknown)。
+BB_REBOUND_ALLOWED_REGIMES: frozenset[str] = frozenset({
+    "sideways",   # 「range」盤整
+    "weak_bull",  # 「弱多」
+    "bull",       # 多頭(下軌觸碰罕見但偶發,仍允許)
+})
 
 DEFAULT_RSI_RECOVERY_PARAMS: dict[str, Any] = {
     "rsi_oversold": 30.0,      # 14 日內曾 < 此值
@@ -137,6 +153,62 @@ DEFAULT_BIG_HOLDER_PARAMS: dict[str, Any] = {
     "rolling_weeks": 4,            # Phase 2:前 4 週滾動視窗算 mean / std
     "sigma_threshold": 1.0,        # Phase 2:命中門檻 = mean + sigma_threshold × std
     "min_delta_floor": 5,          # Phase 2 絕對下限:本週 delta 必須 ≥ 此值,過濾小型股雜訊
+}
+
+# 策略 18:除權息搶反彈(ex_dividend_swing) — event-driven
+# 邏輯:除權息日前 1-3 日進場,吃填權息第一波反彈。需歷史填權成功率 + 高殖利率雙保險。
+DEFAULT_EX_DIVIDEND_SWING_PARAMS: dict[str, Any] = {
+    "yield_min_pct": 3.0,        # 現金殖利率 >= 3%
+    "fill_rate_min": 0.6,        # 過去 lookback_years 年填權成功率 >= 60%
+    "fill_window_days": 20,      # 填權判定窗口:除權後 N 個交易日內收盤回到除權前
+    "lookback_years": 3,         # 看過去幾年的填權歷史(至少要這麼多有效樣本)
+    "lookahead_days": 3,         # 事件偵測:date 之後 N 個日曆日內有 ex_date 才視為進場時機
+    "yoy_boost": True,           # 月營收 YoY > 0 → score × 1.2
+}
+
+# 策略 19:月營收公佈前佈局(revenue_announce_anticipation)— event-driven
+# 邏輯:每月 5 號前(2-4 號日曆窗口)布局「最近一筆 YoY 高 + 法人 5 日累買」的股
+# 等台股強制公佈窗口(5-10 號)時吃公佈反應。
+DEFAULT_REVENUE_ANNOUNCE_PARAMS: dict[str, Any] = {
+    "yoy_threshold": 30.0,       # 最近一筆月營收 YoY > 30%
+    "inst_lookback_days": 5,     # 法人累計天數視窗
+    "inst_min_buy_days": 3,      # 視窗內至少 N 天為買超(foreign+trust 為正)
+    "min_avg_volume_lots": 1000, # 60 日均量門檻(張)— 1 張 = 1000 股
+    "avg_volume_lookback": 60,   # 流動性判定回看天數
+    "window_start_day": 1,       # 進場窗口:每月 N1 號(含)
+    "window_end_day": 4,         # 進場窗口:每月 N2 號(含)— 5 號開始公佈
+}
+
+# 策略 20:外資 + 千張戶共振(foreign_x_holder_alignment) — 籌碼共振
+# 邏輯:外資 5 日累計買超 z-score > 1.0(對候選池)AND 千張戶本週 delta_w > 0
+#       且突破前 4 週滾動 mean + 0.5σ。score = (foreign_z + holder_z) / 2 clip 0~2。
+# 兩個信號正交(短期外資資金流 + 中期大戶吸籌)→ 共振 = 高確信籌碼進場訊號。
+DEFAULT_FOREIGN_X_HOLDER_PARAMS: dict[str, Any] = {
+    "foreign_lookback_days": 5,        # 外資累計天數視窗
+    "foreign_zscore_threshold": 1.0,   # 外資 5d sum 對候選池的 z-score 門檻
+    "holder_rolling_weeks": 4,         # 千張戶滾動 mean / std 視窗(前 N 週)
+    "holder_sigma_threshold": 0.5,     # 千張戶突破 σ 倍數(本週 > μ + Nσ)
+    "min_avg_volume_lots": 1000,       # 60 日均量門檻(張)— 流動性過濾
+    "avg_volume_lookback": 60,
+    "score_clip_max": 2.0,             # score 上限 clip(下限 0)
+}
+
+# 策略 21:財報後 5 日延續(earnings_surprise_followthrough)— PEAD event-driven
+# 學術上 Post-Earnings Announcement Drift:大幅 surprise 後 1-5 個交易日延續走勢。
+# 進場窗口:announce_date 後第 1-5 個交易日(用 daily_prices 反推,避假日 / 週末)。
+# 篩選:eps_yoy > 50% OR gap_open_pct > 3%(任一條件命中)— 兩條路捕捉
+#   surprise 訊號:eps_yoy 是「年比基本面跳升」、gap_open_pct 是「市場對公佈的
+#   立即反應」(announce_date 收盤 → 下一交易日開盤 gap)。
+# Score = max(eps_yoy/100, gap_pct/5),clip 0~2。事件型 → STRATEGY_NATURE='neutral'
+# 出場(STRATEGY_RR_PARAMS):target 5% / stop 4% / hold 5(配合 PEAD 5 日窗口)。
+DEFAULT_EARNINGS_SURPRISE_PARAMS: dict[str, Any] = {
+    "window_start": 1,             # 公佈後第 N1 個交易日(含)
+    "window_end": 5,               # 公佈後第 N2 個交易日(含)
+    "eps_yoy_threshold": 50.0,     # eps_yoy > 此值 → 條件 A 命中
+    "gap_pct_threshold": 3.0,      # gap_open_pct > 此值 → 條件 B 命中
+    "min_avg_volume_lots": 1000,   # 60 日均量門檻(張)— 流動性過濾
+    "avg_volume_lookback": 60,
+    "score_clip_max": 2.0,         # score 上限 clip(下限 0)
 }
 
 
@@ -242,6 +314,54 @@ def _compute_atr_for_stock(
     with db.get_conn() as conn:
         history = bulk_load_prices(conn, [stock_id], target_date, lookback)
     return _compute_atr_from_df(history.get(stock_id), period)
+
+
+# === 事件型策略共用 helper:用 daily_prices 反推「公佈後第 N 個交易日」 ===
+
+def _next_trading_day(
+    price_df: pd.DataFrame | None,
+    after_date: str,
+) -> str | None:
+    """回傳 price_df 中第一個嚴格大於 after_date 的交易日(ISO date string)。
+
+    Why: PEAD / earnings event 策略需要「公佈日後第一個 open」。announce_date 可能
+    落在週末 / 假日(financials.announce_date 是 FinMind 原始 r["date"]),不能用
+    calendar +1。price_df 是 bulk_load_prices 已 sort by date ASC 出來的子集 —
+    只含實際有交易資料的日子,自然跳過週末 / 假日。
+
+    缺資料(price_df None / 空 / 沒有大於 after_date 的列)→ None。
+    """
+    if price_df is None or price_df.empty:
+        return None
+    dates = price_df["date"].astype(str)
+    later = dates[dates > after_date]
+    if later.empty:
+        return None
+    return str(later.iloc[0])
+
+
+def _trading_days_after(
+    price_df: pd.DataFrame | None,
+    reference: str,
+    target: str,
+) -> int | None:
+    """計算 target 是 reference 之後的第幾個交易日(以 price_df 含的日為準)。
+
+    e.g. reference='2026-05-15' (五), target='2026-05-19' (二) → 2(一=1、二=2)
+
+    要求 target > reference;target == reference → 回 None(同日不算延續)。
+    price_df 須已 sort by date ASC(bulk_load_prices 出來的格式)。
+
+    語意:嚴格大於 reference 且 ≤ target 的交易日列數。如果 reference 或
+    target 落在非交易日(假日 / 週末),計數仍以 price_df 內實際出現的日為準 —
+    這正是 PEAD「公佈後 1-5 個交易日」最需要的精確度,避免被 calendar 天數誤導。
+    """
+    if price_df is None or price_df.empty:
+        return None
+    if target <= reference:
+        return None
+    dates = price_df["date"].astype(str)
+    return int(((dates > reference) & (dates <= target)).sum())
 
 
 def compute_target_prices(
@@ -683,11 +803,20 @@ def screen_bb_lower_rebound(
     date: str,
     params: dict | None = None,
     stock_ids: list[str] | None = None,
+    regime: str | None = None,
 ) -> pd.DataFrame:
-    """策略 7:過去 N 日內任一日 close 觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.0。
+    """策略 7:過去 N 日內任一日 close 觸 BB 下軌 + 今日收紅 K + 量比 ≥ 1.5x(20MA)。
 
     意義:超賣後反彈訊號。先碰下軌(超賣),再反手收紅 K(止跌),代表
     賣壓消化、籌碼換手完成。
+
+    2026-05-18 升級:
+    - 量比門檻 1.0 → 1.5,改用 20 日量均(過濾 dead-cat 反彈)
+    - regime 限縮:只在 {sideways, weak_bull, bull} 跑;bear 強制空
+      ('unknown' 為保守放行,避免 TAIEX 資料不足整個策略被 mute)
+
+    regime 參數:呼叫端可顯式傳入(回測 / 測試會 fix regime),預設 None →
+    讀 TAIEX 推導當下 regime。
     """
     p = {**DEFAULT_BB_REBOUND_PARAMS, **(params or {})}
     sids = stock_ids or [s for s, _ in TW_TOP_50]
@@ -695,10 +824,32 @@ def screen_bb_lower_rebound(
         "stock_id", "name", "close", "open",
         "bb_lower", "bb_mid", "vol_ratio", "matched_at",
     ]
+
+    # === regime 限縮 ===
+    # 顯式傳入 → 嚴格按 whitelist 判;None → 讀 TAIEX,'unknown' 保守放行。
+    resolved_regime = regime
+    if resolved_regime is None:
+        try:
+            resolved_regime = market_regime.compute_regime(date).get(
+                "regime", "unknown",
+            )
+        except Exception:
+            logger.warning(
+                "bb_lower_rebound: compute_regime 失敗,fallback unknown 放行",
+                exc_info=True,
+            )
+            resolved_regime = "unknown"
+    if (
+        resolved_regime != "unknown"
+        and resolved_regime not in BB_REBOUND_ALLOWED_REGIMES
+    ):
+        return _enrich_with_targets(pd.DataFrame(columns=cols), date)
+
     raw = _evaluate_strategy(
         date, sids, cols,
         evaluate_fn=lambda df, name: _evaluate_bb_rebound(df, name, date, p),
-        lookback_days=40,  # BB 20 + 5 日 lookback + 緩衝
+        # BB 20 + 20 日量均 lookback + 緩衝;舊版 40 對 5 日均量足夠,新版仍夠
+        lookback_days=40,
         min_required=22,
     )
     return _enrich_with_targets(raw, date)
@@ -726,12 +877,13 @@ def _evaluate_bb_rebound(
     today_close = float(df["close"].iloc[-1])
     if today_close <= today_open:
         return None
-    # 量比 ≥ bb_vol_ratio_min
+    # 量比 ≥ bb_vol_ratio_min(2026-05-18:1.0 → 1.5,baseline 改 20 日均量)
+    ma_window = int(p["bb_vol_ma_window"])
     today_vol = float(df["volume"].iloc[-1])
-    prev_5_vol = df["volume"].iloc[-6:-1]
-    if len(prev_5_vol) < 5:
+    prev_vol = df["volume"].iloc[-(ma_window + 1):-1]
+    if len(prev_vol) < ma_window:
         return None
-    ma_vol = float(prev_5_vol.mean())
+    ma_vol = float(prev_vol.mean())
     vol_ratio = today_vol / ma_vol if ma_vol > 0 else 0.0
     if vol_ratio < p["bb_vol_ratio_min"]:
         return None
@@ -1721,6 +1873,861 @@ def screen_big_holder_inflow(
     return _enrich_with_targets(raw, date)
 
 
+# === 策略 18:除權息搶反彈(ex_dividend_swing) ===
+
+def _compute_fill_success(
+    price_df: pd.DataFrame,
+    ex_date: str,
+    window_days: int,
+) -> bool | None:
+    """過去某次 ex_date 後 window_days 個交易日內,close 是否回到除權前一日 close。
+
+    Return:
+    - True:在窗口內任一交易日 close >= 除權前收盤
+    - False:窗口內全部低於除權前收盤(沒填權)
+    - None:price_df 沒蓋到該 ex_date 區間(資料不足,無法判斷)
+    """
+    if price_df is None or price_df.empty:
+        return None
+    before = price_df[price_df["date"] < ex_date]
+    after = price_df[price_df["date"] >= ex_date].head(window_days)
+    if before.empty or after.empty:
+        return None
+    pre_close = float(before["close"].iloc[-1])
+    if pre_close <= 0:
+        return None
+    max_after = float(after["close"].max())
+    return max_after >= pre_close
+
+
+def screen_ex_dividend_swing(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 18(事件驅動):除權息日前 1-3 日臨界進場,吃填權息反彈。
+
+    篩選條件:
+    1. 現金殖利率 >= 3%(cash_dividend / current_close × 100)
+    2. 過去 lookback_years 年的填權成功率 >= 60%(除權後 20 個交易日內收盤回到除權前)
+    3. 月營收 YoY > 0 → score × 1.2(可選 boost,不是 hard filter)
+
+    score = (yield_pct / 5.0) × fill_success_rate × (1.2 if revenue_yoy > 0 else 1.0)
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    p = {**DEFAULT_EX_DIVIDEND_SWING_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "yield_pct", "fill_success_rate", "revenue_yoy",
+        "next_ex_date", "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    yield_min = float(p["yield_min_pct"])
+    fill_rate_min = float(p["fill_rate_min"])
+    fill_window = int(p["fill_window_days"])
+    lookback_years = int(p["lookback_years"])
+    lookahead = int(p["lookahead_days"])
+    yoy_boost = bool(p["yoy_boost"])
+
+    cutoff = date  # 字典序比較 ISO 日期(YYYY-MM-DD)是安全的
+    horizon = (
+        _dt.strptime(date, "%Y-%m-%d").date() + _td(days=lookahead)
+    ).strftime("%Y-%m-%d")
+
+    with db.get_conn() as conn:
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            div_rows = conn.execute(
+                f"SELECT stock_id, year, cash_dividend, ex_dividend_date "
+                f"FROM dividend "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND ex_dividend_date IS NOT NULL "
+                f"ORDER BY stock_id, ex_dividend_date",
+                sids,
+            ).fetchall()
+            yoy_rows = conn.execute(
+                f"SELECT stock_id, period, revenue_yoy FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='monthly_revenue' "
+                f"AND revenue_yoy IS NOT NULL "
+                f"ORDER BY stock_id, period DESC",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            div_rows = conn.execute(
+                "SELECT stock_id, year, cash_dividend, ex_dividend_date "
+                "FROM dividend "
+                "WHERE ex_dividend_date IS NOT NULL "
+                "ORDER BY stock_id, ex_dividend_date"
+            ).fetchall()
+            yoy_rows = conn.execute(
+                "SELECT stock_id, period, revenue_yoy FROM financials "
+                "WHERE period_type='monthly_revenue' "
+                "AND revenue_yoy IS NOT NULL "
+                "ORDER BY stock_id, period DESC"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        # 撈 lookback_years 年 + 填權窗口 buffer 的歷史
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date,
+            lookback_days=lookback_years * 260 + fill_window + 30,
+        )
+
+    div_by_sid: dict[str, list[dict]] = {}
+    for r in div_rows:
+        div_by_sid.setdefault(r["stock_id"], []).append({
+            "year": r["year"],
+            "cash_dividend": float(r["cash_dividend"] or 0),
+            "ex_date": r["ex_dividend_date"],
+        })
+
+    # 月營收 YoY 取最近一筆(rows 已 period DESC)
+    yoy_by_sid: dict[str, float] = {}
+    for r in yoy_rows:
+        if r["stock_id"] not in yoy_by_sid:
+            yoy_by_sid[r["stock_id"]] = float(r["revenue_yoy"])
+
+    rows: list[dict] = []
+    for sid in sids:
+        recs = div_by_sid.get(sid, [])
+        if not recs:
+            continue
+
+        # 1. 找下一個 ex-date 在 (date, date + lookahead_days] 內 — 進場時機
+        next_ex = None
+        for rec in recs:
+            if cutoff < rec["ex_date"] <= horizon:
+                next_ex = rec
+                break
+        if next_ex is None:
+            continue
+        if next_ex["cash_dividend"] <= 0:
+            continue  # 只配股票股利不算(殖利率算不出)
+
+        # 2. 當前 close → 算殖利率
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or price_df.empty:
+            continue
+        close = float(price_df["close"].iloc[-1])
+        if close <= 0:
+            continue
+        yield_pct = next_ex["cash_dividend"] / close * 100.0
+        if yield_pct < yield_min:
+            continue
+
+        # 3. 過去 lookback_years 筆 ex_date 算填權成功率(需全部都有有效樣本)
+        past_recs = sorted(
+            [r for r in recs if r["ex_date"] < cutoff],
+            key=lambda x: x["ex_date"],
+            reverse=True,
+        )[:lookback_years]
+        if len(past_recs) < lookback_years:
+            continue  # 歷史不足 → skip(避免採信少樣本)
+        fills: list[bool] = []
+        for past in past_recs:
+            ok = _compute_fill_success(price_df, past["ex_date"], fill_window)
+            if ok is None:
+                break
+            fills.append(ok)
+        if len(fills) < lookback_years:
+            continue
+        fill_success_rate = sum(fills) / len(fills)
+        if fill_success_rate < fill_rate_min:
+            continue
+
+        # 4. score:殖利率 / 填權率 / YoY boost
+        revenue_yoy = yoy_by_sid.get(sid)
+        boost = 1.2 if (yoy_boost and revenue_yoy is not None and revenue_yoy > 0) else 1.0
+        score = (yield_pct / 5.0) * fill_success_rate * boost
+
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "yield_pct": yield_pct,
+            "fill_success_rate": fill_success_rate,
+            "revenue_yoy": revenue_yoy,
+            "next_ex_date": next_ex["ex_date"],
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
+# === 策略 19:月營收公佈前佈局(revenue_announce_anticipation) ===
+
+def screen_revenue_announce_anticipation(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 19(事件驅動):台股月營收 5-10 號強制公佈,前夕佈局 YoY 高 + 法人連買。
+
+    篩選條件(都要符合):
+    1. as_of 落在「每月 window_start_day–window_end_day」日曆窗口內(預設 1-4 號)
+    2. 最近一筆月營收 YoY > yoy_threshold(預設 30%)
+       — financials.period_type='monthly_revenue' 最新 period
+    3. 近 inst_lookback_days 個交易日(預設 5)foreign+trust 累計淨買 > 0,
+       且其中至少 inst_min_buy_days 天當日 (foreign+trust) > 0
+    4. avg_volume_lookback 日均量(預設 60)> min_avg_volume_lots 張(預設 1000)
+       — 流動性過濾,避免小型股滑價
+
+    score 公式(各 factor 都 clip 在 [0, 1]):
+        yoy_factor = min(yoy / 50.0, 1.0)
+        z_factor   = min(max(z, 0) / 2.0, 1.0)
+        score      = yoy_factor * z_factor
+
+        z 是該檔法人 5 日累計淨買 vs 候選池的 z-score。
+        候選池太小(< 2 檔)或 std = 0 → z_factor = 1.0(中性)。
+
+    出場(在 STRATEGY_RR_PARAMS 設定):target 4% / stop 3% / hold 10 個交易日
+    — 公佈當日 + 1 交易日內若 target/stop 觸發,backtester 走 RR;否則 hold=10
+    強制出場(萬一公佈延後到 10 號之後也安全)。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_REVENUE_ANNOUNCE_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "revenue_yoy", "inst_5d_buy_sum", "inst_buy_days",
+        "avg_volume_lots", "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    yoy_threshold = float(p["yoy_threshold"])
+    inst_lookback = int(p["inst_lookback_days"])
+    inst_min_buy_days = int(p["inst_min_buy_days"])
+    min_avg_lots = float(p["min_avg_volume_lots"])
+    avg_vol_lookback = int(p["avg_volume_lookback"])
+    win_start = int(p["window_start_day"])
+    win_end = int(p["window_end_day"])
+
+    # 1. 窗口期判斷 — as_of 不在月內 window_start_day~window_end_day → 直接空
+    as_of_d = _date.fromisoformat(date)
+    if not (win_start <= as_of_d.day <= win_end):
+        return pd.DataFrame(columns=cols)
+
+    # 撈法人資料用的日期範圍(交易日 ~5 天 + 週末/假日緩衝)
+    inst_start_date = (
+        as_of_d - _td(days=inst_lookback * 3)
+    ).isoformat()
+
+    with db.get_conn() as conn:
+        # name_map + 三類資料
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            rev_rows = conn.execute(
+                f"SELECT stock_id, period, revenue_yoy FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='monthly_revenue' "
+                f"AND revenue_yoy IS NOT NULL "
+                f"ORDER BY stock_id, period DESC",
+                sids,
+            ).fetchall()
+            inst_rows = conn.execute(
+                f"SELECT stock_id, date, foreign_buy_sell, trust_buy_sell "
+                f"FROM institutional "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, date DESC",
+                (*sids, inst_start_date, date),
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            rev_rows = conn.execute(
+                "SELECT stock_id, period, revenue_yoy FROM financials "
+                "WHERE period_type='monthly_revenue' "
+                "AND revenue_yoy IS NOT NULL "
+                "ORDER BY stock_id, period DESC"
+            ).fetchall()
+            inst_rows = conn.execute(
+                "SELECT stock_id, date, foreign_buy_sell, trust_buy_sell "
+                "FROM institutional "
+                "WHERE date BETWEEN ? AND ? "
+                "ORDER BY stock_id, date DESC",
+                (inst_start_date, date),
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        # 撈 60 日均量需要 avg_vol_lookback 個交易日 + 緩衝
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date, lookback_days=avg_vol_lookback + 20,
+        )
+
+    # 最新一筆 YoY(rev_rows 已 period DESC)
+    yoy_by_sid: dict[str, float] = {}
+    for r in rev_rows:
+        if r["stock_id"] not in yoy_by_sid:
+            yoy_by_sid[r["stock_id"]] = float(r["revenue_yoy"])
+
+    # 法人:每 sid 取最近 inst_lookback 個交易日的 foreign+trust net
+    inst_by_sid: dict[str, list[int]] = {}
+    for r in inst_rows:
+        sid = r["stock_id"]
+        if sid not in inst_by_sid:
+            inst_by_sid[sid] = []
+        if len(inst_by_sid[sid]) >= inst_lookback:
+            continue
+        f = r["foreign_buy_sell"] or 0
+        t = r["trust_buy_sell"] or 0
+        inst_by_sid[sid].append(int(f) + int(t))
+
+    # 第一輪:套硬條件(YoY / 法人 / 流動性),收集候選 + 法人 5d sum 給 z-score
+    cand: list[dict] = []
+    for sid in sids:
+        yoy = yoy_by_sid.get(sid)
+        if yoy is None or yoy < yoy_threshold:
+            continue
+        inst = inst_by_sid.get(sid, [])
+        if len(inst) < inst_lookback:
+            continue
+        inst_sum = sum(inst)
+        if inst_sum <= 0:
+            continue
+        buy_days = sum(1 for v in inst if v > 0)
+        if buy_days < inst_min_buy_days:
+            continue
+
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or len(price_df) < avg_vol_lookback:
+            continue
+        recent_vol = price_df["volume"].tail(avg_vol_lookback)
+        # 把 shares 轉成「張」(1 張 = 1000 股),NaN safe
+        avg_vol_lots = float(recent_vol.mean()) / 1000.0
+        if pd.isna(avg_vol_lots) or avg_vol_lots < min_avg_lots:
+            continue
+
+        close = float(price_df["close"].iloc[-1])
+        if close <= 0:
+            continue
+
+        cand.append({
+            "sid": sid,
+            "yoy": yoy,
+            "inst_sum": inst_sum,
+            "buy_days": buy_days,
+            "avg_vol_lots": avg_vol_lots,
+            "close": close,
+        })
+
+    if not cand:
+        return pd.DataFrame(columns=cols)
+
+    # z-score 在候選池內計算(< 2 檔或 std = 0 → 中性 1.0)
+    sums = pd.Series([c["inst_sum"] for c in cand], dtype=float)
+    if len(sums) >= 2:
+        mu = float(sums.mean())
+        sigma = float(sums.std(ddof=1))
+    else:
+        mu, sigma = 0.0, 0.0
+    use_zscore = sigma > 0
+
+    rows: list[dict] = []
+    for c in cand:
+        sid = c["sid"]
+        if use_zscore:
+            z = (c["inst_sum"] - mu) / sigma
+            z_factor = min(max(z, 0.0) / 2.0, 1.0)
+        else:
+            # 池太小 / std=0 → 已通過 hard filter 就視為中性滿分(1.0),
+            # 不因「沒有同儕」而打折。
+            z_factor = 1.0
+        yoy_factor = min(c["yoy"] / 50.0, 1.0)
+        score = yoy_factor * z_factor
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": c["close"],
+            "revenue_yoy": c["yoy"],
+            "inst_5d_buy_sum": c["inst_sum"],
+            "inst_buy_days": c["buy_days"],
+            "avg_volume_lots": c["avg_vol_lots"],
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
+# === 策略 20:外資 + 千張戶共振(foreign_x_holder_alignment) ===
+
+def screen_foreign_x_holder_alignment(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 20(籌碼共振):外資 5 日累計買超 + 千張戶本週進場 雙信號突破。
+
+    篩選條件(都要符合):
+    1. 流動性:60 日均量 >= min_avg_volume_lots(預設 1000 張)
+    2. 外資:近 foreign_lookback_days 個交易日(預設 5)foreign_buy_sell 累計 > 0,
+       且該檔在「候選池」內的 z-score >= foreign_zscore_threshold(預設 1.0)。
+       候選池太小(< 2 檔)或 std=0 → z=1.0 中性(剛好等於門檻,通過)。
+    3. 千張戶:shareholder_concentration 最新一週 holders_delta_w > 0,且本週 delta_w
+       高於前 holder_rolling_weeks 週(預設 4)mean + holder_sigma_threshold × σ
+       (預設 0.5σ)— 顯著高於近期常態。歷史不足 4 週 → 不入選(避免少樣本誤判)。
+
+    Score 公式(兩個正交信號等權,clip 0~2):
+        foreign_z = (foreign_5d_sum - μ_pool) / σ_pool   # 池內 z-score
+        holder_z  = (delta_w - μ_4w) / σ_4w              # 該檔 4 週 z-score
+        score     = clip(foreign_z × 0.5 + holder_z × 0.5, 0, score_clip_max)
+
+    出場(STRATEGY_RR_PARAMS 設定):target 4% / stop 3% / hold 10 個交易日。
+    雙信號正交 — 短期資金流(外資) + 中期吸籌(千張戶)— 共振即高確信。
+
+    資料來源:institutional + shareholder_concentration + daily_prices。
+    """
+    from datetime import date as _date, timedelta as _td
+    from collections import defaultdict
+    import sqlite3
+
+    p = {**DEFAULT_FOREIGN_X_HOLDER_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "foreign_5d_sum", "foreign_zscore",
+        "holders_delta_w", "holder_zscore",
+        "week_end", "avg_volume_lots", "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    foreign_lookback = int(p["foreign_lookback_days"])
+    foreign_z_thr = float(p["foreign_zscore_threshold"])
+    rolling_weeks = int(p["holder_rolling_weeks"])
+    sigma_thr = float(p["holder_sigma_threshold"])
+    min_avg_lots = float(p["min_avg_volume_lots"])
+    avg_vol_lookback = int(p["avg_volume_lookback"])
+    score_clip_max = float(p["score_clip_max"])
+    needed_weeks = rolling_weeks + 1  # 前期 N 週 + 本週
+
+    as_of_d = _date.fromisoformat(date)
+    # 撈外資資料用的日期範圍(交易日 ~5 天 + 週末/假日緩衝)
+    inst_start_date = (
+        as_of_d - _td(days=foreign_lookback * 3)
+    ).isoformat()
+
+    with db.get_conn() as conn:
+        # 1. name_map
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+
+        # 2. 外資資料
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            inst_rows = conn.execute(
+                f"SELECT stock_id, date, foreign_buy_sell "
+                f"FROM institutional "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, date DESC",
+                (*sids, inst_start_date, date),
+            ).fetchall()
+        else:
+            inst_rows = conn.execute(
+                "SELECT stock_id, date, foreign_buy_sell "
+                "FROM institutional "
+                "WHERE date BETWEEN ? AND ? "
+                "ORDER BY stock_id, date DESC",
+                (inst_start_date, date),
+            ).fetchall()
+
+        # 3. shareholder_concentration:最近 N+1 週的所有目標 sid
+        try:
+            week_rows = conn.execute(
+                "SELECT DISTINCT week_end FROM shareholder_concentration "
+                "WHERE week_end <= ? "
+                "ORDER BY week_end DESC LIMIT ?",
+                (date, needed_weeks),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return pd.DataFrame(columns=cols)
+        if not week_rows:
+            return pd.DataFrame(columns=cols)
+        last_weeks = [r["week_end"] for r in week_rows]  # DESC
+        latest_week = last_weeks[0]
+
+        wk_placeholders = ",".join(["?"] * len(last_weeks))
+        if len(sids) <= 500:
+            sid_placeholders = ",".join(["?"] * len(sids))
+            sc_rows = conn.execute(
+                f"SELECT sid, week_end, holders_delta_w "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end IN ({wk_placeholders}) "
+                f"  AND sid IN ({sid_placeholders})",
+                (*last_weeks, *sids),
+            ).fetchall()
+        else:
+            sc_rows = conn.execute(
+                f"SELECT sid, week_end, holders_delta_w "
+                f"FROM shareholder_concentration "
+                f"WHERE week_end IN ({wk_placeholders})",
+                tuple(last_weeks),
+            ).fetchall()
+
+        # 4. 撈 60 日均量需要 avg_vol_lookback 個交易日 + 緩衝
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date, lookback_days=avg_vol_lookback + 20,
+        )
+
+    # 外資:每 sid 取最近 foreign_lookback 個交易日的 foreign_buy_sell
+    foreign_by_sid: dict[str, list[int]] = {}
+    for r in inst_rows:
+        sid = r["stock_id"]
+        if sid not in foreign_by_sid:
+            foreign_by_sid[sid] = []
+        if len(foreign_by_sid[sid]) >= foreign_lookback:
+            continue
+        foreign_by_sid[sid].append(int(r["foreign_buy_sell"] or 0))
+
+    # 千張戶:每 sid 收集所有 weeks 的 delta_w(ASC 排序)
+    holder_per_sid: dict[str, list[dict]] = defaultdict(list)
+    for r in sc_rows:
+        holder_per_sid[r["sid"]].append({
+            "week_end": r["week_end"],
+            "delta": r["holders_delta_w"],
+        })
+    for sid in holder_per_sid:
+        holder_per_sid[sid].sort(key=lambda x: x["week_end"])
+
+    # 第一輪:套硬條件(外資 sum > 0 + 千張戶 4 週突破 + 流動性),收 candidate
+    cand: list[dict] = []
+    for sid in sids:
+        # 流動性
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or len(price_df) < avg_vol_lookback:
+            continue
+        recent_vol = price_df["volume"].tail(avg_vol_lookback)
+        avg_vol_lots = float(recent_vol.mean()) / 1000.0
+        if pd.isna(avg_vol_lots) or avg_vol_lots < min_avg_lots:
+            continue
+        close = float(price_df["close"].iloc[-1])
+        if close <= 0:
+            continue
+
+        # 外資 5 日累計 > 0(z-score 留到下面整體算)
+        foreign_window = foreign_by_sid.get(sid, [])
+        if len(foreign_window) < foreign_lookback:
+            continue
+        foreign_sum = sum(foreign_window)
+        if foreign_sum <= 0:
+            continue
+
+        # 千張戶:本週 delta_w > 0 + 突破前 4 週 mean + 0.5σ
+        rows_for_sid = holder_per_sid.get(sid, [])
+        if not rows_for_sid:
+            continue
+        latest_row = next(
+            (r for r in rows_for_sid if r["week_end"] == latest_week),
+            None,
+        )
+        if latest_row is None or latest_row["delta"] is None:
+            continue
+        latest_delta = int(latest_row["delta"])
+        if latest_delta <= 0:
+            continue
+        prior_deltas = [
+            r["delta"] for r in rows_for_sid
+            if r["week_end"] != latest_week and r["delta"] is not None
+        ]
+        if len(prior_deltas) < rolling_weeks:
+            continue  # 歷史不足 → skip(避免少樣本誤判)
+        window = prior_deltas[-rolling_weeks:]
+        s = pd.Series(window, dtype=float)
+        mu_h = float(s.mean())
+        sigma_h = float(s.std(ddof=1))
+        if pd.isna(sigma_h):
+            sigma_h = 0.0
+        threshold = mu_h + sigma_thr * sigma_h
+        if latest_delta <= threshold:
+            continue
+        # 個股 holder z-score(sigma_h=0 → 視為大幅突破,z=sigma_thr 剛好過門檻)
+        holder_z = (
+            (latest_delta - mu_h) / sigma_h
+            if sigma_h > 0 else float(sigma_thr)
+        )
+
+        cand.append({
+            "sid": sid,
+            "foreign_sum": foreign_sum,
+            "holder_delta": latest_delta,
+            "holder_z": holder_z,
+            "avg_vol_lots": avg_vol_lots,
+            "close": close,
+        })
+
+    if not cand:
+        return pd.DataFrame(columns=cols)
+
+    # 外資 z-score 在候選池內計算(< 2 檔 / std=0 → 中性 1.0,剛好等於預設門檻)
+    sums = pd.Series([c["foreign_sum"] for c in cand], dtype=float)
+    if len(sums) >= 2:
+        mu_f = float(sums.mean())
+        sigma_f = float(sums.std(ddof=1))
+    else:
+        mu_f, sigma_f = 0.0, 0.0
+    use_zscore = sigma_f > 0
+
+    rows: list[dict] = []
+    for c in cand:
+        if use_zscore:
+            foreign_z = (c["foreign_sum"] - mu_f) / sigma_f
+        else:
+            # 池太小 / std=0 → 已通過 sum > 0 hard filter,視為中性過門檻
+            foreign_z = float(foreign_z_thr)
+        if foreign_z < foreign_z_thr:
+            continue
+
+        # score = (foreign_z + holder_z) / 2,clip 0~score_clip_max
+        raw_score = foreign_z * 0.5 + c["holder_z"] * 0.5
+        score = max(0.0, min(score_clip_max, raw_score))
+
+        rows.append({
+            "stock_id": c["sid"],
+            "name": name_map.get(c["sid"], c["sid"]),
+            "close": c["close"],
+            "foreign_5d_sum": c["foreign_sum"],
+            "foreign_zscore": foreign_z,
+            "holders_delta_w": c["holder_delta"],
+            "holder_zscore": c["holder_z"],
+            "week_end": latest_week,
+            "avg_volume_lots": c["avg_vol_lots"],
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
+# === 策略 21:財報後 5 日延續(earnings_surprise_followthrough)PEAD ===
+
+def screen_earnings_surprise_followthrough(
+    date: str,
+    params: dict | None = None,
+    stock_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """策略 21(事件驅動 / PEAD):季報後第 1-5 個交易日延續策略。
+
+    篩選條件(都要符合):
+    1. 個股最近一筆 quarterly 財報的 announce_date 落在 date 之前 window_end
+       個交易日內,且 window_start <= 第 N 個交易日 <= window_end
+       (預設 1-5,announce_date 當日不算 / 同日 → skip)。
+    2. eps_yoy > eps_yoy_threshold(預設 50%) OR
+       gap_open_pct > gap_pct_threshold(預設 3%) — 兩條 OR 路徑:
+         * eps_yoy:單純基本面 YoY 跳升,即使 gap 沒明顯也算 PEAD 候選
+         * gap_open_pct:announce 收盤 → 公佈後第 1 交易日 open 的跳空 %
+           (capture「市場對公佈的立即反應」)
+    3. avg_volume_lookback 日(預設 60)均量 >= min_avg_volume_lots
+       (預設 1000 張)— 流動性過濾,避小型股滑價。
+
+    Score 公式(clip [0, score_clip_max]):
+        eps_score = eps_yoy / 100.0  (None → 0)
+        gap_score = gap_open_pct / 5.0  (None → 0)
+        score = clip(max(eps_score, gap_score), 0, score_clip_max)
+
+    出場(STRATEGY_RR_PARAMS):target 5% / stop 4% / hold 5 個交易日 —
+    PEAD 學術上 1-5 日效應最強,hold=5 跟進場窗口同步,避被 day 6+ noise 反轉。
+
+    資料來源:financials.announce_date / financials.eps_yoy(P2-4 prerequisite
+    PR #19 加,quarterly 才有)+ daily_prices(取 gap_open_pct + 流動性)。
+    announce_date IS NULL → 跳過(該股還沒 backfill 到新欄)。
+    """
+    from datetime import date as _date, timedelta as _td
+
+    p = {**DEFAULT_EARNINGS_SURPRISE_PARAMS, **(params or {})}
+    sids = stock_ids or [s for s, _ in TW_TOP_50]
+    cols = [
+        "stock_id", "name", "close",
+        "announce_date", "eps_yoy", "gap_open_pct",
+        "days_after_announce", "avg_volume_lots",
+        "score", "matched_at",
+    ]
+    if not sids:
+        return pd.DataFrame(columns=cols)
+
+    window_start = int(p["window_start"])
+    window_end = int(p["window_end"])
+    eps_thr = float(p["eps_yoy_threshold"])
+    gap_thr = float(p["gap_pct_threshold"])
+    min_avg_lots = float(p["min_avg_volume_lots"])
+    avg_vol_lookback = int(p["avg_volume_lookback"])
+    score_clip_max = float(p["score_clip_max"])
+
+    # 撈財報 announce_date 的下限:window_end 個交易日 ≈ window_end × 2 + 7
+    # 天日曆緩衝(週末 / 連假 / 兩季公佈間隔)。
+    as_of_d = _date.fromisoformat(date)
+    earliest_announce = (
+        as_of_d - _td(days=window_end * 2 + 7)
+    ).isoformat()
+
+    with db.get_conn() as conn:
+        # name_map + 財報
+        if len(sids) <= 500:
+            placeholders = ",".join(["?"] * len(sids))
+            meta = conn.execute(
+                f"SELECT stock_id, name FROM stocks "
+                f"WHERE stock_id IN ({placeholders})",
+                sids,
+            ).fetchall()
+            fin_rows = conn.execute(
+                f"SELECT stock_id, period, announce_date, eps_yoy "
+                f"FROM financials "
+                f"WHERE stock_id IN ({placeholders}) "
+                f"AND period_type='quarterly' "
+                f"AND announce_date IS NOT NULL "
+                f"AND announce_date BETWEEN ? AND ? "
+                f"ORDER BY stock_id, announce_date DESC",
+                (*sids, earliest_announce, date),
+            ).fetchall()
+        else:
+            meta = conn.execute(
+                "SELECT stock_id, name FROM stocks WHERE market='TW'"
+            ).fetchall()
+            fin_rows = conn.execute(
+                "SELECT stock_id, period, announce_date, eps_yoy "
+                "FROM financials "
+                "WHERE period_type='quarterly' "
+                "AND announce_date IS NOT NULL "
+                "AND announce_date BETWEEN ? AND ? "
+                "ORDER BY stock_id, announce_date DESC",
+                (earliest_announce, date),
+            ).fetchall()
+        name_map = {r["stock_id"]: r["name"] for r in meta}
+        # bulk prices:含 60 日均量 + announce 前後 gap 算用
+        prices_by_sid = bulk_load_prices(
+            conn, sids, date, lookback_days=avg_vol_lookback + 20,
+        )
+
+    # 取每 sid 最近一筆 announce(已 announce_date DESC,第一筆即最新)
+    latest_fin_by_sid: dict[str, dict] = {}
+    for r in fin_rows:
+        if r["stock_id"] not in latest_fin_by_sid:
+            latest_fin_by_sid[r["stock_id"]] = {
+                "announce_date": r["announce_date"],
+                "eps_yoy": r["eps_yoy"],
+            }
+
+    rows: list[dict] = []
+    for sid in sids:
+        fin = latest_fin_by_sid.get(sid)
+        if fin is None:
+            continue
+        announce_date = fin["announce_date"]
+        eps_yoy_raw = fin.get("eps_yoy")
+
+        price_df = prices_by_sid.get(sid)
+        if price_df is None or len(price_df) < avg_vol_lookback:
+            continue
+
+        # 流動性
+        recent_vol = price_df["volume"].tail(avg_vol_lookback)
+        avg_vol_lots = float(recent_vol.mean()) / 1000.0
+        if pd.isna(avg_vol_lots) or avg_vol_lots < min_avg_lots:
+            continue
+
+        # 公佈後第 N 個交易日(用 price_df 反推 — 避假日 / 週末誤判)
+        n_after = _trading_days_after(price_df, announce_date, date)
+        if n_after is None or not (window_start <= n_after <= window_end):
+            continue
+
+        # gap_open_pct:announce_date 當天(含)或之前最近一筆 close,
+        # vs 之後第 1 個交易日 open。announce_date 落假日也安全 —
+        # mask 自然取到最近的實際交易日。
+        date_series = price_df["date"].astype(str)
+        pre_mask = date_series <= announce_date
+        post_mask = date_series > announce_date
+        if not pre_mask.any() or not post_mask.any():
+            continue
+        pre_close_val = price_df.loc[pre_mask[pre_mask].index[-1], "close"]
+        post_open_val = price_df.loc[post_mask[post_mask].index[0], "open"]
+        if (
+            pre_close_val is None or post_open_val is None
+            or pd.isna(pre_close_val) or pd.isna(post_open_val)
+            or float(pre_close_val) <= 0
+        ):
+            gap_open_pct = None
+        else:
+            gap_open_pct = (
+                (float(post_open_val) - float(pre_close_val))
+                / float(pre_close_val) * 100.0
+            )
+
+        # 過濾:eps_yoy > 50 OR gap_open_pct > 3(兩條 OR 路徑)
+        eps_yoy = (
+            float(eps_yoy_raw)
+            if eps_yoy_raw is not None and not pd.isna(eps_yoy_raw)
+            else None
+        )
+        eps_pass = eps_yoy is not None and eps_yoy > eps_thr
+        gap_pass = gap_open_pct is not None and gap_open_pct > gap_thr
+        if not (eps_pass or gap_pass):
+            continue
+
+        # score = max(eps_yoy/100, gap_pct/5),clip [0, score_clip_max]
+        eps_score = (eps_yoy / 100.0) if eps_yoy is not None else 0.0
+        gap_score = (gap_open_pct / 5.0) if gap_open_pct is not None else 0.0
+        score = max(0.0, min(score_clip_max, max(eps_score, gap_score)))
+
+        close = float(price_df["close"].iloc[-1])
+        rows.append({
+            "stock_id": sid,
+            "name": name_map.get(sid, sid),
+            "close": close,
+            "announce_date": announce_date,
+            "eps_yoy": eps_yoy,
+            "gap_open_pct": gap_open_pct,
+            "days_after_announce": n_after,
+            "avg_volume_lots": avg_vol_lots,
+            "score": score,
+            "matched_at": date,
+        })
+
+    raw = pd.DataFrame(rows, columns=cols)
+    if not raw.empty:
+        raw = raw.sort_values("score", ascending=False).reset_index(drop=True)
+    return _enrich_with_targets(raw, date)
+
+
 # === 共用:單檔評估骨架 ===
 
 def _evaluate_strategy(
@@ -1798,6 +2805,14 @@ ALL_STRATEGIES: dict[str, Callable] = {
     "revenue_acceleration": screen_revenue_acceleration,
     # 籌碼:千張戶進場(TDCC 千張大戶週快照)
     "big_holder_inflow": screen_big_holder_inflow,
+    # 事件驅動:除權息搶反彈(臨界進場吃填權)
+    "ex_dividend_swing": screen_ex_dividend_swing,
+    # 事件驅動:月營收公佈前佈局(5 號前夕 YoY 高 + 法人連買)
+    "revenue_announce_anticipation": screen_revenue_announce_anticipation,
+    # 籌碼共振:外資 5d 累計買超 z>1.0 + 千張戶本週突破 4w mean+0.5σ
+    "foreign_x_holder_alignment": screen_foreign_x_holder_alignment,
+    # 事件驅動(PEAD):季報後 1-5 個交易日延續,eps_yoy>50 或 gap_open>3% 入場
+    "earnings_surprise_followthrough": screen_earnings_surprise_followthrough,
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -1820,6 +2835,33 @@ STRATEGY_LABELS: dict[str, str] = {
     "revenue_acceleration": "營收加速",
     # 籌碼:千張戶進場
     "big_holder_inflow": "千張戶進場",
+    # 事件驅動:除權息搶反彈
+    "ex_dividend_swing": "除權息搶反彈",
+    # 事件驅動:月營收公佈前佈局
+    "revenue_announce_anticipation": "營收公佈前佈局",
+    # 籌碼共振:外資 + 千張戶
+    "foreign_x_holder_alignment": "外資千張共振",
+    # 事件驅動 PEAD:季報後 5 日延續
+    "earnings_surprise_followthrough": "財報後延續",
+}
+
+
+# === 已淘汰策略(止血:不再進 run_all_strategies / 不推播 / 不算 verdict) ===
+# 策略 .py impl + STRATEGY_LABELS / STRATEGY_CATEGORY / per_strategy models 保留,
+# 讓歷史 paper_trades / backtest 還能對照(直接呼叫 ALL_STRATEGIES[key] 可 opt-in)。
+# 預設 run_all_strategies(enabled=None) 跳過 deprecated keys;若 caller 顯式
+# 把 deprecated key 放進 enabled,印 warning log + 一樣跳過。
+#
+# 2026-05-18 淘汰名單(扣完成本 hold=5 ROI 為負):
+#   rsi_recovery           ROI -5.23% — 全系統最慘
+#   inst_oversold_reversal ROI 負 — Top 5 #2 deprecation 名單
+DEPRECATED_STRATEGIES: dict[str, str] = {
+    "rsi_recovery": (
+        "hold=5 ROI -5.23% after costs (2026-05-18 strategy audit)"
+    ),
+    "inst_oversold_reversal": (
+        "negative ROI after costs (2026-05-18 strategy audit)"
+    ),
 }
 
 
@@ -1832,7 +2874,16 @@ STRATEGY_LABELS: dict[str, str] = {
 # 信號重疊的問題確認被 per-strategy 重訓化解。
 #
 # Threshold 對照(per-strategy 校準 30d / 60d / 126d):
-#   bias_convergence    0.65 → 100% WR (30d: 97 fires)
+#   bias_convergence    0.55 → 92.6% WR (126d: 408 fires) ⬇ 2026-05-18 0.65→0.55
+#                       Cost-aware retrain (apply_costs=True explicit) + sweep:
+#                       baseline    fires=8081 WR=33.7% ROI=-0.64% (cost-adj)
+#                       thr=0.65 OLD model 97f WR=87.6% ROI=+2.92%
+#                       thr=0.55 NEW model 408 WR=92.6% ROI=+2.92% ← 採用
+#                                              total_return=+1191% (best)
+#                       thr=0.60 NEW model 282 WR=96.1% ROI=+3.24%
+#                       thr=0.70 NEW model 70  WR=100%  ROI=+3.68% (太嚴)
+#                       詳見 docs/strategy-rescue-bias-convergence-2026-05-18.md
+#                       與 scripts/audit/sweep_bias_convergence_threshold.py
 #   macd_golden         0.60 → 100% WR (30d: 30 fires)
 #   bb_lower_rebound    0.50 → 75.8% WR (30d: 33 fires)
 #   volume_breakout     0.65 → 100% WR (30d: 74 fires)
@@ -1853,7 +2904,7 @@ STRATEGY_LABELS: dict[str, str] = {
 # 詳見 docs/gap-up-decision-2026-05-15.md。
 STRATEGY_ML_THRESHOLDS: dict[str, float] = {
     "ma_alignment": 0.55,
-    "bias_convergence": 0.65,
+    "bias_convergence": 0.55,
     "macd_golden": 0.60,
     "bb_lower_rebound": 0.50,
     "volume_breakout": 0.65,
@@ -1892,6 +2943,22 @@ STRATEGY_RR_PARAMS: dict[str, tuple[float, float, int]] = {
     "inst_silent_accum": (0.15, 0.05, 10),
     "volume_breakout": (0.15, 0.04, 3),
     "gap_up": (0.15, 0.03, 5),
+    # ex_dividend_swing:填權通常在除權後 5-15 個交易日內完成。
+    # target 5%(典型填權幅度)、stop 4%(殖利率 cushion)、hold 15(spec 強制出場)。
+    # 數據夠了再 Plan G 校準。
+    "ex_dividend_swing": (0.05, 0.04, 15),
+    # revenue_announce_anticipation:單檔 3-5% 預期報酬,公佈窗口 5-10 號,
+    # target 4%(中位)、stop 3%(reward/risk ~1.33)、hold 10(萬一公佈延後仍安全)。
+    # 待累積 N 個月 fires 後 Plan G 校準。
+    "revenue_announce_anticipation": (0.04, 0.03, 10),
+    # foreign_x_holder_alignment:外資 + 千張戶共振屬中期籌碼信號,
+    # target 4%、stop 3%(R:R ~1.33)、hold 10(spec)。
+    # 待累積 fires 後 Plan G 校準。
+    "foreign_x_holder_alignment": (0.04, 0.03, 10),
+    # earnings_surprise_followthrough(PEAD):進場窗口本身就是 announce 後 1-5 日,
+    # target 5%、stop 4%(R:R 1.25)、hold 5(配合 PEAD 學術上 1-5 日效應)。
+    # 待 backfill 完 announce_date / eps_yoy 後累積 fires,再 Plan G 校準。
+    "earnings_surprise_followthrough": (0.05, 0.04, 5),
 }
 
 # Default 給沒在 STRATEGY_RR_PARAMS 內的策略用(volume_kd / ma_squeeze_breakout
@@ -1917,10 +2984,21 @@ def run_all_strategies(
         }
     }
     """
+    explicit_enabled = enabled is not None
     enabled = enabled or list(ALL_STRATEGIES.keys())
     aggregated: dict[str, dict] = {}
     for key in enabled:
         if key not in ALL_STRATEGIES:
+            continue
+        if key in DEPRECATED_STRATEGIES:
+            # 止血:deprecated 策略不再算入聚合 / 推播 / verdict。
+            # 顯式 enabled 帶 deprecated → log warning(留證據);default path 無聲跳過。
+            if explicit_enabled:
+                logger.warning(
+                    "[STRATEGY] %s 已淘汰(%s)— 跳過不執行;"
+                    "如需 backtest 請直接呼叫 ALL_STRATEGIES['%s'](...)。",
+                    key, DEPRECATED_STRATEGIES[key], key,
+                )
             continue
         df = ALL_STRATEGIES[key](date, params=params, stock_ids=stock_ids)
         if df.empty:
@@ -2099,6 +3177,16 @@ STRATEGY_CATEGORY: dict[str, str] = {
     "revenue_acceleration": "基本面",
     # 籌碼:千張戶進場
     "big_holder_inflow": "籌碼",
+    # 事件驅動:除權息搶反彈(歸到「殖利率」類,跟 high_yield_stable 共用 regime 行為)
+    "ex_dividend_swing": "殖利率",
+    # 事件驅動:月營收公佈前佈局 — 同 ex_dividend_swing 屬事件,歸「基本面」類
+    # (YoY 強 = 基本面動能),sideways/bear regime 也想留)
+    "revenue_announce_anticipation": "基本面",
+    # 籌碼共振:外資 + 千張戶,跟 big_holder_inflow / inst_consensus 同類
+    "foreign_x_holder_alignment": "籌碼",
+    # 事件驅動 PEAD:同 revenue_announce_anticipation,屬「基本面」類
+    # — YoY 強跳 / 公佈跳空 = 基本面動能。
+    "earnings_surprise_followthrough": "基本面",
 }
 
 # regime → 哪些 category 該開。bull = 全開(value=None);其他 regime 只留某些 cat。
@@ -2128,12 +3216,17 @@ __all__ = [
     "screen_volume_breakout",
     "screen_gap_up",
     "screen_big_holder_inflow",
+    "screen_ex_dividend_swing",
+    "screen_revenue_announce_anticipation",
+    "screen_foreign_x_holder_alignment",
+    "screen_earnings_surprise_followthrough",
     "run_all_strategies",
     "aggregated_to_dataframe",
     "enrich_with_industry_heat",
     "enrich_with_analyst_target",
     "compute_target_prices",
     "ALL_STRATEGIES",
+    "DEPRECATED_STRATEGIES",
     "STRATEGY_LABELS",
     "STRATEGY_CATEGORY",
     "STRATEGY_REGIME_FILTER",
@@ -2146,11 +3239,16 @@ __all__ = [
     "DEFAULT_INST_CONSENSUS_PARAMS",
     "DEFAULT_BIAS_PARAMS",
     "DEFAULT_BB_REBOUND_PARAMS",
+    "BB_REBOUND_ALLOWED_REGIMES",
     "DEFAULT_RSI_RECOVERY_PARAMS",
     "DEFAULT_INST_SILENT_PARAMS",
     "DEFAULT_VOL_BREAKOUT_PARAMS",
     "DEFAULT_GAP_UP_PARAMS",
     "DEFAULT_BIG_HOLDER_PARAMS",
+    "DEFAULT_EX_DIVIDEND_SWING_PARAMS",
+    "DEFAULT_REVENUE_ANNOUNCE_PARAMS",
+    "DEFAULT_FOREIGN_X_HOLDER_PARAMS",
+    "DEFAULT_EARNINGS_SURPRISE_PARAMS",
     "TARGET_LOW_MULT",
     "TARGET_HIGH_MULT",
     "STOP_LOSS_MULT",

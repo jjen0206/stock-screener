@@ -1,0 +1,82 @@
+name: Cron Heartbeat Health Check (daily 18:00 TW)
+
+# 每天 18:00 TW(10:00 UTC,盤後)掃 sync_log_heartbeat,stale → Telegram + Discord。
+# 週日同時段加 --weekly-checkpoint 強制推「過去 7 天健康度報告」當定期 checkpoint。
+#
+# 全綠 + 平日 → silent(避免噪音)。
+#
+# 邏輯定義在 scripts/cron_health_alert.py;data source 是
+# data/twse_snapshot/sync_log_heartbeat.csv(各 workflow 收尾 commit + push 累加)。
+
+on:
+  schedule:
+    # 10:00 UTC = 18:00 Asia/Taipei,every day
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+      weekly_checkpoint:
+        description: "強制推 weekly checkpoint(平常週日才推)"
+        type: boolean
+        default: false
+      multiplier:
+        description: "stale 容忍倍數(預設 2.0)"
+        required: false
+        default: "2.0"
+
+concurrency:
+  group: cron-health-alert
+  cancel-in-progress: false
+
+jobs:
+  audit-and-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect Sunday (auto weekly checkpoint)
+        id: weekday
+        run: |
+          # 0=Sunday,6=Saturday(date -u +%w)
+          if [ "$(date -u +%w)" = "0" ]; then
+            echo "is_sunday=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_sunday=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run cron heartbeat audit
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.weekly_checkpoint }}" = "true" ] \
+             || [ "${{ steps.weekday.outputs.is_sunday }}" = "true" ]; then
+            ARGS="$ARGS --weekly-checkpoint"
+          fi
+          if [ -n "${{ inputs.multiplier }}" ]; then
+            ARGS="$ARGS --multiplier ${{ inputs.multiplier }}"
+          fi
+          echo "Running: python scripts/cron_health_alert.py $ARGS"
+          python scripts/cron_health_alert.py $ARGS

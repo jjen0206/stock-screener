@@ -67,6 +67,7 @@ def test_backtest_combination_union_basic(tmp_db):
             end_date="2026-05-31",
             holding_days=3,
             mode="union",
+            apply_costs=False,
         )
     assert r["n_trades"] == 1
     # 110 / 100 - 1 = 10%

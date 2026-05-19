@@ -256,6 +256,85 @@ def test_fetch_quarterly_financials_parses_eps_roe(tmp_db):
     assert q1["roe"] == pytest.approx(27.3)
 
 
+# === P2-4 PEAD prerequisite ===
+
+def test_fetch_quarterly_financials_writes_announce_date(tmp_db):
+    """FinMind r['date'] 應原樣寫入 announce_date 欄(不被 _date_to_quarter collapse)。"""
+    fake = [
+        {"date": "2024-04-25", "stock_id": "2330", "type": "EPS", "value": 8.5},
+        {"date": "2024-04-25", "stock_id": "2330", "type": "ROE", "value": 27.3},
+        {"date": "2024-08-15", "stock_id": "2330", "type": "EPS", "value": 9.1},
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_quarterly_financials("2330", "2024-01-01", "2024-12-31")
+    by_period = {r["period"]: r for _, r in df.iterrows()}
+    # 2024-04-25 公佈 → bucket 2024-Q2(announce_date 留原值);8/15 公佈 → 2024-Q3
+    assert by_period["2024-Q2"]["announce_date"] == "2024-04-25"
+    assert by_period["2024-Q3"]["announce_date"] == "2024-08-15"
+
+
+def test_fetch_quarterly_financials_computes_eps_yoy(tmp_db):
+    """同 stock_id 比前年同季 EPS,(curr - prev) / abs(prev) * 100。"""
+    fake = [
+        {"date": "2023-04-25", "stock_id": "2330", "type": "EPS", "value": 6.0},
+        {"date": "2024-04-25", "stock_id": "2330", "type": "EPS", "value": 9.0},
+        # 2024-Q2 vs 2023-Q2: (9 - 6) / 6 * 100 = 50.0
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_quarterly_financials("2330", "2023-01-01", "2024-12-31")
+    by_period = {r["period"]: r for _, r in df.iterrows()}
+    # 前一年那筆找不到 prev,eps_yoy 應為 None / NaN
+    assert pd.isna(by_period["2023-Q2"]["eps_yoy"])
+    assert by_period["2024-Q2"]["eps_yoy"] == pytest.approx(50.0)
+
+
+def test_fetch_quarterly_financials_eps_yoy_uses_existing_db(tmp_db):
+    """本 batch 沒涵蓋前一年時,從 DB 既有 EPS 算 yoy(避免邊界 None)。"""
+    # 先放一筆 2023-Q2 EPS 進 DB(模擬上一次 backfill)
+    db.upsert_financials([
+        {"stock_id": "2330", "period_type": "quarterly", "period": "2023-Q2",
+         "eps": 6.0, "announce_date": "2023-04-25"},
+    ])
+    # 本次 fetch 只回 2024-Q2
+    fake = [
+        {"date": "2024-04-25", "stock_id": "2330", "type": "EPS", "value": 9.0},
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_quarterly_financials("2330", "2024-01-01", "2024-12-31")
+    new_q = df[df["period"] == "2024-Q2"].iloc[0]
+    assert new_q["eps_yoy"] == pytest.approx(50.0)
+
+
+def test_fetch_quarterly_financials_eps_yoy_zero_denom(tmp_db):
+    """前年 EPS = 0 → 數學上 undefined,回 None 不該 ZeroDivision crash。"""
+    fake = [
+        {"date": "2023-04-25", "stock_id": "2330", "type": "EPS", "value": 0.0},
+        {"date": "2024-04-25", "stock_id": "2330", "type": "EPS", "value": 9.0},
+    ]
+    with patch.object(fetcher, "_api_call", return_value=fake):
+        df = fetcher.fetch_quarterly_financials("2330", "2023-01-01", "2024-12-31")
+    by_period = {r["period"]: r for _, r in df.iterrows()}
+    assert pd.isna(by_period["2024-Q2"]["eps_yoy"])
+
+
+def test_prev_year_quarter_helpers():
+    """_prev_year_quarter / _compute_eps_yoy 邊界。"""
+    assert fetcher._prev_year_quarter("2024-Q3") == "2023-Q3"
+    assert fetcher._prev_year_quarter("2024-Q1") == "2023-Q1"
+    # 非法格式 → None
+    assert fetcher._prev_year_quarter("garbage") is None
+    assert fetcher._prev_year_quarter(None) is None  # type: ignore[arg-type]
+    # eps_yoy:基本值
+    assert fetcher._compute_eps_yoy(9.0, 6.0) == pytest.approx(50.0)
+    # 任一為 None → None
+    assert fetcher._compute_eps_yoy(None, 6.0) is None
+    assert fetcher._compute_eps_yoy(9.0, None) is None
+    # prev = 0 → None
+    assert fetcher._compute_eps_yoy(9.0, 0.0) is None
+    # prev 負值 → 用 abs(prev) 當分母,虧轉盈 +
+    assert fetcher._compute_eps_yoy(3.0, -1.0) == pytest.approx(400.0)
+
+
 # === fetch_dividend ===
 
 def _fake_div_rows(stock_id: str = "2330") -> list[dict]:

@@ -1,0 +1,67 @@
+name: Monthly Strategy Report
+
+# 每月 1 號 09:00 Asia/Taipei = 01:00 UTC 跑「上個月」月報
+# (主公規格 09:00 台北;Phase 2 觀察期軟性缺口補洞 Q4)
+on:
+  schedule:
+    - cron: "0 1 1 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+      month:
+        description: "覆寫月份 YYYY-MM(留空跑『上個月』)"
+        required: false
+        default: ""
+
+concurrency:
+  group: monthly-strategy-report
+  cancel-in-progress: false
+
+jobs:
+  monthly-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 雲端 runner SQLite 是空的 — 先 preload data/twse_snapshot/*.csv
+      - name: Preload snapshots into SQLite
+        run: |
+          python -c "
+          from src import database as db
+          db.init_db()
+          counts = db.preload_snapshots()
+          print(f'[MONTHLY-REPORT] preload snapshots: {counts}')
+          "
+
+      - name: Send monthly report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.month }}" ]; then
+            ARGS="$ARGS --month ${{ inputs.month }}"
+          fi
+          echo "Running: python scripts/monthly_strategy_report.py $ARGS"
+          python scripts/monthly_strategy_report.py $ARGS

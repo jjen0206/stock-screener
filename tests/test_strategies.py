@@ -616,6 +616,121 @@ def test_bb_lower_rebound_uptrend_no_touch_lower_fails(tmp_db):
     assert df.empty
 
 
+# --- 2026-05-18 升級:regime 限縮 + 量比 1.5x(20MA) ---
+
+def _seed_dip_with_custom_last_volume(stock_id: str, name: str, last_vol: int):
+    """跟 _seed_dip_then_red_k 同結構,只是最後一天量改成可調 — 驗證量比門檻。
+
+    其餘 25 天 vol=1000,所以 20 日 vol MA = 1000;vol_ratio = last_vol / 1000。
+    """
+    db.upsert_stocks([{"stock_id": stock_id, "name": name, "market": "TW"}])
+    closes = [100.0] * 20 + [90.0, 80.0, 70.0, 70.0, 75.0, 80.0]
+    opens = list(closes)
+    opens[-1] = 75.0  # 紅 K
+    volumes = [1000] * (len(closes) - 1) + [last_vol]
+    rows = []
+    for i, c in enumerate(closes):
+        rows.append({
+            "stock_id": stock_id, "date": _DATES[i],
+            "open": opens[i], "high": max(opens[i], c) + 0.5,
+            "low": min(opens[i], c) - 0.5, "close": c,
+            "volume": volumes[i],
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    db.upsert_daily_prices(rows)
+    return _DATES[len(closes) - 1]
+
+
+def test_bb_lower_rebound_bear_regime_returns_empty(tmp_db):
+    """regime='bear' 顯式傳入 → 即使技術面成立也直接 mute(空頭下軌通常繼續破)。"""
+    last = _seed_dip_then_red_k("BBR_BEAR", "下軌反彈空頭")
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_BEAR"], regime="bear",
+    )
+    assert df.empty, f"bear regime 應該空,實際 df={df}"
+
+
+def test_bb_lower_rebound_sideways_regime_passes(tmp_db):
+    """regime='sideways' (對應 spec「range」)— 允許,技術面成立 → 入選。"""
+    last = _seed_dip_then_red_k("BBR_SIDE", "下軌反彈盤整")
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_SIDE"], regime="sideways",
+    )
+    assert len(df) == 1
+
+
+def test_bb_lower_rebound_weak_bull_regime_passes(tmp_db):
+    """regime='weak_bull' (對應 spec「弱多」)— 允許 → 入選。"""
+    last = _seed_dip_then_red_k("BBR_WB", "下軌反彈弱多")
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_WB"], regime="weak_bull",
+    )
+    assert len(df) == 1
+
+
+def test_bb_lower_rebound_unknown_regime_passes_conservatively(tmp_db):
+    """regime='unknown' → 保守放行(避免 TAIEX 資料不足整個策略 mute)。"""
+    last = _seed_dip_then_red_k("BBR_UNK", "下軌反彈未知")
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_UNK"], regime="unknown",
+    )
+    assert len(df) == 1
+
+
+def test_bb_lower_rebound_weak_volume_fails_at_15x(tmp_db):
+    """量比 1.4x(< 1.5x 門檻)→ 不入選。比舊版 1.0x 門檻嚴。"""
+    # last_vol=1400 → vol_ratio = 1400/1000 = 1.4 < 1.5 → fail
+    last = _seed_dip_with_custom_last_volume("BBR_LV", "弱量", last_vol=1400)
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_LV"], regime="sideways",
+    )
+    assert df.empty, f"vol_ratio=1.4 應該不過,實際 df={df}"
+
+
+def test_bb_lower_rebound_passes_at_15x_exact(tmp_db):
+    """量比 1.5x 整(剛好過門檻)→ 入選,確認 boundary。"""
+    last = _seed_dip_with_custom_last_volume("BBR_OK", "剛過", last_vol=1500)
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_OK"], regime="sideways",
+    )
+    assert len(df) == 1
+
+
+def test_bb_lower_rebound_uses_20day_vol_ma_not_5day(tmp_db):
+    """量比 baseline 必須用 20 日均量(而非舊版 5 日)— 驗證新邏輯。
+
+    構造:前 20 日量=500、後 5 日量=2000(突發放量),今日量=2500。
+    - 5 日 MA = mean(最後 5 個 prev 量,但 prev_5 = days 20-24 = 2000) = 2000
+      → 舊邏輯 vol_ratio = 2500/2000 = 1.25 (< 1.5,fail)
+    - 20 日 MA = (15 個 500 + 5 個 2000) / 20 = (7500+10000)/20 = 875
+      → 新邏輯 vol_ratio = 2500/875 ≈ 2.86 (> 1.5,pass)
+    舊版會 fail,新版要 pass — 證明已切到 20 日均量。
+    """
+    db.upsert_stocks([{
+        "stock_id": "BBR_MA", "name": "MA驗證", "market": "TW",
+    }])
+    closes = [100.0] * 20 + [90.0, 80.0, 70.0, 70.0, 75.0, 80.0]
+    opens = list(closes)
+    opens[-1] = 75.0
+    # 前 20 日量 500、後 5 日量 2000、最後一日量 2500
+    volumes = [500] * 20 + [2000] * 5 + [2500]
+    rows = []
+    for i, c in enumerate(closes):
+        rows.append({
+            "stock_id": "BBR_MA", "date": _DATES[i],
+            "open": opens[i], "high": max(opens[i], c) + 0.5,
+            "low": min(opens[i], c) - 0.5, "close": c,
+            "volume": volumes[i],
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    db.upsert_daily_prices(rows)
+    last = _DATES[len(closes) - 1]
+    df = strat.screen_bb_lower_rebound(
+        last, stock_ids=["BBR_MA"], regime="sideways",
+    )
+    assert len(df) == 1, "20 日 MA 應該讓 vol_ratio 過 1.5x → 入選"
+
+
 # === 策略 8:rsi_recovery ===
 
 def _seed_rsi_dip_recovery(stock_id: str, name: str, n: int = 35):
