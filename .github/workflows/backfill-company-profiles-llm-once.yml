@@ -37,9 +37,9 @@ on:
         required: false
         default: "true"
       sleep:
-        description: "每檔 sleep 秒數(Gemini 15 RPM free,建議 ≥ 1.0)"
+        description: "每檔 sleep 秒數(Gemini 15 RPM free,建議 ≥ 5.0)"
         required: false
-        default: "1.0"
+        default: "5.0"
       regenerate:
         description: "強制重打 Gemini(忽略 cache 已有 narrative)"
         required: false

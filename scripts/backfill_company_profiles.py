@@ -130,8 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help=(
-            "每檔間 sleep 秒數(default 0;LLM 模式建議 1.0 以避免 Gemini "
-            "15 RPM / 1500 RPD free tier 撞牆)"
+            "每檔間 sleep 秒數(default 0;LLM 模式建議 5.0 以避免 Gemini "
+            "15 RPM / 1500 RPD free tier 撞牆,實測 1.0 仍會在 ~10 檔後爆 RPM)"
         ),
     )
     parser.add_argument(
