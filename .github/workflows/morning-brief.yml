@@ -1,17 +1,25 @@
 name: Morning Brief (pre-market)
 
-# 盤前快訊:每交易日 ~08:00 Asia/Taipei 推播
+# 盤前快訊:每交易日 08:30 Asia/Taipei 推播
 #
-# 為什麼用兩班 cron(2026-05-18 修):
-#   2026-05-18 主公盤前快訊延遲 4h 18min — GHA 把 00:30 UTC 那班 cron 延後到
-#   04:48 UTC 才執行(同帳號 news-notify hourly 常延 18-55 min,intraday
-#   30-min cron 也整輪漏跑)。GHA docs 明示 schedule event 在 high load 時
-#   會延後/漏跑,整半點 boundary(:00 / :30)最嚴重 — 全 GitHub 一堆 user
-#   排在那。修法:
-#     - 主班移到 off-boundary 23:47 UTC(= 07:47 TW)
-#     - 30 分鐘後再跑一班 safety net 00:17 UTC(= 08:17 TW)當保險
-#     - safety net 用 gh api 查最近 8h 已有成功 run → skip 不重複推
-#     - concurrency group 確保主班+補班序列執行,不會雙開競爭推播
+# 觸發架構 (2026-05-19 升級, 主公拍板逃離 GHA schedule 不可靠):
+#   主班 = cron-job.org 外部 cron → GitHub dispatches API (workflow_dispatch)
+#          時間 08:30 TW (00:30 UTC) — SLA 99.99% 不會被 drop
+#   GHA fallback (萬一 cron-job.org 掛了 / token 過期):
+#     - 07:47 TW (23:47 UTC -1d) — 提早 43 min
+#     - 08:17 TW (00:17 UTC) — 提早 13 min
+#   兩條 GHA cron off-boundary 已比 :00/:30 抗壅塞 (2026-05-18 修),但仍是
+#   best-effort, 真正穩定靠 cron-job.org。
+#   dedup step (下方) 8h 窗口確保多源觸發不雙推。
+#   health monitor: morning-brief-health-monitor.yml 09:30 TW 查 24h 內無
+#   success 就推 Telegram 警告主公手動 trigger。
+#
+# 詳細 setup SOP:docs/external-cron-morning-brief-setup.md
+#
+# 歷史背景 (為何當初逃離 GHA schedule):
+#   2026-05-18 主公盤前快訊延遲 4h 18min — GHA 把 00:30 UTC 延到 04:48 UTC。
+#   2026-05-19 主班 + safety net 雙班全 drop, 延 1h 43min — 確認 GHA schedule
+#   即使 off-boundary 仍不可靠, 改 cron-job.org 外部觸發。
 #
 # Kill-switch:MORNING_BRIEF_ENABLED=false → script 自己 exit 0 不推。
 
@@ -33,6 +41,10 @@ on:
         description: "覆寫比對基準日 YYYY-MM-DD(留空走 daily_prices MAX(date))"
         required: false
         default: ""
+      triggered_by:
+        description: "觸發來源 tag(方便看 log 追溯, e.g. external-cron-job-org / manual / health-monitor)"
+        required: false
+        default: "manual"
 
 # 同 group 同時最多 1 個 — 主班還在跑時補班 queue 等待,完成後補班的 dedup
 # step 會偵測「已成功推過」 → skip,確保只推一次
@@ -53,6 +65,10 @@ jobs:
       contents: write  # 收尾 heartbeat step 要 commit + push sync_log_heartbeat.csv
 
     steps:
+      - name: Log trigger source
+        run: |
+          echo "[MORNING_BRIEF] event=${{ github.event_name }} triggered_by=${{ inputs.triggered_by || 'schedule' }} run_id=${{ github.run_id }}"
+
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
