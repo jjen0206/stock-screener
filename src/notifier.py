@@ -2763,6 +2763,535 @@ def handle_callback_query(update: dict) -> dict:
     }
 
 
+# ============================================================================
+# 精英化推播(2026-05-19 主公拍板 — 方案 B + B.1.d 排序 + B.2 軍師 7 欄)
+#
+# 設計目的:把推播從「多到看不過來」收斂成「Top 5 精英」。
+# - B.1.d 排序:先 filter consensus_multiplier ≥ 1.5,再 ml_prob desc 取 Top N
+#   不足 N 檔 → fallback 補進 consensus_multiplier ≥ 1.25 的高 ml_prob picks
+# - B.2 7 欄(極簡顯示):
+#     1. stock_id + 中文名(+ 浮動 ⭐ watchlist 命中)
+#     2. 收盤 + 漲跌%
+#     3. ml_prob → 白話「AI 勝率 X%」
+#     4. 命中策略前 3
+#     5. 共識級別 ⭐⭐⭐ / ⭐⭐ / ⭐
+#     6. 進 / 停損 / 停利
+#     7. 風險警示(有才顯,違約交割 / 處置股等)
+# - 砍掉:題材熱度 / SHAP 原因(個股深度頁才顯)/ 大盤 regime(訊息開頭一次)/
+#         K 線型態(併入策略名稱)
+# - 訊息開頭:大盤 regime + TAIEX 預期 1 行
+# - 加 Top 3 長線觀察(同 B.1.d 邏輯,策略過濾為長線:eps/revenue/yield)
+# - daily news brief 合併進 daily_notify caption(避免新 workflow)
+#
+# 不動 picks 計算邏輯(_select_top_picks)— 只動「選哪 5 個」+「顯示什麼」。
+# ============================================================================
+
+
+# 長線策略 key 集合 — 用於 _select_elite_long_picks 過濾。
+# 基本面 + 殖利率類 + 事件型(除息搖擺、營收公布前佈局)。
+LONG_STRATEGY_KEYS: frozenset[str] = frozenset({
+    "eps_acceleration",
+    "revenue_acceleration",
+    "revenue_announce_anticipation",
+    "high_yield_stable",
+    "ex_dividend_swing",
+})
+
+
+def _filter_by_consensus_and_ml(
+    pool: list[dict], top_n: int = 5,
+) -> list[dict]:
+    """B.1.d 精英化 ranking — 從 pool 內挑 Top N。
+
+    Step 1: consensus_multiplier ≥ 1.5 (⭐⭐⭐ 跨類 3+ / ⭐⭐ 跨類 2)→ 排 ml_prob desc → 取 N
+    Step 2: 不足 N → fallback 補進 consensus_multiplier ≥ 1.25(⭐ 同類 2+)
+            的高 ml_prob picks(已選過的不重複)
+    Step 3: rank 重排(1..N)
+
+    pool 為 _select_top_picks 算好的 list[dict];每筆需含
+    'consensus_multiplier' / 'ml_prob' / 'sid'(以 _select_top_picks 注入為準)。
+    pool 空或 top_n ≤ 0 → 空 list。
+    """
+    if not pool or top_n <= 0:
+        return []
+
+    def _mult(p: dict) -> float:
+        try:
+            return float(p.get("consensus_multiplier") or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _ml(p: dict) -> float:
+        try:
+            return float(p.get("ml_prob") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    strong = [p for p in pool if _mult(p) >= 1.5]
+    strong.sort(key=lambda p: (-_ml(p), str(p.get("sid", ""))))
+    result: list[dict] = strong[:top_n]
+
+    if len(result) < top_n:
+        already = {str(p.get("sid", "")) for p in result}
+        medium = [
+            p for p in pool
+            if _mult(p) >= 1.25 and str(p.get("sid", "")) not in already
+        ]
+        medium.sort(key=lambda p: (-_ml(p), str(p.get("sid", ""))))
+        result += medium[: top_n - len(result)]
+
+    for i, p in enumerate(result, start=1):
+        p["rank"] = i
+    return result
+
+
+def _select_elite_top_picks(
+    date: str,
+    top_n: int = 5,
+    confluence_n: int = 2,
+    params: dict | None = None,
+    universe: list[str] | None = None,
+    pool_size: int = 50,
+) -> list[dict]:
+    """精英化短線 Top N — 走 _select_top_picks 拿寬 pool(預設 50),再套 B.1.d。
+
+    pool_size 預期遠大於 top_n(default 50),避免 regime cap 縮太緊(bear 2 / range 5)
+    其實會限到 pool 上限,但 fallback weak path 一律 ≤ 3,我們 OK。
+    """
+    pool = _select_top_picks(
+        date=date, top_n=pool_size, confluence_n=confluence_n,
+        params=params, universe=universe,
+    )
+    return _filter_by_consensus_and_ml(pool, top_n=top_n)
+
+
+def _select_elite_long_picks(
+    date: str,
+    top_n: int = 3,
+    params: dict | None = None,
+    universe: list[str] | None = None,
+    pool_size: int = 50,
+) -> list[dict]:
+    """精英化長線 Top N — 從寬 pool 過濾命中長線策略(LONG_STRATEGY_KEYS),再套 B.1.d。
+
+    confluence_n=1(單策略命中也算)— 因為長線基本面 / 殖利率訊號通常獨立出現,
+    不像短線會多策略 confluence。
+    """
+    pool = _select_top_picks(
+        date=date, top_n=pool_size, confluence_n=1,
+        params=params, universe=universe,
+    )
+    long_pool = [
+        p for p in pool
+        if set(p.get("matched_strategies") or []) & LONG_STRATEGY_KEYS
+    ]
+    return _filter_by_consensus_and_ml(long_pool, top_n=top_n)
+
+
+def _consensus_stars(mult: float | None) -> str:
+    """共識級別 → 星星數。1.8 / 1.5 / 1.3 / 1.0 對應 ⭐⭐⭐ / ⭐⭐⭐ / ⭐⭐ / ⭐ / 無。
+
+    對應 B.1.d ranking 用的 1.5 / 1.25 門檻:
+    - ≥ 1.5  → ⭐⭐⭐ 強共識(跨類 2+)
+    - ≥ 1.25 → ⭐⭐  共識(同類 2+)
+    - ≥ 1.0  → ⭐    弱共識(單策略)— 推播中通常不顯
+    """
+    if mult is None:
+        return ""
+    try:
+        m = float(mult)
+    except (TypeError, ValueError):
+        return ""
+    if m >= 1.5:
+        return "⭐⭐⭐"
+    if m >= 1.25:
+        return "⭐⭐"
+    if m > 1.0:
+        return "⭐"
+    return ""
+
+
+def _risk_warning_label(pick: dict) -> str:
+    """從 pick['warnings'] 撈警示 label 拼成短字串。
+
+    無警示 → 空字串(caller 略整行)。
+    """
+    warnings = pick.get("warnings") or []
+    if not warnings:
+        return ""
+    try:
+        from src.warnings_filter import WARNING_TYPE_LABELS
+    except Exception:  # noqa: BLE001
+        WARNING_TYPE_LABELS = {}  # type: ignore[assignment]
+    seen: list[str] = []
+    for w in warnings:
+        if isinstance(w, dict):
+            t = w.get("warning_type") or ""
+        else:
+            t = str(w)
+        if not t:
+            continue
+        label = WARNING_TYPE_LABELS.get(t, t)
+        if label not in seen:
+            seen.append(label)
+    return " / ".join(seen)
+
+
+def format_elite_pick_block(
+    pick: dict, channel: str = "telegram", show_strategies: bool = True,
+) -> str:
+    """B.2 軍師 7 欄極簡 pick block(短訊版,目標 <100 字 per pick)。
+
+    Telegram 走 HTML(parse_mode='HTML',避開 legacy Markdown entity 坑)。
+    Discord 走 Markdown(**bold**)。
+
+    格式範例(4-5 行 per pick):
+        ▎#1 ⭐2330 台積電 ⭐⭐⭐
+           1248.00 ↑+0.5% · AI 勝率 78%
+           📊 KD 黃金交叉 + 三紅兵 + 突破 60MA
+           💡 進 1230 / 停損 1190 / 停利 1320
+           ⚠️ 處置股
+
+    show_strategies=False → 略策略行(極短訊息變體;morning_brief 可選用)。
+    """
+    rank = pick.get("rank", 0)
+    sid = str(pick.get("sid", "") or "")
+    name = str(pick.get("name", "") or "")
+    close = pick.get("close")
+    pct_change = pick.get("pct_change")
+    matched_labels = list(pick.get("matched_labels") or [])
+    ml_prob = pick.get("ml_prob")
+    cs_mult = pick.get("consensus_multiplier")
+    stars = _consensus_stars(cs_mult)
+    wl_star = "⭐" if pick.get("is_watchlist") else ""
+
+    is_html = (channel == "telegram")
+
+    def _b(txt: str) -> str:
+        if is_html:
+            return f"<b>{_h_escape(txt)}</b>"
+        return f"**{txt}**"
+
+    # Header: #rank  ⭐SID 名稱  ⭐⭐⭐
+    header_parts = [f"▎{_b(f'#{rank}')}"]
+    sid_name = f"{wl_star}{sid} {name}".strip()
+    header_parts.append(_b(sid_name))
+    if stars:
+        header_parts.append(stars)
+    lines = ["  ".join(header_parts)]
+
+    # 收盤 + 漲跌% + AI 勝率(一行)
+    line2_parts: list[str] = []
+    if close is not None:
+        try:
+            close_str = f"{float(close):.2f}"
+        except (TypeError, ValueError):
+            close_str = "—"
+        if pct_change is not None:
+            try:
+                pc = float(pct_change)
+            except (TypeError, ValueError):
+                pc = 0.0
+            sign = "↑+" if pc > 0 else ("↓" if pc < 0 else "→")
+            line2_parts.append(f"{close_str} {sign}{abs(pc):.1f}%")
+        else:
+            line2_parts.append(close_str)
+    if ml_prob is not None:
+        try:
+            line2_parts.append(f"AI 勝率 {float(ml_prob) * 100:.0f}%")
+        except (TypeError, ValueError):
+            pass
+    if line2_parts:
+        lines.append("   " + " · ".join(line2_parts))
+
+    # 命中策略前 3(用 "+" 連接)
+    if show_strategies and matched_labels:
+        top3 = [str(x) for x in matched_labels[:3]]
+        joined = " + ".join(top3)
+        if is_html:
+            lines.append(f"   📊 {_h_escape(joined)}")
+        else:
+            lines.append(f"   📊 {joined}")
+
+    # 進 / 停損 / 停利 (用 entry_low/close 當進場參考;close 是當天收盤,
+    # 「明天進場」實際下單價會略高/低,給主公 reference 用)
+    entry_ref = pick.get("entry_low") or pick.get("close")
+    target_low = pick.get("target_low")
+    stop = pick.get("stop")
+    if entry_ref is not None and stop is not None and target_low is not None:
+        try:
+            lines.append(
+                f"   💡 進 {float(entry_ref):.2f} / 停損 {float(stop):.2f}"
+                f" / 停利 {float(target_low):.2f}"
+            )
+        except (TypeError, ValueError):
+            pass
+
+    # 風險警示(只有警示才顯)
+    warn_label = _risk_warning_label(pick)
+    if warn_label:
+        if is_html:
+            lines.append(f"   ⚠️ {_h_escape(warn_label)}")
+        else:
+            lines.append(f"   ⚠️ {warn_label}")
+
+    return "\n".join(lines)
+
+
+def _h_escape(text: str) -> str:
+    """Telegram HTML mode 只需 escape <>& 三字元(主公 2026-05-09 拍板 HTML 切換)。"""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _format_regime_header(date: str, channel: str) -> str:
+    """訊息開頭:大盤 regime + TAIEX 預期(1-2 行)。
+
+    從 regime_gating 取 caption;失敗 / 關閉 → 空字串。
+    """
+    if not REGIME_GATING_ENABLED:
+        return ""
+    try:
+        from src.regime_gating import get_regime_gating_params
+        with db.get_conn() as conn:
+            rg = get_regime_gating_params(conn)
+        cap = str(rg.get("caption") or "")
+        return cap
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _fetch_recent_news_for_caption(
+    sids: list[str], hours: int = 12, max_items: int = 5,
+) -> list[dict]:
+    """撈相關 sid 在最近 N 小時內、subject 含關鍵字的 news,給 daily news caption 用。
+
+    跟 scripts/morning_brief.find_recent_picks_news 同邏輯但抽到 notifier 內,
+    讓 daily_notify caption / morning_brief 共用一份。
+    """
+    if not sids:
+        return []
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    cutoff_iso = (_dt.now(_tz.utc) - _td(hours=hours)).isoformat(timespec="seconds")
+    placeholders = ",".join("?" * len(sids))
+    sql = (
+        f"SELECT sid, company_name, publish_date, publish_time, subject, "
+        f"       article_no FROM news "
+        f"WHERE sid IN ({placeholders}) "
+        f"AND fetched_at >= ? "
+        f"ORDER BY publish_date DESC, publish_time DESC LIMIT 50"
+    )
+    try:
+        with db.get_conn() as conn:
+            rows = conn.execute(sql, list(sids) + [cutoff_iso]).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+
+    # 同 morning_brief.IMPORTANT_NEWS_KEYWORDS — copy 避免 import cycle
+    keywords = (
+        "重大", "違約", "裁員", "下修", "召回", "停牌", "停止交易",
+        "處置", "注意", "全額交割", "減資", "解散", "破產", "重整",
+        "彈劾", "起訴", "搜索", "罷工", "火災", "爆炸", "停工",
+        "減產", "下調", "示警", "警示", "終止", "和解金", "賠償",
+    )
+    items: list[dict] = []
+    for r in rows:
+        subj = str(r["subject"] or "")
+        if any(kw in subj for kw in keywords):
+            items.append(dict(r))
+            if len(items) >= max_items:
+                break
+    return items
+
+
+def _format_news_caption(news_items: list[dict], channel: str) -> str:
+    """組精簡 news caption(daily_notify / morning_brief 共用)。
+
+    最多 5 則,每則 1 行:`• 2330 台積電 — 「主旨...」`。
+    空 list → 空字串。
+    """
+    if not news_items:
+        return ""
+    is_html = (channel == "telegram")
+    if is_html:
+        header = "📰 <b>重大 news (近 12h)</b>"
+    else:
+        header = "📰 **重大 news (近 12h)**"
+    lines = [header]
+    for n in news_items[:5]:
+        sid = str(n.get("sid") or "")
+        name = str(n.get("company_name") or "")
+        subj = str(n.get("subject") or "")
+        if len(subj) > 50:
+            subj = subj[:47] + "..."
+        if is_html:
+            lines.append(
+                f"• {_h_escape(sid)} {_h_escape(name)} — 「{_h_escape(subj)}」"
+            )
+        else:
+            lines.append(f"• {sid} {name} — 「{subj}」")
+    return "\n".join(lines)
+
+
+def format_elite_top_picks_message(
+    short_picks: list[dict],
+    long_picks: list[dict],
+    date: str,
+    channel: str = "telegram",
+    news_items: list[dict] | None = None,
+    regime_caption: str = "",
+) -> str:
+    """組精英化 daily_notify 完整訊息。
+
+    結構(預估 ~700 chars,vs legacy ~1800,-60%):
+        🎯 短線精選 · DATE(週N)
+        regime caption(可空)
+        ━━━━ 短線 Top 5 ━━━━
+        ▎#1 ... (4-5 行)
+        ▎#2 ...
+        ...
+        ━━━━ 長線觀察 Top 3 ━━━━
+        ▎#1 ... (4-5 行)
+        ...
+        📰 重大 news (近 12h)(可空)
+        ⚠️ 僅供研究,非投資建議。
+    """
+    from datetime import date as _date2
+    is_html = (channel == "telegram")
+
+    def _b(txt: str) -> str:
+        if is_html:
+            return f"<b>{_h_escape(txt)}</b>"
+        return f"**{txt}**"
+
+    try:
+        d = _date2.fromisoformat(date)
+        week_zh = ["一", "二", "三", "四", "五", "六", "日"][d.weekday()]
+        date_label = f"{date}(週{week_zh})"
+    except Exception:  # noqa: BLE001
+        date_label = date
+
+    parts: list[str] = [f"🎯 {_b(f'短線精選 · {date_label}')}"]
+
+    if regime_caption:
+        if is_html:
+            parts.append(_h_escape(regime_caption))
+        else:
+            parts.append(regime_caption)
+
+    # 短線 Top 5
+    if short_picks:
+        parts.append("")
+        parts.append(_b(f"━━ 短線 Top {len(short_picks)} ━━"))
+        for p in short_picks:
+            parts.append(format_elite_pick_block(p, channel=channel))
+    else:
+        parts.append("")
+        parts.append("📭 今日無高共識 picks(B.1.d 過濾後留空)")
+
+    # 長線 Top 3(可空)
+    if long_picks:
+        parts.append("")
+        parts.append(_b(f"━━ 長線觀察 Top {len(long_picks)} ━━"))
+        for p in long_picks:
+            parts.append(format_elite_pick_block(p, channel=channel))
+
+    # 重大 news caption(可空)
+    if news_items:
+        parts.append("")
+        parts.append(_format_news_caption(news_items, channel=channel))
+
+    parts.append("")
+    parts.append("⚠️ 僅供研究,非投資建議。")
+
+    return "\n".join(parts)
+
+
+def notify_elite_top_picks(
+    date: str | None = None,
+    params: dict | None = None,
+    top_n_short: int = 5,
+    top_n_long: int = 3,
+    confluence_n: int = 2,
+    send_telegram: bool = True,
+    send_discord: bool = True,
+    dry_run: bool = False,
+    include_news: bool = True,
+) -> dict[str, bool]:
+    """精英化推播主入口 — B.1.d ranking + B.2 7 欄極簡 + 長線 Top 3 + news caption。
+
+    dry_run=True 不送 channel,只 print。
+    回 {'telegram': bool, 'discord': bool}(實際送的通道)。
+    """
+    if date is None:
+        date = _date.today().isoformat()
+
+    short_picks = _select_elite_top_picks(
+        date=date, top_n=top_n_short, confluence_n=confluence_n, params=params,
+    )
+    long_picks = _select_elite_long_picks(
+        date=date, top_n=top_n_long, params=params,
+    )
+
+    # watchlist 命中標記(用 prioritize_watchlist 注入 is_watchlist flag;
+    # 不重排,我們已經有 B.1.d 排好)
+    try:
+        from src.watchlist_priority import prioritize_watchlist as _wl_prio
+        _wl_prio(short_picks)  # in-place flag injection
+        _wl_prio(long_picks)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NOTIFIER-ELITE] watchlist flag 失敗,picks 無 ⭐ 標")
+
+    # news caption(daily_notify 合併 — 避免新 workflow)
+    news_items: list[dict] = []
+    if include_news:
+        sids = [str(p.get("sid", "")) for p in short_picks + long_picks if p.get("sid")]
+        # 加 watchlist sids 一起撈
+        try:
+            with db.get_conn() as conn:
+                wl_rows = conn.execute("SELECT stock_id FROM watchlist").fetchall()
+                for r in wl_rows:
+                    sids.append(str(r["stock_id"]))
+        except Exception:  # noqa: BLE001
+            pass
+        news_items = _fetch_recent_news_for_caption(
+            sids=list(dict.fromkeys(sids)), hours=12, max_items=5,
+        )
+
+    regime_caption = _format_regime_header(date=date, channel="telegram")
+
+    tg_msg = format_elite_top_picks_message(
+        short_picks=short_picks, long_picks=long_picks, date=date,
+        channel="telegram", news_items=news_items,
+        regime_caption=regime_caption,
+    )
+    dc_msg = format_elite_top_picks_message(
+        short_picks=short_picks, long_picks=long_picks, date=date,
+        channel="discord", news_items=news_items,
+        regime_caption=regime_caption,
+    )
+
+    if dry_run:
+        print("\n=== Telegram (HTML) ===\n", flush=True)
+        print(tg_msg, flush=True)
+        print("\n=== Discord ===\n", flush=True)
+        print(dc_msg, flush=True)
+        return {"telegram": True, "discord": True}
+
+    results: dict[str, bool] = {}
+    if send_telegram and config.TELEGRAM_BOT_TOKEN:
+        # HTML 模式(跟 news_notify / morning_brief 一致,避開 Markdown entity 坑)
+        results["telegram"] = send_telegram_message(tg_msg, parse_mode="HTML")
+    if send_discord and config.DISCORD_WEBHOOK_URL:
+        from src.discord_notifier import send_discord_message
+        results["discord"] = send_discord_message(dc_msg)
+    return results
+
+
 __all__ = [
     "send_telegram_message",
     "send_telegram_message_with_keyboard",
@@ -2775,10 +3304,17 @@ __all__ = [
     "format_premium_picks_block",
     "format_top_picks_message",
     "format_yesterday_recap",
+    "format_elite_pick_block",
+    "format_elite_top_picks_message",
     "notify_short_picks",
     "notify_multi_strategy",
     "notify_manual_picks",
     "notify_top_picks",
+    "notify_elite_top_picks",
+    "_select_elite_top_picks",
+    "_select_elite_long_picks",
+    "_filter_by_consensus_and_ml",
+    "LONG_STRATEGY_KEYS",
     "CB_PREFIX_CHART",
     "CB_PREFIX_WATCH",
     "CB_PREFIX_ALERT",

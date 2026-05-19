@@ -53,6 +53,8 @@ ALERT_BREAKOUT = "breakout"
 # 寫 alert_dedup,當日不重推。
 ALERT_PRICE_ALERT = "price_alert"
 ALERT_INTRADAY_DROP = "intraday_drop"
+# 持倉 + watchlist 急跌 -5%+(2026-05-19 主公拍板加,精英化方案 B)
+ALERT_HOLDING_SEVERE_DROP = "holding_severe_drop"
 
 
 def _now_iso() -> str:
@@ -379,6 +381,7 @@ def run(
         "n_failed": 0,
         "n_price_alerts": 0,
         "n_intraday_drops": 0,
+        "n_severe_drops": 0,
     }
     today_iso = _today_iso()
 
@@ -455,6 +458,24 @@ def run(
             stats["n_intraday_drops"] = len(drop_candidates)
             _push_price_alert_candidates(
                 conn, drop_candidates, ALERT_INTRADAY_DROP, today_iso,
+                dry_run=dry_run,
+                send_telegram=send_telegram,
+                send_discord=send_discord,
+                stats=stats,
+                mark_triggered_on_push=False,
+            )
+
+            # 持倉 + watchlist 急跌 -5%+(2026-05-19 主公拍板加,精英化方案 B)
+            try:
+                severe_candidates = pa.check_holding_severe_drop(conn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[INTRADAY-ALERTS] check_holding_severe_drop 失敗: %s", e,
+                )
+                severe_candidates = []
+            stats["n_severe_drops"] = len(severe_candidates)
+            _push_price_alert_candidates(
+                conn, severe_candidates, ALERT_HOLDING_SEVERE_DROP, today_iso,
                 dry_run=dry_run,
                 send_telegram=send_telegram,
                 send_discord=send_discord,

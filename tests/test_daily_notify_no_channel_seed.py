@@ -53,28 +53,30 @@ def test_no_channel_still_auto_seeds_paper_trades(
     tmp_db, monkeypatch, capsys,
 ):
     """--no-telegram --no-discord → main() exit 0 且 paper_trades 多一筆 row。"""
-    # 1) CLI args:date 固定 + 兩通道都關
+    # 1) CLI args:date 固定 + 兩通道都關 + 跳過 news refetch(避免 test 跑真網路)
     target_date = "2026-05-14"
     monkeypatch.setattr(sys, "argv", [
         "daily_notify.py",
         "--date", target_date,
         "--no-telegram",
         "--no-discord",
+        "--no-news",
     ])
 
     # 2) preload_snapshots 別碰 disk(test 用 tmp_path 空 DB)
     monkeypatch.setattr(db, "preload_snapshots", lambda *a, **k: {})
 
-    # 3) notify_top_picks 模擬「兩通道都關」回 {}
-    #    (不 mock real notify path,而是直接讓它回 {} 符合 production behaviour)
+    # 3) notify_* 模擬「兩通道都關」回 {}
+    #    elite mode(2026-05-19 default)走 notify_elite_top_picks;legacy 走 notify_top_picks。
+    #    本 test 沒傳 --legacy → 走 elite。mock 兩隻保證行為一致。
     notify_calls: list[dict] = []
 
     def _fake_notify(**kwargs):
         notify_calls.append(kwargs)
-        # send_telegram=False & send_discord=False → 模擬 notifier 回 {}
         return {}
 
     monkeypatch.setattr(daily_notify, "notify_top_picks", _fake_notify)
+    monkeypatch.setattr(daily_notify, "notify_elite_top_picks", _fake_notify)
 
     # 4) compute_top_picks 餵兩筆 picks(daily_notify 推播後 reuse 同一隻抓 picks)
     picks = [
@@ -100,7 +102,8 @@ def test_no_channel_still_auto_seeds_paper_trades(
     # exit 0:兩通道被使用者明確關掉,不是失敗
     assert exit_code == 0, f"exit code 該為 0,實際 {exit_code}"
 
-    # notify_top_picks 有被 call(send_telegram=False, send_discord=False)
+    # notify 有被 call(send_telegram=False, send_discord=False)
+    # elite mode 走 notify_elite_top_picks;legacy 走 notify_top_picks(若加 --legacy)
     assert len(notify_calls) == 1
     assert notify_calls[0]["send_telegram"] is False
     assert notify_calls[0]["send_discord"] is False
@@ -140,9 +143,11 @@ def test_dry_run_skips_auto_seed_even_when_no_channel(
         "--no-telegram",
         "--no-discord",
         "--dry-run",
+        "--no-news",
     ])
     monkeypatch.setattr(db, "preload_snapshots", lambda *a, **k: {})
     monkeypatch.setattr(daily_notify, "notify_top_picks", lambda **kw: {})
+    monkeypatch.setattr(daily_notify, "notify_elite_top_picks", lambda **kw: {})
 
     seed_called = {"v": False}
 

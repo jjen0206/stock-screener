@@ -32,6 +32,17 @@ jobs:
       - name: Fetch TWSE/TPEx stock warnings
         run: python scripts/fetch_stock_warnings.py
 
+      # 2026-05-19 主公拍板(精英化方案 B):比對昨日 vs 今日 active warning set,
+      # 只推「今日新增」的 (sid, warning_type)。沒新增 → silent(不推空訊息)。
+      # 走 alert_dedup 防同日重啟重推。
+      - name: Notify newly added warnings only
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scripts/notify_new_warnings.py
+
       # 把 SQLite stock_warnings + default_settlement_daily 兩張表 dump 成 CSV 進 repo。
       # data/cache.db 被 .gitignore (`data/*.db`),雲端 Streamlit 看不到 → 必須走
       # snapshot CSV 路徑(類似 news-notify.yml dump news.csv 進 data/twse_snapshot/)。
