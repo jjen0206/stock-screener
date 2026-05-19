@@ -15,7 +15,18 @@ name: Backfill Company Profiles LLM (one-shot manual)
 #
 # **不 commit cache.db** — 個資 / 大檔,只走 GH Release artifact channel。
 #
-# 預估 runtime(500 檔 batch × 2-5 s/call avg):20-40 min,留 120 min timeout 寬裕。
+# 預估 runtime(500 檔 batch × 5s sleep + ~2s Gemini = ~7s/檔):~58 min,留 120 min timeout 寬裕。
+#
+# 觸發模式:
+#   - workflow_dispatch:手動跑一次(GH UI > Actions > Run workflow)
+#   - schedule(0 * * * * UTC):2026-05-19 加,每小時 UTC 0 分 fire 一次,自動串接
+#     下一批 500 檔(coverage guard 控制停)。主公不用回 GH UI 點 5 次。
+#     - 每批 500 × ~7s = ~58 min,留 ~2 min margin 給 cron schedule overhead
+#     - 自動 offset 算法:SELECT COUNT(*) FROM company_profiles WHERE description
+#       IS NOT NULL,round down to nearest 500 → next batch_start。
+#     - 最後一批 2000:end(universe ~2715)合併跑,避免落單。
+#     - Coverage guard >= 99% 自動 noop(全跑完不浪費 runner)。
+#   - 全跑完後可手動移除 schedule 區塊(留著也是 noop,~2-3 min runner/fire)。
 
 on:
   workflow_dispatch:
@@ -52,6 +63,11 @@ on:
         description: "Dump 完上傳到 GH Release"
         required: false
         default: "true"
+  schedule:
+    # 2026-05-19:每小時 UTC 0 分自動跑下一批 500 檔(coverage guard 控制停)。
+    # 全市場 ~2715 檔 / 5 批 ≈ 5 hr 跑完;cron 觸發時 inputs.* 為 null,
+    # 下面所有 step 用 `inputs.X || '<fallback>'` 自動回退。
+    - cron: "0 * * * *"
 
 concurrency:
   group: backfill-company-profiles
@@ -95,24 +111,67 @@ jobs:
           print(f'[PRELOAD] {n}')
           "
 
+      - name: Coverage guard + auto batch offset
+        id: cov
+        # 1) 算 pure_stock universe 內 company_profiles.description IS NOT NULL 的覆蓋率
+        # 2) 算下一批 batch_start / batch_end(round down to nearest 500)
+        #    - 最後一批(>= 2000)合併到 universe 末端,避免落單
+        # 3) 覆蓋率 >= 99% 或 next_start >= universe size → skip 後續所有 step(cron noop)
+        # cron 觸發時 inputs.* 是 null,給後續 step 用的 fallback 從這裡來
+        run: |
+          python <<'PY'
+          import os
+          from src import database as db
+          from src.universe import pure_stock_universe
+          db.init_db()
+          universe = pure_stock_universe()
+          uni_set = set(universe)
+          uni_size = len(universe)
+          with db.get_conn() as c:
+              rows = c.execute(
+                  "SELECT stock_id FROM company_profiles "
+                  "WHERE description IS NOT NULL AND length(trim(description)) > 0"
+              ).fetchall()
+          have = sum(1 for r in rows if r[0] in uni_set)
+          coverage = (have / uni_size) if uni_size else 1.0
+          next_start = (have // 500) * 500
+          if next_start >= 2000:
+              next_start = 2000
+              next_end = max(uni_size, 3000)
+          else:
+              next_end = next_start + 500
+          skip = "true" if (coverage >= 0.99 or next_start >= uni_size) else "false"
+          print(f"[GUARD] coverage={coverage:.1%} ({have}/{uni_size}) "
+                f"next_batch={next_start}:{next_end} skip={skip}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"skip={skip}\n")
+              f.write(f"coverage={coverage:.4f}\n")
+              f.write(f"have={have}\n")
+              f.write(f"universe={uni_size}\n")
+              f.write(f"next_start={next_start}\n")
+              f.write(f"next_end={next_end}\n")
+          PY
+
       - name: Run company_profiles backfill (LLM mode)
+        if: steps.cov.outputs.skip != 'true'
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          ARGS="--universe ${{ inputs.universe }}"
-          ARGS="$ARGS --llm-call ${{ inputs.llm_call }}"
-          ARGS="$ARGS --batch-start ${{ inputs.batch_start }}"
-          ARGS="$ARGS --batch-end ${{ inputs.batch_end }}"
-          ARGS="$ARGS --sleep ${{ inputs.sleep }}"
+          ARGS="--universe ${{ inputs.universe || 'pure_stock' }}"
+          ARGS="$ARGS --llm-call ${{ inputs.llm_call || 'true' }}"
+          ARGS="$ARGS --batch-start ${{ inputs.batch_start || steps.cov.outputs.next_start }}"
+          ARGS="$ARGS --batch-end ${{ inputs.batch_end || steps.cov.outputs.next_end }}"
+          ARGS="$ARGS --sleep ${{ inputs.sleep || '5.0' }}"
           if [ "${{ inputs.regenerate }}" = "true" ]; then
             ARGS="$ARGS --regenerate"
           fi
-          ARGS="$ARGS --dump-format ${{ inputs.dump_format }}"
+          ARGS="$ARGS --dump-format ${{ inputs.dump_format || 'parquet' }}"
           echo "Running: python scripts/backfill_company_profiles.py $ARGS"
           python scripts/backfill_company_profiles.py $ARGS
 
       - name: Verify backfilled rows
+        if: steps.cov.outputs.skip != 'true'
         run: |
           python -c "
           from src import database as db
@@ -123,12 +182,12 @@ jobs:
           "
 
       - name: Upload snapshot to GitHub Release
-        if: inputs.upload_release == 'true'
+        if: steps.cov.outputs.skip != 'true' && (inputs.upload_release || 'true') == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          FMT="${{ inputs.dump_format }}"
+          FMT="${{ inputs.dump_format || 'parquet' }}"
           if [ "$FMT" = "parquet" ]; then
             FILE="data/twse_snapshot/company_profiles.parquet"
           else
@@ -139,7 +198,10 @@ jobs:
             exit 0
           fi
           TAG="snapshot-company-profiles-$(date +%Y-%m-%d)"
-          NOTES="Backfill company_profiles $(stat -c%s "$FILE") bytes (batch ${{ inputs.batch_start }}:${{ inputs.batch_end }} universe=${{ inputs.universe }})"
+          BSTART="${{ inputs.batch_start || steps.cov.outputs.next_start }}"
+          BEND="${{ inputs.batch_end || steps.cov.outputs.next_end }}"
+          UNI="${{ inputs.universe || 'pure_stock' }}"
+          NOTES="Backfill company_profiles $(stat -c%s "$FILE") bytes (batch ${BSTART}:${BEND} universe=${UNI})"
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "[RELEASE] tag $TAG 已存在,直接 upload --clobber"
           else
@@ -165,7 +227,7 @@ jobs:
           echo "[RELEASE] uploaded $FILE to $TAG"
 
       - name: Commit .snapshot_releases.json (manifest only)
-        if: inputs.upload_release == 'true'
+        if: steps.cov.outputs.skip != 'true' && (inputs.upload_release || 'true') == 'true'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
