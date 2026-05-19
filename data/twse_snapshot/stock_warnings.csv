@@ -1,208 +1,216 @@
 stock_id,warning_type,announced_date,effective_from,effective_to,reason,source_url,fetched_at
-1213,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-1538,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-1591,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達30.33%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-2314,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-2321,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-2380,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-2911,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-3018,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-3064,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-3131,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣315元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-31351,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達26.26%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣62元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3163,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣140元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3466,attention,2026-05-18,2026-05-18,,最近六個營業日(自當日之前一個營業日起)之借券賣出成交量占總成交量比率達9.04%，當日之前一個營業日借券賣出成交量較最近六十個營業日(自當日之前一個營業日起)之日平均借券賣出成交量放大為8倍(第十二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3491,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達170.4%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3498,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.79%(第一款)當日週轉率達15.75%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3498,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3508,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-3577,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達29.5%，凱基證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為42.76%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3593,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-3624,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達36.41%(第一款)當日之成交量較最近六十個營業日日平均成交量放大6.4倍(第三款)當日週轉率達21.25%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3629,method_changed,2026-05-18,2026-05-18,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-3632,method_changed,2026-05-18,2026-05-18,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-3664,method_changed,2026-05-18,2026-05-18,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-36805,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達33.04%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3710,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-4163,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達27.17%，當日之成交量較最近六十個營業日日平均成交量放大11.88倍(第三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4529,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-4609,method_changed,2026-05-18,2026-05-18,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-4804,full_cash,2026-05-18,2026-05-18,,停止交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-4943,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-4971,attention,2026-05-18,2026-05-18,,當日本益比為140.67、股價淨值比為13.68且為其所屬產業類別股價淨值比之2.63倍、當日週轉率達5.61%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4971,disposition,2026-05-18,2026-05-19,2026-06-01,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-5274,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣1675元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5291,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達167.03%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5301,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-5355,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-5392,attention,2026-05-18,2026-05-18,,最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達66.39%，當日之前一個營業日當日沖銷成交量占總成交量達70.39%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5701,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-6173,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達33.07%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達190.71%(第二款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達164.33%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6207,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.11%(第一款)當日之成交量較最近六十個營業日日平均成交量放大8.5倍(第三款)當日週轉率達49.66%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6217,attention,2026-05-18,2026-05-18,,當日本益比為N/A、股價淨值比為11.37且為其所屬產業類別股價淨值比之2.7倍、當日週轉率達6.43%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6225,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-6236,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-6274,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣195元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6485,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達28.31%，當日之成交量較最近六十個營業日日平均成交量放大6.08倍(第三款)當日週轉率達12.44%(第四款)凱基證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為37.96%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6488,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣137元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6588,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達169.34%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-67152,attention,2026-05-18,2026-05-18,,最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達198.19%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達219.49%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6762,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達25.97%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣42元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6806,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-6829,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達30.52%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-722723,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達31.05%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-724481,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.39%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-725744,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.83%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-725744,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-736436,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達37.44%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8027,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.73%(第一款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達187.3%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達166.17%(第二款)當日週轉率達5.33%(第四款)當日本益比為N/A、股價淨值比為10.41且為其所屬產業類別股價淨值比之4.77倍、單一投資人當日賣出該有價證券之成交金額達1.68億元，且占當日該有價證券之總成交金額11.39%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-80273,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達39.16%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-80273,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8043,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達32.26%(第一款)當日之成交量較最近六十個營業日日平均成交量放大8.19倍(第三款)當日週轉率達56.84%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8069,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達31.99%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8091,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達32.68%(第一款)當日之成交量較最近六十個營業日日平均成交量放大6.01倍(第三款)當日週轉率達12.05%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-80914,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.59%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8093,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-8101,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-8277,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-8291,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達59.42%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達370.94%(第二款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達149.6%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達287.33%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8291,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-8444,method_changed,2026-05-18,2026-05-18,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-18T12:49:00+00:00
-8455,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達34.49%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-9110,method_changed,2026-05-18,2026-05-18,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-18T12:49:00+00:00
-2066,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達32.38%(第一款)當日之成交量較最近六十個營業日日平均成交量放大16.75倍(第三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-2221,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達30.45%(第一款)當日之成交量較最近六十個營業日日平均成交量放大15.75倍(第三款)當日週轉率達18.04%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3135,disposition,2026-05-15,2026-05-18,2026-05-29,連續五次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-31351,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達27.18%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣94元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-31351,disposition,2026-05-15,2026-05-18,2026-05-29,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-31352,disposition,2026-05-15,2026-05-18,2026-05-29,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3219,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達30.04%(第一款)元大證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為41.34%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3228,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達25.01%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣43元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3363,attention,2026-05-15,2026-05-15,,當日本益比為N/A、股價淨值比為16.67且為其所屬產業類別股價淨值比之2.31倍、當日週轉率達5.23%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3374,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達31.86%(第一款)當日週轉率達17.54%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3498,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達44.91%(第一款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達206.26%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達208.48%(第二款)當日週轉率達12.38%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-3537,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)之日平均成交量較最近六十個營業日日平均成交量放大為5.64倍，當日成交量較最近六十個營業日之日平均成交量放大為12.25倍(第九款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-36805,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達43.04%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4749,attention,2026-05-15,2026-05-15,,當日本益比為80.05、股價淨值比為10.53且為其所屬產業類別股價淨值比之1.98倍、當日週轉率達5.01%、元大證券公司當日買進該有價證券之成交金額達13.15億元，且占當日該有價證券之總成交金額26.99%、元大證券公司當日賣出該有價證券之成交金額達13.17億元，且占當日該有價證券之總成交金額27.03%、摩根士丹利證券公司當日賣出該有價證券之成交金額達4.88億元，且占當日該有價證券之總成交金額10.01%、單一投資人當日賣出該有價證券之成交金額達4.88億元，且占當日該有價證券之總成交金額10.01%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4966,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達28.46%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣131元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4971,attention,2026-05-15,2026-05-15,,當日本益比為138.51、股價淨值比為13.47且為其所屬產業類別股價淨值比之2.54倍、當日週轉率達6.94%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-4979,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達26.45%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣129元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5228,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達31.46%(第一款)當日週轉率達9.46%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5228,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-5351,attention,2026-05-15,2026-05-15,,最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達62.84%，當日之前一個營業日當日沖銷成交量占總成交量達72.8%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-5392,attention,2026-05-15,2026-05-15,,最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達62.24%，當日之前一個營業日當日沖銷成交量占總成交量達68.35%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6173,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達35.88%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6208,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達28.59%，當日之成交量較最近六十個營業日日平均成交量放大7.82倍(第三款)當日週轉率達7.8%(第四款)凱基證券公司當日受託賣出該有價證券之成交量占當日該有價證券總成交量之比率為37.92%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6217,attention,2026-05-15,2026-05-15,,當日本益比為N/A、股價淨值比為11.58且為其所屬產業類別股價淨值比之2.77倍、當日週轉率達9.95%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6237,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)之日平均成交量較最近六十個營業日日平均成交量放大為5.83倍，當日成交量較最近六十個營業日之日平均成交量放大為13.93倍(第九款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6419,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達38.43%(第一款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達181.88%(第二款)當日週轉率達9%(第四款)元大證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為33.61%，元大證券公司當日受託賣出該有價證券之成交量占當日該有價證券總成交量之比率為34.63%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6449,attention,2026-05-15,2026-05-15,,115年5月14日至115年5月15日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-18T12:49:00+00:00
-6683,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達29.83%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣475元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6829,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達32.59%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-6829,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-700351,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達49.14%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-724481,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達39.01%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-724481,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-725744,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達46.48%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-7751,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價跌幅達26.22%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣315元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-7751,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8027,attention,2026-05-15,2026-05-15,,當日本益比為N/A、股價淨值比為9.47且為其所屬產業類別股價淨值比之4.42倍、當日週轉率達5.38%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-80273,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達39.16%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8069,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達33.59%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8091,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達23.56%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣46元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8291,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達59.5%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達294.44%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達242.37%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8444,attention,2026-05-15,2026-05-15,,最近六個營業日(含當日)累積之最後成交價漲幅達33.96%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-18T12:49:00+00:00
-8444,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-2492,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3026,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-31351,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4966,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6173,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6263,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6831,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-8069,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8114,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-8291,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8358,disposition,2026-05-14,2026-05-15,2026-05-28,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-5464,disposition,2026-05-13,2026-05-14,2026-05-27,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-7769,disposition,2026-05-13,2026-05-14,2026-05-27,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-8042,disposition,2026-05-13,2026-05-14,2026-05-27,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-80426,disposition,2026-05-13,2026-05-14,2026-05-27,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-1809,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-2059,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3450,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3653,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3664,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4979,disposition,2026-05-12,2026-05-13,2026-05-26,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-49793,disposition,2026-05-12,2026-05-13,2026-05-26,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-49794,disposition,2026-05-12,2026-05-13,2026-05-26,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-67152,disposition,2026-05-12,2026-05-13,2026-05-26,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-7751,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-80426,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-911608,disposition,2026-05-12,2026-05-13,2026-05-26,連續五次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3016,disposition,2026-05-11,2026-05-12,2026-05-25,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-30165,disposition,2026-05-11,2026-05-12,2026-05-25,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3026,disposition,2026-05-11,2026-05-12,2026-05-25,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-4561,disposition,2026-05-11,2026-05-12,2026-05-25,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6173,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6182,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-61827,disposition,2026-05-11,2026-05-12,2026-05-25,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-61828,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6488,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8227,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8291,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-1595,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-15952,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3532,disposition,2026-05-08,2026-05-11,2026-05-22,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-4991,disposition,2026-05-08,2026-05-11,2026-05-22,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-5464,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6274,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-62745,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6405,disposition,2026-05-08,2026-05-11,2026-05-22,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-8042,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-80426,disposition,2026-05-08,2026-05-11,2026-05-22,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-2426,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-30165,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3030,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-3455,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3581,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4951,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-5386,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6861,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-1597,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-2233,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-22331,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-2454,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-2486,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-24866,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3016,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-30165,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3163,disposition,2026-05-06,2026-05-07,2026-05-20,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4542,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-45421,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4764,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-4908,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6683,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8064,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8291,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-2455,disposition,2026-05-05,2026-05-06,2026-05-19,最近十個營業日已有六次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-24552,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-24553,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6405,disposition,2026-05-05,2026-05-06,2026-05-19,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-8027,disposition,2026-05-05,2026-05-06,2026-05-19,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-80273,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3167,disposition,2026-05-04,2026-05-05,2026-05-18,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-31672,disposition,2026-05-04,2026-05-05,2026-05-18,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-4951,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6234,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-6658,disposition,2026-05-04,2026-05-05,2026-05-18,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-6861,disposition,2026-05-04,2026-05-05,2026-05-18,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-18T12:49:00+00:00
-731240,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-9949,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-8291,disposition,2026-04-30,2026-05-04,2026-05-15,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-18T12:49:00+00:00
-3105,default_settlement,2026-04-28,2026-04-28,,"穩懋 3105 違約交割 8,670 萬(申報券商:群益永和)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
-3105,default_settlement,2026-04-27,2026-04-27,,"穩懋 3105 違約交割 9,670 萬(申報券商:新光桃園 / 國泰敦南 / 群益永和 / 永豐羅東 / 永豐天母)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
-5274,default_settlement,2026-04-27,2026-04-27,,"信驊 5274 違約交割 3,284 萬(申報券商:玉山景美)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
-8358,default_settlement,2026-04-22,2026-04-22,,"金居 8358 違約交割 2,344 萬(申報券商:聯邦忠孝)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
-8358,default_settlement,2026-04-21,2026-04-21,,金居 8358 違約交割 1.11 億(申報券商:群益西松),https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
-3081,default_settlement,2026-04-14,2026-04-14,,"聯亞 3081 違約交割 6,890 萬(申報券商:華南永昌)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-18T12:49:00+00:00
+1213,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+1538,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+1591,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達38.91%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+2314,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+2321,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+2380,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+2911,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+3018,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+3064,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+3228,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達28.39%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣46.5元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3236,attention,2026-05-19,2026-05-19,,最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達60.13%，當日之前一個營業日當日沖銷成交量占總成交量達62.02%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3363,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣145元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3491,attention,2026-05-19,2026-05-19,,當日本益比為193.11、股價淨值比為34.85且為其所屬產業類別股價淨值比之4.99倍、當日週轉率達9.57%、元大證券公司當日賣出該有價證券之成交金額達30.19億元，且占當日該有價證券之總成交金額25.07%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3498,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達30.64%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3508,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+3529,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達28.72%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣805元(第一款)摩根士丹利證券公司當日受託賣出該有價證券之成交量占當日該有價證券總成交量之比率為25.32%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3577,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達33.35%(第一款)當日之成交量較最近六十個營業日日平均成交量放大10.69倍(第三款)當日週轉率達6.89%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3593,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+3615,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達30.94%(第一款)當日週轉率達8.12%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3624,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達38.47%(第一款)當日之成交量較最近六十個營業日日平均成交量放大9倍(第三款)當日週轉率達34.95%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3629,method_changed,2026-05-19,2026-05-19,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+3632,method_changed,2026-05-19,2026-05-19,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+3664,method_changed,2026-05-19,2026-05-19,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+3680,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣88元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3710,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+4529,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+4609,method_changed,2026-05-19,2026-05-19,,變更交易方法 / 分盤交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+4749,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣190元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+4804,full_cash,2026-05-19,2026-05-19,,停止交易,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+4943,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+4971,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣150元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+4979,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達23.87%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣136元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+49794,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達26.17%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣72元(第一款)最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣72元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+5291,attention,2026-05-19,2026-05-19,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達182.28%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+5301,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+5321,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達28.1%，當日之成交量較最近六十個營業日日平均成交量放大6.34倍(第三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+5355,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+5701,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+6208,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達29.43%，當日之成交量較最近六十個營業日日平均成交量放大6.14倍(第三款)當日週轉率達7.06%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6217,attention,2026-05-19,2026-05-19,,當日本益比為N/A、股價淨值比為10.25且為其所屬產業類別股價淨值比之2.47倍、當日週轉率達7.93%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6217,disposition,2026-05-19,2026-05-20,2026-06-02,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6225,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+6236,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+6498,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)之日平均成交量較最近六十個營業日日平均成交量放大為5.55倍，當日成交量較最近六十個營業日之日平均成交量放大為5.15倍(第九款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6640,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣185元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6642,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達28.45%，當日之成交量較最近六十個營業日日平均成交量放大10.74倍(第三款)當日週轉率達8.14%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6643,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣135元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6683,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價跌幅達31.47%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6806,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法:分盤集合競價,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+722723,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達34.09%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+724481,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達45.79%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+7734,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣645元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+7828,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣245元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+80273,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達29.48%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣72元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8043,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達30.97%(第一款)當日週轉率達23.98%(第四款)最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達60.36%，當日之前一個營業日當日沖銷成交量占總成交量達69.68%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8071,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)之日平均成交量較最近六十個營業日日平均成交量放大為5.81倍，當日成交量較最近六十個營業日之日平均成交量放大為12.59倍(第九款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8091,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達29.12%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣73.5元(第一款)當日週轉率達9.59%(第四款)最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣73.5元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8091,disposition,2026-05-19,2026-05-20,2026-06-02,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+80914,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達28.22%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣56.75元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+80914,disposition,2026-05-19,2026-05-20,2026-06-02,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8093,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+8096,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)之累積週轉率為86.71%，當日週轉率達26.79%(第十款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8101,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+8277,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+8291,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達59.47%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達417.73%(第二款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達198.26%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達289.33%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8291,disposition,2026-05-19,2026-05-20,2026-06-02,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8291,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+8444,method_changed,2026-05-19,2026-05-19,,變更交易方法,https://www.tpex.org.tw/openapi/v1/tpex_cmode,2026-05-19T12:22:03+00:00
+8455,attention,2026-05-19,2026-05-19,,最近六個營業日(含當日)累積之最後成交價漲幅達36.96%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+9110,method_changed,2026-05-19,2026-05-19,,TWSE 變更交易方法,https://openapi.twse.com.tw/v1/exchangeReport/TWT85U,2026-05-19T12:22:03+00:00
+050328,attention,2026-05-18,2026-05-18,,115年5月15日至115年5月18日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+1591,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達30.33%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3008,attention,2026-05-18,2026-05-18,,115年5月15日至115年5月18日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+3131,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣315元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+31351,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達26.26%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣62元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3163,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣140元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3466,attention,2026-05-18,2026-05-18,,最近六個營業日(自當日之前一個營業日起)之借券賣出成交量占總成交量比率達9.04%，當日之前一個營業日借券賣出成交量較最近六十個營業日(自當日之前一個營業日起)之日平均借券賣出成交量放大為8倍(第十二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3491,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達170.4%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3498,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.79%(第一款)當日週轉率達15.75%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3498,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3577,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達29.5%，凱基證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為42.76%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3624,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達36.41%(第一款)當日之成交量較最近六十個營業日日平均成交量放大6.4倍(第三款)當日週轉率達21.25%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3665,attention,2026-05-18,2026-05-18,,115年5月15日至115年5月18日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+36805,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達33.04%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+4163,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達27.17%，當日之成交量較最近六十個營業日日平均成交量放大11.88倍(第三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+4971,attention,2026-05-18,2026-05-18,,當日本益比為140.67、股價淨值比為13.68且為其所屬產業類別股價淨值比之2.63倍、當日週轉率達5.61%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+4971,disposition,2026-05-18,2026-05-19,2026-06-01,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+5274,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣1675元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+5291,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達167.03%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+5392,attention,2026-05-18,2026-05-18,,最近六個營業日(自當日之前一個營業日起)之當日沖銷成交量占總成交量比率達66.39%，當日之前一個營業日當日沖銷成交量占總成交量達70.39%（第十三款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6173,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達33.07%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達190.71%(第二款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達164.33%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6207,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.11%(第一款)當日之成交量較最近六十個營業日日平均成交量放大8.5倍(第三款)當日週轉率達49.66%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6217,attention,2026-05-18,2026-05-18,,當日本益比為N/A、股價淨值比為11.37且為其所屬產業類別股價淨值比之2.7倍、當日週轉率達6.43%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6274,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣195元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6449,disposition,2026-05-18,2026-05-19,2026-06-01,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+6485,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達28.31%，當日之成交量較最近六十個營業日日平均成交量放大6.08倍(第三款)當日週轉率達12.44%(第四款)凱基證券公司當日受託買進該有價證券之成交量占當日該有價證券總成交量之比率為37.96%(第五款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6488,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣137元(第十一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6531,attention,2026-05-18,2026-05-18,,115年5月6日至115年5月18日等九個營業日已有五次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+6588,attention,2026-05-18,2026-05-18,,最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達169.34%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+67152,attention,2026-05-18,2026-05-18,,最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達198.19%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達219.49%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6762,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達25.97%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣42元(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6829,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達30.52%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+6831,attention,2026-05-18,2026-05-18,,115年5月15日至115年5月18日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+6924,attention,2026-05-18,2026-05-18,,115年5月15日至115年5月18日連續二次,https://openapi.twse.com.tw/v1/announcement/notetrans,2026-05-19T12:22:03+00:00
+722723,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達31.05%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+724481,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.39%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+725744,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達45.83%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+725744,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+736436,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價跌幅達37.44%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8027,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.73%(第一款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達187.3%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達166.17%(第二款)當日週轉率達5.33%(第四款)當日本益比為N/A、股價淨值比為10.41且為其所屬產業類別股價淨值比之4.77倍、單一投資人當日賣出該有價證券之成交金額達1.68億元，且占當日該有價證券之總成交金額11.39%(第六款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+80273,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達39.16%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+80273,disposition,2026-05-18,2026-05-19,2026-06-01,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8043,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達32.26%(第一款)當日之成交量較最近六十個營業日日平均成交量放大8.19倍(第三款)當日週轉率達56.84%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8069,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達31.99%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8091,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達32.68%(第一款)當日之成交量較最近六十個營業日日平均成交量放大6.01倍(第三款)當日週轉率達12.05%(第四款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+80914,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達30.59%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8291,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達59.42%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達370.94%(第二款)最近六十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達149.6%(第二款)最近九十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達287.33%(第二款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+8455,attention,2026-05-18,2026-05-18,,最近六個營業日(含當日)累積之最後成交價漲幅達34.49%(第一款),https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information,2026-05-19T12:22:03+00:00
+3135,disposition,2026-05-15,2026-05-18,2026-05-29,連續五次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+31351,disposition,2026-05-15,2026-05-18,2026-05-29,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+31352,disposition,2026-05-15,2026-05-18,2026-05-29,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+5228,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6829,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+724481,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+7751,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8444,disposition,2026-05-15,2026-05-18,2026-05-29,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+2492,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3026,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+31351,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4966,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6173,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6263,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6831,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+8069,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8114,disposition,2026-05-14,2026-05-15,2026-05-28,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+8291,disposition,2026-05-14,2026-05-15,2026-05-28,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8358,disposition,2026-05-14,2026-05-15,2026-05-28,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+5464,disposition,2026-05-13,2026-05-14,2026-05-27,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+7769,disposition,2026-05-13,2026-05-14,2026-05-27,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+8042,disposition,2026-05-13,2026-05-14,2026-05-27,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+80426,disposition,2026-05-13,2026-05-14,2026-05-27,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+1809,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+2059,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3450,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3653,disposition,2026-05-12,2026-05-13,2026-05-26,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3664,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4979,disposition,2026-05-12,2026-05-13,2026-05-26,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+49793,disposition,2026-05-12,2026-05-13,2026-05-26,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+49794,disposition,2026-05-12,2026-05-13,2026-05-26,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+67152,disposition,2026-05-12,2026-05-13,2026-05-26,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+7751,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+80426,disposition,2026-05-12,2026-05-13,2026-05-26,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+911608,disposition,2026-05-12,2026-05-13,2026-05-26,連續五次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3016,disposition,2026-05-11,2026-05-12,2026-05-25,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+30165,disposition,2026-05-11,2026-05-12,2026-05-25,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3026,disposition,2026-05-11,2026-05-12,2026-05-25,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+4561,disposition,2026-05-11,2026-05-12,2026-05-25,連續5個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6173,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6182,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+61827,disposition,2026-05-11,2026-05-12,2026-05-25,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+61828,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6488,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8227,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8291,disposition,2026-05-11,2026-05-12,2026-05-25,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+1595,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+15952,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3532,disposition,2026-05-08,2026-05-11,2026-05-22,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+4991,disposition,2026-05-08,2026-05-11,2026-05-22,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+5464,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6274,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+62745,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6405,disposition,2026-05-08,2026-05-11,2026-05-22,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+8042,disposition,2026-05-08,2026-05-11,2026-05-22,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+80426,disposition,2026-05-08,2026-05-11,2026-05-22,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+2426,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+30165,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3030,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+3455,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3581,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4951,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+5386,disposition,2026-05-07,2026-05-08,2026-05-21,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6861,disposition,2026-05-07,2026-05-08,2026-05-21,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+1597,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+2233,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+22331,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+2454,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+2486,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+24866,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3016,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+30165,disposition,2026-05-06,2026-05-07,2026-05-20,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3163,disposition,2026-05-06,2026-05-07,2026-05-20,最近10個營業日內有6個營業日,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4542,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+45421,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4764,disposition,2026-05-06,2026-05-07,2026-05-20,連續三次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+4908,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6683,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8064,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+8291,disposition,2026-05-06,2026-05-07,2026-05-20,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+2455,disposition,2026-05-05,2026-05-06,2026-05-19,最近十個營業日已有六次 / 第二次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+24552,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+24553,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6405,disposition,2026-05-05,2026-05-06,2026-05-19,連續三次 / 第一次處置,https://openapi.twse.com.tw/v1/announcement/punish,2026-05-19T12:22:03+00:00
+8027,disposition,2026-05-05,2026-05-06,2026-05-19,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+80273,disposition,2026-05-05,2026-05-06,2026-05-19,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+31672,disposition,2026-05-04,2026-05-05,2026-05-18,轉(交)換公司債之標的證券經本中心或臺灣證券交易所發布處置,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+4951,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+6234,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+731240,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+9949,disposition,2026-05-04,2026-05-05,2026-05-18,因連續3個營業日達本中心作業要點第四條第一項第一款,https://www.tpex.org.tw/openapi/v1/tpex_disposal_information,2026-05-19T12:22:03+00:00
+3105,default_settlement,2026-04-28,2026-04-28,,"穩懋 3105 違約交割 8,670 萬(申報券商:群益永和)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
+3105,default_settlement,2026-04-27,2026-04-27,,"穩懋 3105 違約交割 9,670 萬(申報券商:新光桃園 / 國泰敦南 / 群益永和 / 永豐羅東 / 永豐天母)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
+5274,default_settlement,2026-04-27,2026-04-27,,"信驊 5274 違約交割 3,284 萬(申報券商:玉山景美)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
+8358,default_settlement,2026-04-22,2026-04-22,,"金居 8358 違約交割 2,344 萬(申報券商:聯邦忠孝)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
+8358,default_settlement,2026-04-21,2026-04-21,,金居 8358 違約交割 1.11 億(申報券商:群益西松),https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
+3081,default_settlement,2026-04-14,2026-04-14,,"聯亞 3081 違約交割 6,890 萬(申報券商:華南永昌)",https://www.tpex.org.tw/www/zh-tw/bulletin/breach,2026-05-19T12:22:03+00:00
