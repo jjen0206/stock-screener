@@ -308,6 +308,9 @@ SCHEMA: list[str] = [
                             ('active', 'win', 'lose', 'timeout_win', 'timeout_lose')),
         return_pct          REAL,
         notes               TEXT,
+        consensus_multiplier REAL DEFAULT NULL,
+        position_pct         REAL DEFAULT NULL,
+        conviction_score     REAL DEFAULT NULL,
         created_at          TEXT NOT NULL,
         updated_at          TEXT,
         UNIQUE(sid, entry_date)
@@ -642,6 +645,7 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute(stmt)
         _migrate_daily_picks_add_ml_prob(conn)
         _migrate_paper_trades_add_trailing(conn)
+        _migrate_paper_trades_add_p2_columns(conn)
         _migrate_analyst_targets_add_previous(conn)
         _migrate_ml_walkforward_add_split_method(conn)
         _migrate_vbt_grid_add_sharpe_daily(conn)
@@ -768,6 +772,39 @@ def _migrate_paper_trades_add_trailing(conn) -> None:
     if "trailing_level" not in cols:
         conn.execute(
             "ALTER TABLE paper_trades ADD COLUMN trailing_level INTEGER DEFAULT 0"
+        )
+
+
+def _migrate_paper_trades_add_p2_columns(conn) -> None:
+    """Phase 2 觀察機制(2026-05-19):加 3 欄到既有 paper_trades,把 P2-7
+    consensus_multiplier(衝突檢測後最終 multiplier)/ P2-8 position_pct
+    (Kelly × confidence 後建議倉位)/ conviction_score(EV 翻譯前的原始
+    composite score)從 Telegram 文字落地到 SQL,讓 30 天觀察後可歸因。
+
+      consensus_multiplier REAL    P2-7 後最終 multiplier(例 1.0 / 1.25 / 1.5)
+      position_pct         REAL    P2-8 建議倉位 %(decimal,例 0.035 = 3.5%)
+      conviction_score     REAL    raw composite(ml_prob × strategy_weight ×
+                                   consensus_mult × theme_mult,EV 翻譯前)
+
+    SQLite 沒 ALTER TABLE ADD COLUMN IF NOT EXISTS。冪等(已存在 → no-op)。
+    舊 row 寫 NULL → 觀察期前的 trades 不歸因,只新進 daily_notify seed 的有值。
+    """
+    cols = {
+        r["name"] for r in conn.execute(
+            "PRAGMA table_info(paper_trades)"
+        ).fetchall()
+    }
+    if "consensus_multiplier" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN consensus_multiplier REAL"
+        )
+    if "position_pct" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN position_pct REAL"
+        )
+    if "conviction_score" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_trades ADD COLUMN conviction_score REAL"
         )
 
 

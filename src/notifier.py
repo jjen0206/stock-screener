@@ -365,11 +365,26 @@ def compute_top_picks(
 
     內部委派 `_select_top_picks`(notify_top_picks 用的同一隻);保留底線 helper
     當 module-internal 實作細節,公開介面從這裡走。
+
+    Phase 2 觀察機制(2026-05-19):額外跑 _enrich_picks_with_position_advice,
+    讓 daily_notify 的 auto_seed 路徑也能在 pick dict 上拿到 position_pct
+    (P2-8)。notify_top_picks 內也會再 enrich 一次(冪等,只是 overwrite 同值
+    advice),不會 double-charge。任何例外 silent skip,不擋整支腳本。
     """
-    return _select_top_picks(
+    picks = _select_top_picks(
         date, top_n=top_n, confluence_n=confluence_n,
         params=params, universe=universe,
     )
+    try:
+        _enrich_picks_with_position_advice(picks)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[NOTIFIER] compute_top_picks position advice enrich 整體失敗"
+        )
+        for p in picks:
+            p.setdefault("position_advice", None)
+            p.setdefault("position_pct", None)
+    return picks
 
 
 def _select_top_picks(
@@ -819,8 +834,36 @@ def _select_top_picks(
         if cap < effective_top_n:
             effective_top_n = cap
     out = qualified[:effective_top_n]
+    # Phase 2 觀察機制(2026-05-19):把 P2-7 consensus_multiplier 跟原始
+    # composite conviction_score 落到 pick top-level,讓 daily_notify 的
+    # auto_seed_from_picks 能寫進 paper_trades 做 30 天歸因分析。
+    # 計算邏輯跟 _compute_pick_score 的 weighted_ml 對齊:
+    #   conviction = ml_prob × avg(strategy_weights) × consensus_mult × theme_mult
+    # ml_prob 為 None(fallback weak picks)→ conviction = None。
+    from src.consensus import consensus_multiplier as _consensus_mult
     for i, p in enumerate(out, start=1):
         p["rank"] = i
+        cs_mult = _consensus_mult(p.get("consensus"))
+        p["consensus_multiplier"] = float(cs_mult)
+        matched_p = p.get("matched_strategies") or []
+        if strategy_weights and matched_p:
+            avg_w = (
+                sum(strategy_weights.get(s, 1.0) for s in matched_p)
+                / len(matched_p)
+            )
+        else:
+            avg_w = 1.0
+        theme_m = p.get("theme_multiplier", 1.0) or 1.0
+        ml_p = p.get("ml_prob")
+        if ml_p is None:
+            p["conviction_score"] = None
+        else:
+            try:
+                p["conviction_score"] = float(
+                    float(ml_p) * float(avg_w) * float(cs_mult) * float(theme_m)
+                )
+            except (TypeError, ValueError):
+                p["conviction_score"] = None
     if fallback_used:
         # 標 module 級 flag 給 format_top_picks_message 讀(避免 picks 為空時
         # caller 無法分辨「真的空」vs「fallback 也空」)。實際上 caller 只看
@@ -1132,10 +1175,12 @@ def _enrich_picks_with_position_advice(
     for p in picks:
         if not ps_on:
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
         sid = p.get("sid")
         if not sid:
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
         try:
             advice = _ps.suggest_position_size(
@@ -1147,6 +1192,7 @@ def _enrich_picks_with_position_advice(
         except Exception:  # noqa: BLE001
             logger.exception("[NOTIFIER] suggest_position_size 失敗 sid=%s", sid)
             p["position_advice"] = None
+            p["position_pct"] = None
             continue
 
         # 停損停利(用 pick["close"] 當 entry 推估;主公推播當下還沒進場)
@@ -1163,6 +1209,15 @@ def _enrich_picks_with_position_advice(
             except Exception:  # noqa: BLE001
                 logger.exception("[NOTIFIER] ATR stop/tp 失敗 sid=%s", sid)
         p["position_advice"] = advice
+        # Phase 2 觀察機制(2026-05-19):flatten position_pct 到 top-level,
+        # 讓 auto_seed_from_picks / 其他下游不用穿透 position_advice dict。
+        try:
+            p["position_pct"] = (
+                float(advice.get("position_pct"))
+                if advice.get("position_pct") is not None else None
+            )
+        except (TypeError, ValueError):
+            p["position_pct"] = None
 
 
 def format_premium_picks_block(
