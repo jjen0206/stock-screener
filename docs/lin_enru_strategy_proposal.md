@@ -1,328 +1,477 @@
-# 林恩如選股法 — 功能 Spec 探索報告
+# 林恩如選股法 — 功能 Spec 探索報告(v2:完全隔離架構)
 
-> **狀態**:純探索 / 等主公拍板，**尚未實作**。
-> **撰寫日期**:2026-05-19
-> **目的**:把林恩如「波段存股」哲學翻成可寫 code 的 spec、盤點現有資料 / 策略缺口、給 UI 位置與 paper trading 改造建議、誠實評估「跟現有功能差別 / 該不該做」。
-> **跟波段任務的關係**:另有一份 `swing_trading_proposal.md`(20週MA + 量價 + 1-6 月持有)由另一 session 同步寫。兩份**獨立功能、不 merge**，但基本面門檻可共用 feature(本文有對齊註記)。
-
----
-
-## TL;DR — 軍師建議
-
-**先做「方案 B(lite)」 — 純 backtest 驗證，不上 UI / 不動 paper trading。**
-
-理由:
-1. 林恩如哲學的 **「不停損」跟主公現有 paper_trading 的 `stop_price` + trailing stop (`_update_trailing_stop`) 邏輯衝突**，要動 schema(加 `disable_stop` flag)+ 改 `_evaluate_one`。動之前**先驗證林恩如方法在台股 2020-2026 真有 edge**，避免改一輪 paper trading 結果發現 alpha 是負的。
-2. 現有 `screen_long`(ROE+PE+殖利率+連續配息)跟林恩如有 ~50% overlap，但**林恩如多了「創 52 週新高」這個 timing 條件**，現在 codebase 完全沒有 52 週新高 feature(`volume_breakout` 只看 20 日)。先補這一個 feature + 寫 `screen_lin_enru` + 跑 backtester 比較,**1.5 天工作量**。
-3. 驗證有 alpha → 再做方案 A(full):新 tab + paper trading `disable_stop` 模式 + 完整出場規則。沒 alpha → 把 backtest 結果寫進報告當研究結論,**不上 UI 不加 strategy**(`feedback_no_pointless_work`)。
-
-**不建議首版做**:
-- 直接新增 tab(現有 PAGES 已 21 個，主公手機 sidebar 已經擠)
-- 改 paper_trading schema 加 `disable_stop`(在驗證 alpha 前不值得)
-- 「停利 +30%」當固定參數(林恩如真實做法是「達基本面評估的合理價」，每檔不同 — 簡化成 `target_pct` 固定值會失真，先用 backtester sweep 看 sweet spot 在哪)
+> **狀態**:純探索 / 等主公拍板,**尚未實作**。
+> **撰寫日期**:2026-05-19(v1)/ 2026-05-19(v2 改架構)
+> **架構決定**(主公拍板 2026-05-19):
+>   - 「我想把它拉出來 做一個獨立的功能 不要跟其他共用 比較不會混亂」
+>   - **採完全隔離架構**:獨立 feature 模組、獨立 strategy、獨立 paper trading table、獨立 UI、獨立 cron、SQLite table prefix 隔離
+>   - 放棄 v1 報告裡「跟波段共用 `eps_positive_years` + `strategy_profile` schema」的設計
+> **跟波段任務的關係**:**完全切割**,兩邊各自實作所需 feature / schema,不互相 import / refactor / 共用 helper
 
 ---
 
-## Part 1：林恩如方法 → 可執行 spec 轉譯
+## TL;DR — v2 軍師建議
+
+**先做「方案 B(lite,隔離版)」 — 純 backtest 驗證,不上 UI / 不開新表。**
+
+關鍵跟 v1 不變:
+1. **林恩如「不停損 + 達停利」哲學跟現有 paper_trading 衝突** — 既然要完全隔離,不再走「`paper_trades` 加 `strategy_profile` 欄位」的路徑,改開**新表 `lin_enru_trades`** 從一開始就 schema-level 設計「沒 stop_price」「沒 trailing」
+2. **現有 `screen_long` 跟 `screen_high_yield_stable` 沒有 52 週新高 timing** — 林恩如方法的精髓就在這個 timing,值得驗證有沒有 alpha
+3. **GATE 設計不變**:Phase B backtest 沒過 → 整包不上線
+
+跟 v1 不同(隔離後):
+1. **3 個 features helper 各自獨立寫,不抽 `screen_long._evaluate_long` 內邏輯** — 估工時 **+1.5h**
+2. **新開 `lin_enru_trades` 表**,不動 `paper_trades` schema、不加 `strategy_profile` 欄位 — schema 部分**反而 -2h**(不用走 SQLite status CHECK 重建表)
+3. **UI 不 reuse `render_picks_cards`** — 新寫 `src/lin_enru_ui_cards.py`,估 **+2h**
+4. **獨立 GHA workflow** — `lin-enru-daily.yml`(若 Phase D 上),估 **+1.5h**
+5. 全部 Phase A-D 完整版淨工時 **30-35h**(v1 估 30-40h,隔離反而沒爆增,因為 schema 簡化抵消 UI 重複)
+6. **若林恩如方法 backtest 證明沒 alpha → 整包 5 分鐘砍掉**(對比 v1 要 unwind `strategy_profile` 跨表 migration)
+
+---
+
+## Part 0:隔離原則(主公拍板)
+
+| 原則 | 具體實作 | 不能做的事 |
+|---|---|---|
+| 獨立 feature 模組 | `src/features/lin_enru/eps_streak.py` 等 | ❌ 不能 import `src/screener_long.py` 任何 helper |
+| 獨立 strategy 模組 | `src/strategies/lin_enru/screener.py` | ❌ 不能加進 `STRATEGY_LABELS` dict、不能進 `run_all_strategies` 聚合 |
+| 獨立 paper trading 表 | 新表 `lin_enru_trades`(schema 直接設計「沒 stop」) | ❌ 不能在 `paper_trades` 加 `strategy_profile` 欄位 |
+| 獨立 UI | `_page_lin_enru()` in `app.py` + 獨立 `src/lin_enru_ui_cards.py` | ❌ 不能塞進 `_page_long` / `_page_short` sub-tab |
+| 獨立 cron | `.github/workflows/lin-enru-daily.yml` | ❌ 不能掛 `daily-notify.yml` 既有 step |
+| SQLite namespace 隔離 | table prefix `lin_enru_*` 在同一個 `cache.db`(不另開檔) | ❌ 不能把 raw data 也複製一份(daily_prices / financials 仍共讀) |
+
+**主公接受的代價**:
+- 開發工時 +10-15%(部分 code 重複)
+- 主公要切到專屬 tab 才能看林恩如(這正是「獨立」本意)
+- 殖利率算法若日後改進,要同步改 2 處(`screen_long` 跟 `lin_enru` 各一)
+
+---
+
+## Part 1：林恩如方法 → 具體 spec(維持 v1)
 
 ### 1.1 進場三條件(全 AND)
 
-| # | 林恩如哲學 | 可寫 code 的條件 | 資料源(現有 / 缺) |
+| # | 哲學 | 條件 | 資料源 |
 |---|---|---|---|
-| A | 連續多年 EPS 正 | `financials.yearly` 連續 ≥ 5 年 `eps > 0` | **缺 feature**(現有只看季) |
-| B | 高殖利率穩定 | `consecutive_dividend_years ≥ 5` AND `dividend_yield ≥ 5%` | 兩個都**已有**(`screen_long` 內) |
-| C | 創 52 週新高 | `close ≥ MAX(close, 252 trading days)` 且 `close ≥ MAX(close, 252) × 0.99` | **缺 feature**(現有只 20 日) |
+| A | 連續多年 EPS 正 | `financials.yearly_eps` 連續 ≥ 5 年 > 0 | **缺 feature**(從 `financials.quarterly` 自加總,**林恩如自己 derive,不 reuse**) |
+| B | 高殖利率穩定 | `daily_metrics.dividend_yield >= 5%` AND `consecutive_dividend_years >= 5` | raw data 共用、helper **林恩如自己寫一份** |
+| C | 創 52 週新高 | `close >= MAX(close, 過去 252 個交易日) × 0.99` | `daily_prices` 共用、helper **林恩如自己寫**(不 refactor `screen_volume_breakout`) |
 
-**亮的初始假設 vs 林恩如書中描述**:
-- A 條件:亮給 N=5。林恩如書中常說「5-10 年」，5 年算入門門檻(2330 / 1216 / 2412 都過)。**可調參數** `eps_positive_years` 預設 5。
-- B 條件:殖利率 5% 比 `screen_high_yield_stable` 的 6% 寬鬆 — 林恩如的「高殖利率」是 vs 大盤(~3.5%)，不是絕對 6%。**可調參數** `min_dividend_yield` 預設 5.0。
-- C 條件:創新高定義有 3 種寫法
-  - C1:`close == MAX(close, 252)` 嚴格今日新高
-  - C2:`close ≥ MAX(close, 252) × 0.99` 近 1% 內(亮推薦,避免錯過盤中震盪)
-  - C3:`close ≥ MAX(high, 252)` 用日 high 不用 close(更嚴)
-  - **採 C2** — 跟現有 `screen_volume_breakout` 的「`highest_lookback=20` 突破 + 量比 ≥ 2.5」邏輯一致(只是把窗口從 20 → 252)
+### 1.2 出場規則(維持 v1)
 
-### 1.2 出場條件
-
-林恩如真實做法是「達合理價」，但「合理價」每檔不同(K-line 自由心證 / DDM / Graham number)，**code 化要簡化**:
-
-| # | 條件 | spec 建議 | 備註 |
-|---|---|---|---|
-| 1 | 達停利 | `unrealized_return ≥ target_pct` | 預設 30%，亮建議**走 backtester sweep**(15% / 20% / 30% / 50%)看哪個 EV 最高 |
-| 2 | 基本面崩 | `eps_quarterly` 連 **2 季** ≤ 0 | 強制出場，覆蓋「不停損」鐵則 |
-| 3 | 配息停發 | `cash_dividend_year` = 0 連 **1 年** | 強制出場(林恩如的「存股前提」失效) |
-| 4 | 不停損(刻意) | **無** `stop_pct` | 跟現有 `screen_volume_kd` / paper trading 完全相反 |
-
-亮的 caveat:**條件 2/3 等於「軟停損」** — 林恩如書中其實也允許這種「基本面破壞就跑」，不是宗教式硬抱。文字寫「不停損」但實際操作對「EPS 轉負」一定會跑。spec 要寫進去，不然就是失真版的林恩如。
-
-### 1.3 持有期 / 部位
-
-| 項目 | spec | 備註 |
+| 觸發 | 條件 | 出場 status / reason |
 |---|---|---|
-| `hold_days` | **無上限**(`hold_days = None`) | 現有 paper_trading `hold_days int` 必填 — 需 schema 改造，或塞個 9999 hack |
-| 單檔倉位 % | 5-10% | 跟現有波段一致;portfolio level 不在 strategy 內處理 |
-| 同類股上限 | 30%(產業集中度) | 進階,首版不做 |
-| 同時持有檔數 | 5-10 檔輪轉 | 進階,首版不做 |
+| 達停利 | `current_close >= entry × (1 + target_pct)`,target_pct=30%(可調) | `closed` / `target_hit` |
+| 基本面崩 | 最近 2 季 `financials.quarterly.eps` 都 ≤ 0 | `closed` / `fundamental_break` |
+| 配息中斷 | 最近 1 個會計年度 `cash_dividend == 0` | `closed` / `dividend_stop` |
+| 時間 cap | 進場後 750 交易日(約 3 年) | `closed` / `max_hold_timeout` |
+| 停損 | **完全沒有** | — |
+
+### 1.3 部位 / 輪轉
+- 首版**不做** portfolio rotation(賣 A 自動買 B);主公手動操作
+- 單檔倉位 5-10%,但首版**不做 portfolio sizing**;主公手動
 
 ---
 
-## Part 2：現有資料 / 策略對照盤點
+## Part 2：隔離後的檔案結構(file tree)
 
-### 2.1 三個進場條件 → 現有資料 / feature 覆蓋
+```
+src/
+├── features/
+│   └── lin_enru/                       # 🆕 林恩如專屬 feature module
+│       ├── __init__.py
+│       ├── eps_streak.py               # 連 N 年 EPS 正(自己讀 financials)
+│       ├── price_high.py               # 52 週新高判定
+│       └── dividend_stability.py       # 殖利率穩定度 + 連續配息(自己寫,不 reuse)
+│
+├── strategies/
+│   └── lin_enru/                       # 🆕 林恩如專屬 strategy module
+│       ├── __init__.py
+│       ├── screener.py                 # screen_lin_enru()  主邏輯
+│       └── params.py                   # DEFAULT_LIN_ENRU_PARAMS
+│
+├── lin_enru_paper_trading.py           # 🆕 lin_enru_trades 表的 CRUD + evaluate
+├── lin_enru_backtest.py                # 🆕 simulate_outcome_lin_enru + sweep runner
+├── lin_enru_ui_cards.py                # 🆕 卡片 helper(無 stop_loss 欄位)
+│
+├── strategies.py                       # 🚫 不動,17 套維持原樣
+├── screener_long.py                    # 🚫 不動
+├── paper_trading.py                    # 🚫 不動,paper_trades 表維持原 schema
+├── ui_cards.py                         # 🚫 不動
+└── database.py                         # ✏️ 加 CREATE TABLE lin_enru_trades 一段,其他不動
 
-| 林恩如條件 | 現有 feature / table | 缺口 | 補齊難度 |
-|---|---|---|---|
-| **A. 連續 N 年 EPS 正** | `financials.period_type='quarterly'`(只有季 EPS) | **沒有「年 EPS」聚合 feature**;現有 `screen_eps_acceleration` 只看 **5 季**(1.25 年) | 小:1 SQL 聚合 view 或一個 helper function — 用 `SUM(eps) GROUP BY year` 把季加成年 |
-| **B. 殖利率 ≥ 5% + 連續配息 ≥ 5 年** | `daily_metrics.dividend_yield`(TWSE 官方,優先);`dividend.cash_dividend` 年表 | **完全沒缺** — `screen_long._evaluate_long` 已有 `consecutive_dividend_years` 算法,直接 copy | **無** |
-| **C. 創 52 週新高** | `daily_prices.close`(252 trading days 滾動 max) | **完全沒這個 feature**;`screen_volume_breakout` 用 `highest_lookback=20`(20 日) | 小:1 SQL `MAX(close) OVER` 或 pandas rolling — 跟 ATR 計算同一個 `bulk_load_prices` 路徑 |
+app.py                                  # ✏️ 加 _page_lin_enru() + PAGES list 加 "🌱 存股輪轉"
 
-### 2.2 現有策略對照 — 跟林恩如有何差別
+.github/workflows/
+└── lin-enru-daily.yml                  # 🆕(Phase D 才加)獨立 cron,不掛 daily-notify
 
-| 策略 | 跟林恩如重疊 | 主要差別 | 結論 |
-|---|---|---|---|
-| `screen_long`(長線) | 高(殖利率 + 連續配息) | 多 ROE + PE 限制;**完全沒 timing 條件**(創新高) | **林恩如可視為 `screen_long` 的「去 PE/ROE + 加 52 週新高」變種** |
-| `screen_high_yield_stable`(策略 13) | 中(殖利率 + EPS 為正) | 只看 **4 季** EPS、要求殖利率 ≥ 6%、無 timing | 範圍更窄,不適合直接擴 |
-| `screen_eps_acceleration`(策略 12) | 低(EPS 但要加速) | 林恩如**要穩定 ≠ 加速**;條件相反 | 互斥 — 不能複用 |
-| `screen_revenue_acceleration`(策略 16) | 低(營收成長) | 林恩如**不必要 ≥ 30% YoY**,要穩定不要爆發 | 互斥 |
-| `screen_volume_breakout`(策略 10) | 中(突破新高) | 林恩如不要量比,窗口要 **252 日 ≠ 20 日** | 邏輯類似,需參數化 `highest_lookback` 才能 reuse |
-
-**亮的結論**:林恩如**不是現有策略的改包裝** — 創 52 週新高 + 連續 5 年 EPS 正 + 殖利率穩定的 AND 組合，在現有 17 套裡**沒有任何一套覆蓋**。值得新增。
-
-### 2.3 月營收 / 財報 backfill 現況(主公 2026-05 拍板)
-
-跟林恩如進場條件**直接相關**:
-- **dividend backfill** PR #29 改 alert-based(每月 1 號 09:00 推 Telegram + Discord,主公手動觸發),`[[project-backfill-quota-alert-pivot-2026-05-19]]`
-- **financials backfill** 同樣 alert-based(每月 1 號),林恩如 A 條件用的 **`yearly` EPS** 也走這條路徑 — backfill 沒跑就沒資料
-- **monthly revenue backfill** 主公 2026-05 暫停 FinMind backfill,6/1 恢復 — **林恩如本身不需要月營收**(只看年 EPS),這條 unblock 不影響
-
-**啟動風險**:如果主公的 dividend / financials 沒 backfill 滿 5 年(從 2020-2026)，A + B 條件會 **filter 掉大部分股票**(`fin_count = 0` → 回空 DataFrame，跟 `screen_long._data_availability` 同樣 fallback 邏輯)。**先寫策略前要 sanity check** `SELECT COUNT(*) FROM financials WHERE period_type='yearly' GROUP BY stock_id HAVING COUNT(*) >= 5` 看實際覆蓋率。
-
----
-
-## Part 3：UI 位置提案
-
-主公拍板「**單獨的功能**」+「不要塞進波段或長線」。三方案對照:
-
-| 方案 | 優點 | 缺點 | 適合度 |
-|---|---|---|---|
-| **X. 新增 tab `🌱 存股輪轉`** | 真正「單獨」,符合主公拍板 | PAGES 從 21 → 22 個,手機 sidebar 更擠 | ⭐⭐⭐⭐ |
-| Y. 長線頁加 sub-tab「📌 林恩如模式」 | 不增 tab 數;同類聚合 | 違反主公「不塞進長線」明文要求 | ⭐ (排除) |
-| Z. 純當 strategy 17b,塞進短線 | 重用既有 tabs 顏色分類 | 林恩如是長期持有 ≠ 短線本質;放短線會誤導 | ⭐ (排除) |
-| **W. 不上 UI,純 backtester / system_brief 報告**(方案 B lite) | 0 UI 變動成本;先驗證 alpha | 主公看不到日常推薦 | ⭐⭐⭐⭐⭐(首版推薦) |
-
-**亮推薦**:
-- **首版做 W**(不上 UI,純 backtester) — 驗證有 alpha 再上 X
-- **第二版做 X** — 加新 tab,顏色用綠色系跟「💎 長線」區隔(長線藍 / 存股綠)
-- **X tab 內結構**:
-  ```
-  🌱 存股輪轉(林恩如)
-  ├─ 主公須知 caption(不停損 / 達停利才賣 / 持有期可達 1-3 年)
-  ├─ 「執行掃描」按鈕(跟 _page_long 同模式 lazy run)
-  ├─ 卡片清單(同 `render_picks_cards`,但**不顯示 stop_loss 欄位**)
-  ├─ 「加入存股追蹤」按鈕 → 寫 paper_trades 但用 `target_only` 模式
-  └─ 已追蹤清單(浮動報酬 + 距離停利 % + 基本面狀態紅綠燈)
-  ```
-
----
-
-## Part 4：「不停損設停利」整合 Paper Trading
-
-### 4.1 現有 paper_trading 規則 vs 林恩如
-
-| 項目 | 現有 `paper_trades` schema | 林恩如需求 | 衝突? |
-|---|---|---|---|
-| `stop_price` | `REAL NOT NULL` | **不要停損** | **衝突** — schema 強制要 |
-| `hold_days` | `INTEGER NOT NULL DEFAULT 5` | **無上限** | **衝突** — 短期固定 vs 長期不定 |
-| `target_price` | `REAL NOT NULL`(預設 +5%) | **+30%(可調)** | 可調,不衝突 |
-| trailing stop | `_update_trailing_stop` 在 +3% / +5% / +8% 鎖更高停損 | **整套關掉** | **衝突** — 鎖停損 = 變相停損 |
-| `_evaluate_one` 結算邏輯 | `low ≤ stop_price` → `lose`;超 `hold_days` → `timeout_*` | 兩條都不適用 | **衝突** |
-| 基本面崩出場 | **完全沒有** | EPS 連 2 季 ≤ 0 強制出場 | **缺功能** |
-
-### 4.2 改造方案 — 三選一
-
-**方案 P1(最小改動,推薦首版做)**:
-- 加 schema 欄位 `strategy_profile TEXT NOT NULL DEFAULT 'swing'`(`'swing'` / `'lin_enru'`)
-- `_evaluate_one` 判斷 `profile == 'lin_enru'`:
-  - **不掃 `low ≤ stop_price`**(關停損)
-  - **不跑 `_update_trailing_stop`**(關 trailing)
-  - **不算 `timeout_*`**(`hold_days` 改塞 9999 或 NULL)
-  - **新增掃描:每結算日查 `financials.quarterly` 最近 2 季 EPS;若連 2 季 ≤ 0 → 出場 `status='lose_fundamental'`**
-- `add_paper_trade` 開新 kwarg `profile='swing'`
-- 工作量:**中**(4-6 小時 + tests)
-
-**方案 P2(獨立表,完全隔離)**:
-- 新建 `paper_trades_lin_enru` table(無 `stop_price` / `hold_days` / `trailing_level`)
-- 新建 `lin_enru_paper_trading.py` module
-- 優點:不污染現有 paper_trading 邏輯;缺點:**performance 頁要改聚合兩表**(統計 by_strategy 跨表)
-- 工作量:**大**(2-3 天)
-
-**方案 P3(完全不上 paper trading)**:
-- 林恩如**只進 backtester**(`src/backtester.py` 加 `_lin_enru_outcome` 函式),不做 paper tracking
-- 優點:0 schema 變更;缺點:主公手動操盤時沒地方追進度
-- 工作量:**小**(2-3 小時)
-
-**亮推薦**:**方案 P3 首版** → 證明 alpha 後上 **P1**。先別碰 schema。
-
-### 4.3 backtester 補丁 spec(P3 / 驗證 alpha 用)
-
-`src/backtest.py` 現有 `simulate_outcome` 假設「`hold_days` 內掃 stop/target」。林恩如版要:
-```python
-def simulate_outcome_lin_enru(
-    sid, entry_date, entry_price,
-    target_pct=0.30,
-    max_hold_trading_days=750,  # 約 3 年,實際 cap 避免無限
-    fundamental_exit=True,      # 連 2 季 EPS ≤ 0 → 出場
-):
-    """掃 entry_date 到 +max_hold 天:
-    - high ≥ entry × (1+target_pct) → win
-    - 每季財報新公佈日,檢查最近 2 季 eps 是否都 ≤ 0 → lose_fundamental
-    - hit max_hold → timeout(剩餘報酬照原樣計)
-    完全不跑 stop_price / trailing。
-    """
+docs/
+├── lin_enru_strategy_proposal.md       # 本檔案
+└── lin_enru_backtest_results.md        # 🆕 Phase B3 跑完 sweep 後寫
 ```
 
-跑 backtester sweep:`target_pct ∈ {0.15, 0.20, 0.30, 0.50}`、`eps_positive_years ∈ {3, 5, 7}`、`min_dividend_yield ∈ {4.0, 5.0, 6.0}`,過去 5 年回測,看哪個組合 EV / Sharpe 最高。**先有數據再決定首版 default params**。
+**重點**:`strategies.py`、`screener_long.py`、`paper_trading.py`、`ui_cards.py` **完全不動一行**。
 
 ---
 
-## Part 5：工作量分塊
+## Part 3：現有資料 / 策略對照(維持 v1,只簡述)
 
-| Phase | 任務 | 大小 | 依賴 | 備註 |
+詳細見 v1 Part 2 — 結論不變:
+- **林恩如不是改包裝** — 17 套策略 + `screen_long` 都沒「連 5+ 年 EPS 正 + 殖利率穩定 + 52 週新高」AND
+- `screen_long` 跟 `screen_high_yield_stable` 缺 timing — 林恩如方法的「創新高才進」是關鍵差異化
+- 缺 2 個基礎 feature(`yearly_eps_streak` / `52_week_high`)— **隔離版各自獨立寫**,不抽 helper
+
+---
+
+## Part 4：`lin_enru_trades` 新表設計
+
+不動 `paper_trades`,改開新表 — schema-level 直接表達林恩如哲學:
+
+```sql
+-- 加進 src/database.py 的 schema migration block
+
+CREATE TABLE IF NOT EXISTS lin_enru_trades (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    sid                 TEXT NOT NULL,
+    name                TEXT,
+    entry_date          TEXT NOT NULL,
+    entry_price         REAL NOT NULL CHECK(entry_price > 0),
+    target_price        REAL NOT NULL,                  -- 停利價(= entry × (1+target_pct))
+    target_pct          REAL NOT NULL,                  -- 設定的停利 %(typically 0.30)
+    max_hold_days       INTEGER NOT NULL DEFAULT 750,   -- 時間 cap,約 3 年
+
+    -- 進場時三條件 snapshot(對照 / debug 用)
+    eps_streak_years    INTEGER,                        -- 連續年數
+    dividend_yield_pct  REAL,                           -- 當下殖利率
+    consec_div_years    INTEGER,                        -- 連續配息年數
+    high_52w_price      REAL,                           -- 進場時的 52 週高
+
+    -- 出場(active 時為 NULL)
+    exit_date           TEXT,
+    exit_price          REAL,
+    exit_reason         TEXT CHECK(exit_reason IN (
+                            'target_hit',           -- 達停利 +target_pct
+                            'fundamental_break',    -- 連 2 季 EPS ≤ 0
+                            'dividend_stop',        -- 配息中斷
+                            'max_hold_timeout'      -- 750 日 cap
+                        )),
+    return_pct          REAL,                           -- 實際報酬 %
+
+    status              TEXT NOT NULL CHECK(status IN ('active', 'closed')),
+    notes               TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT,
+    UNIQUE(sid, entry_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lin_enru_trades_status
+    ON lin_enru_trades(status);
+CREATE INDEX IF NOT EXISTS idx_lin_enru_trades_entry_date
+    ON lin_enru_trades(entry_date DESC);
+```
+
+**跟 `paper_trades` 對比**(刻意設計):
+
+| 欄位 | `paper_trades` | `lin_enru_trades` | 為何不同 |
+|---|---|---|---|
+| `stop_price` | NOT NULL ✓ | **無此欄位** | 林恩如不停損 |
+| `current_stop` | 有 | **無** | 沒 stop 就沒 current_stop |
+| `trailing_level` | 0/1/2/3 | **無** | 不跑 trailing |
+| `hold_days` | DEFAULT 5(短) | `max_hold_days` DEFAULT 750(長) | 哲學完全不同 |
+| `status` CHECK | 5 種 (`win`/`lose`/`timeout_*`) | 2 種 (`active`/`closed`) | 林恩如出場原因放 `exit_reason` 不放 status |
+| `exit_reason` | 無 | 4 種 enum | 林恩如出場原因分類有意義(用於分析:多少 % 走停利 vs 基本面崩) |
+| 進場 snapshot 欄位 | 無 | `eps_streak_years` 等 4 個 | 林恩如要記錄「為什麼選這檔」,事後 debug 用 |
+
+**migration 步驟**:
+1. 在 `src/database.py` 的 `_SCHEMA_STATEMENTS` list(現有 schema CREATE 集中地)末尾加上述 SQL
+2. 第一次 boot 時 `init_db()` 自動 CREATE,**沒 ALTER、沒 migrate** — 全新表
+3. 不需要動現有 `paper_trades` 既有 row
+4. **回滾**:`DROP TABLE lin_enru_trades` 一行,raw data 不受影響
+
+**對比 v1 方案(改 `paper_trades` schema)的 migration 複雜度**:
+- v1 要走 `ALTER TABLE paper_trades ADD COLUMN strategy_profile`
+- v1 要走 SQLite status CHECK 重建表(RENAME → CREATE → INSERT SELECT → DROP)
+- v1 改完後 `paper_trades_snapshot.py` 的 CSV dump/load 要適配新欄位
+- v2 隔離方案完全跳過這些 — **2h → 0.5h**
+
+---
+
+## Part 5：跟現有 paper trading 衝突細節(更新版)
+
+v1 詳列「`paper_trades.stop_price NOT NULL` 等衝突欄位」,**v2 隔離後這些衝突不存在** — 林恩如完全不寫 `paper_trades`,所以不衝突。
+
+**新增風險**:
+- `evaluate_active_trades`(現有,跑 swing 結算)跟 `evaluate_active_lin_enru_trades`(新)是**兩個獨立函式**,sidebar / cron 要兩邊都 call
+- 主公到時候要決定:「實測追蹤」頁顯 `paper_trades`,「存股追蹤」頁顯 `lin_enru_trades`,**兩頁分開 not 一頁兩 tab**(隔離原則)
+- `performance_analysis.py` 的策略表現統計目前只看 `paper_trades` — **林恩如有自己的統計頁**,不混進現有績效分析(否則就違反隔離)
+
+---
+
+## Part 6：2 個缺 feature 的補法(隔離版)
+
+### 6.1 `eps_streak_years`(連 N 年 EPS 正)
+
+**檔案**:`src/features/lin_enru/eps_streak.py`(新檔,**不放 `src/features_fundamental.py` 共用模組**)
+
+**SQL**:從 `financials.period_type='quarterly'` 自己加總(資料源跟 `screen_eps_acceleration` 同,但 helper 各寫各的):
+```python
+def compute_yearly_eps_streak(stock_id: str) -> int:
+    """回連續年數(從最近年往回,4 季都齊且 sum > 0 才算)。
+    
+    林恩如專用 helper。不 reuse screen_eps_acceleration 內邏輯(那邊看季 YoY)。
+    """
+    with db.get_conn() as conn:
+        rows = conn.execute("""
+            SELECT SUBSTR(period, 1, 4) AS year,
+                   SUM(eps) AS yearly_eps,
+                   COUNT(*) AS q_count
+            FROM financials
+            WHERE stock_id = ? AND period_type='quarterly'
+                  AND eps IS NOT NULL
+            GROUP BY year
+            ORDER BY year DESC
+        """, (stock_id,)).fetchall()
+    
+    streak = 0
+    for r in rows:
+        if r["q_count"] == 4 and r["yearly_eps"] > 0:
+            streak += 1
+        else:
+            break
+    return streak
+```
+
+**工時**:1.5h(寫 + tests:全齊 / 缺季 / EPS 為 0 / 完全沒財報 4 case)
+
+### 6.2 `is_at_52_week_high`(close ≥ 252 日 max × 0.99)
+
+**檔案**:`src/features/lin_enru/price_high.py`(新檔,**不 refactor `_evaluate_volume_breakout`**)
+
+**邏輯**(獨立寫,跟 `screen_volume_breakout` 的 20 日邏輯**沒共用 helper**):
+```python
+def is_at_52_week_high(
+    price_df: pd.DataFrame,  # 至少含 daily close 過去 252 日
+    tolerance: float = 0.99,
+) -> tuple[bool, float]:
+    """回 (是否近 52 週新高, 當下 52 週高價)。
+    
+    林恩如專用 helper。即使 _evaluate_volume_breakout 的 20 日邏輯結構類似,
+    為了隔離,不 refactor / 不抽 _is_n_day_high()。
+    """
+    if len(price_df) < 252:
+        return False, 0.0  # 資料不足,不命中
+    
+    window = price_df["close"].iloc[-253:-1]  # 過去 252 日(不含今日)
+    high_252 = float(window.max())
+    today_close = float(price_df["close"].iloc[-1])
+    
+    is_at_high = today_close >= high_252 * tolerance
+    return is_at_high, high_252
+```
+
+**工時**:1.5h(寫 + tests:剛剛突破 / 在窗口 / 接近但沒到 / 資料不足 252 日 4 case)
+
+### 6.3 `consecutive_dividend_years`(連續配息年數)
+
+**檔案**:`src/features/lin_enru/dividend_stability.py`(新檔)
+
+**邏輯**(自己寫一份,**不 import** `screener_long.py:232-240` 那段邏輯):
+```python
+def compute_consecutive_dividend_years(stock_id: str) -> int:
+    """從最近年往回算連續配息年數。
+    
+    林恩如專用。screen_long._evaluate_long 內有同樣演算法,
+    為了隔離不 import,而是在這裡複寫一份。
+    """
+    with db.get_conn() as conn:
+        rows = conn.execute("""
+            SELECT year, cash_dividend FROM dividend
+            WHERE stock_id = ? ORDER BY year DESC
+        """, (stock_id,)).fetchall()
+    
+    streak = 0
+    for r in rows:
+        if r["cash_dividend"] and float(r["cash_dividend"]) > 0:
+            streak += 1
+        else:
+            break
+    return streak
+```
+
+**工時**:1h(邏輯簡單,主要寫 tests)
+
+**重複代碼真實成本**:`screener_long._evaluate_long` 內這段 6 行邏輯**重複到 `dividend_stability.py`**。對個人專案 6 行 ok;若主公**未來改殖利率算法**(例如除權息日後 prorate),**要改 2 處**。隔離原則的取捨在此。
+
+---
+
+## Part 7：Phase A + B + C + D 工時分解(隔離版)
+
+### Phase A:獨立基礎建設(feature)
+
+| 步驟 | 內容 | 工時(隔離) | v1 工時 | Δ |
 |---|---|---|---|---|
-| **A1** | `eps_positive_years` feature(年 EPS 連 N 年正) | 小(1h) | `financials.yearly` 須有資料 | SQL `GROUP BY stock_id, year` 加 helper |
-| **A2** | `price_at_52w_high` feature(close 達 252 日 max × 0.99) | 小(1h) | `daily_prices` 一年內覆蓋 | pandas rolling 或 SQL window function |
-| **A3** | 殖利率穩定度 helper(reuse `_evaluate_long` 內邏輯) | XS(30min) | 無 | refactor 抽出來變 module-level |
-| **B1** | `screen_lin_enru` strategy 函式(A+B+C AND) | 中(2-3h) | A1 / A2 / A3 | 跟 `screen_high_yield_stable` 同 pattern |
-| **B2** | `simulate_outcome_lin_enru` backtester(無 stop / 季報 check) | 中(3-4h) | B1 + financials.quarterly | 加 financials 公佈日查表邏輯 |
-| **B3** | 跑 backtester sweep(target_pct × 篩選參數) | 中(2-3h + 機器時間) | B1 / B2 + 5 年回測資料 | 結果寫 `docs/lin_enru_backtest_results.md` |
-| **🛑 GATE** | **主公看 B3 結果決定是否往下** | — | — | **alpha < 0 → 停;alpha 顯著正 → 往下** |
-| **C1** | 新 tab `🌱 存股輪轉` + 卡片(無 stop 欄位) | 中(3-4h) | B1 | 仿 `_page_long` 結構;render 隱藏 stop 列 |
-| **D1** | paper_trades schema 加 `strategy_profile` 欄位 | 小(1-2h) | 無 | sqlite migration + snapshot dump 同步 |
-| **D2** | `_evaluate_one` 加 `profile=='lin_enru'` 分支 | 中(3-4h) | D1 + B2(共用邏輯) | tests:既有 swing tests 一個都不能破 |
-| **D3** | 基本面崩出場(查最近 2 季 EPS) | 中(2-3h) | D2 + financials.quarterly | 新狀態 `lose_fundamental` 加進 CHECK constraint |
-| **D4** | UI「加入存股追蹤」按鈕 + 已追蹤清單 | 中(3-4h) | C1 + D2 | 重用 `auto_seed_from_picks` 加 `profile` kwarg |
+| A1 | `eps_streak.py` + tests(獨立寫) | 1.5h | 1.5h | 0 |
+| A2 | `price_high.py` + tests(獨立寫,不 refactor volume_breakout) | 1.5h | 1.5h | 0(原本就是新寫) |
+| A3 | `dividend_stability.py` + tests(獨立,不抽 `screen_long`) | 1h | 0.5h(原本只 refactor) | **+0.5h** |
+| A4 | Sanity check SQL — universe 大小 | 0.5h | 0.5h | 0 |
+| A5 | `src/features/lin_enru/__init__.py` + module 結構 setup | 0.5h | 0 | **+0.5h** |
+| **A 小計** | | **5h** | 4.5h | **+0.5h** |
 
-**首版工作量**(Phase A + B,**不上 UI / 不動 paper trading**):**6-10 小時**。
-**完整版**(過 GATE 後加 C + D):**再 15-20 小時**(2-3 天人 / 5-7 天碎時間)。
+### Phase B:獨立 strategy + backtest
 
----
+| 步驟 | 內容 | 工時(隔離) | v1 工時 | Δ |
+|---|---|---|---|---|
+| B1 | `src/strategies/lin_enru/screener.py`(三條件 AND) | 2h | 2h | 0 |
+| B2 | `src/lin_enru_backtest.py`(`simulate_outcome_lin_enru`) | 3.5h | 3.5h | 0 |
+| B3a | Backtest sweep(36 組合 × 5 年) | 1.5h | 1.5h | 0 |
+| B3b | 寫 `docs/lin_enru_backtest_results.md` | 1.5h | 1.5h | 0 |
+| **B 小計** | | **8.5h** | 8.5h | **0** |
 
-## Part 6：「不做沒意義的事」誠實檢核
+**🛑 GATE**:B3 結果決定是否往下做 C/D。沒過 → 整包(Phase A code 留作通用 feature 但不上線)。
 
-依主公 `feedback_no_pointless_work` 規矩,自我審視:
+### Phase C:獨立 UI
 
-### 6.1 林恩如方法 vs 現有策略 — 真的不同嗎?
+| 步驟 | 內容 | 工時(隔離) | v1 工時 | Δ |
+|---|---|---|---|---|
+| C1 | `PAGES` list 加 "🌱 存股輪轉" + `_page_lin_enru()` 函式骨架 | 1h | 1h | 0 |
+| C2 | `src/lin_enru_ui_cards.py`(獨立卡片,無 stop_loss 欄位) | 3h | 1h(reuse `render_picks_cards`) | **+2h** |
+| C3 | 「執行掃描」按鈕 + cache + 串 `screen_lin_enru` | 2h | 2h | 0 |
+| **C 小計** | | **6h** | 4h | **+2h** |
 
-**有顯著差異**(Part 2.2 已列表),三個關鍵獨特性:
-1. **52 週新高 timing**:現有 17 套策略沒一套用,連 `screen_volume_breakout` 都只 20 日。林恩如方法的精髓「**等市場驗證再進**」現在 codebase **完全沒有**這個概念。
-2. **連續 5+ 年 EPS 正**:跟 `screen_eps_acceleration` 的 5 季 / `screen_high_yield_stable` 的 4 季都不同 — 是更嚴格的長期穩定篩選。
-3. **不停損 + 達停利哲學**:跟現有所有 strategy 對 paper trading 都跑 `stop_pct` + trailing 的部位管理**根本對立**,**值得驗證另一邊是否真有 alpha**。
+### Phase D:獨立 paper trading + workflow
 
-→ **結論:不是改包裝,有實質差異**。
+| 步驟 | 內容 | 工時(隔離) | v1 工時 | Δ |
+|---|---|---|---|---|
+| D1 | `CREATE TABLE lin_enru_trades` schema(加進 `database.py`) | 1h | 1.5h(原本要 ALTER + status CHECK 重建) | **-0.5h** |
+| D2 | `src/lin_enru_paper_trading.py`(`add_*` / `evaluate_active_*` / `list_*`) | 4h | 3.5h(原本要改 `_evaluate_one` 加分支) | **+0.5h** |
+| D3 | 「基本面崩」「配息中斷」出場邏輯(查季 EPS + 年 dividend) | 2.5h | 2.5h | 0 |
+| D4 | UI「加入存股追蹤」按鈕 + 已追蹤頁 | 3h | 3h | 0 |
+| D5 | `lin_enru_trades.csv` snapshot dump/load(跨容器持久化,**獨立 file**) | 2h | 0(reuse `paper_trades_snapshot.py`) | **+2h** |
+| D6 | `.github/workflows/lin-enru-daily.yml`(獨立 cron) | 1.5h | 0(掛現有 workflow) | **+1.5h** |
+| **D 小計** | | **14h** | 10.5h | **+3.5h** |
 
-### 6.2 「不停損」跟現有風控原則衝突嗎?
+### 總計
 
-**衝突,但可以隔離**:
-- 現有 `risk_management.py`、`position_sizing.py`、`trailing_stop.py` 三模組都假設「有停損」
-- `paper_trades.stop_price NOT NULL` schema 層強制(Part 4.1 已列)
-- **隔離方案**:加 `strategy_profile` 欄位 + `profile=='lin_enru'` 分支(Part 4.2 P1)。
-- **不要做的事**:不要把林恩如的「不停損」邏輯擴散到既有 swing strategy — 主公會炸。
-
-### 6.3 主公會真的操盤,還是只想看回測?
-
-**這題只有主公能回答,但亮提供決策框架**:
-
-| 場景 | 推薦做法 |
-|---|---|
-| 主公**真打算用林恩如方法操作幾檔** | 做 Phase A + B + C + D 全套(有 UI + paper tracking) |
-| 主公只想**比較林恩如方法 vs 現有策略表現** | 做 Phase A + B(backtester only),寫 `docs/lin_enru_backtest_results.md` 給主公看;不上 UI |
-| 主公**只是覺得「林恩如有名,要不要看一下」** | 做 Phase A1 + A2 兩個 features(都是通用基礎建設),不寫 strategy / 不上 UI;林恩如就成為「已具備 features,主公想跑時 1 小時寫個 ad-hoc query 即可」 |
-
-**亮預設假設**:主公 portfolio 應該已經有真實長期持股(像 2412 / 0050),不會專門換成林恩如方法。**最可能是場景 2(比較表現)**,所以**首版做 backtest-only**最匹配。
-
-### 6.4 明確結論 — 做 / 不做 / 改做別的?
-
-**做**,但**先做 lite 版**(Phase A1 + A2 + B1 + B2 + B3):
-- 補 2 個通用 features(52 週新高、連年 EPS 正) — 這兩個**就算林恩如不做,以後其他策略也會用到**
-- 寫 strategy + backtester 跑數據
-- **B3 結果出爐後,主公看數字再決定要不要 C + D**
-
-**不做** Phase C / D 直到 B3 alpha 驗證:
-- 上 UI / 改 paper trading 的成本(schema 改、tests 寫、回 regression 風險)只在 alpha 為正時值得付
-- 過去 `bias_convergence` 校準 [[project-bias-convergence-rescue-2026-05-18]] 教訓:**先 cost-aware 驗證,再上線**
-
----
-
-## Part 7：跟「波段交易」task 的對齊
-
-另一份 `swing_trading_proposal.md` 由另一 session 同步寫(主公會看到)。本報告與其關係:
-
-| 元素 | 林恩如(本報告) | 波段交易(另報告) | 對齊建議 |
+| Option | v1 工時 | v2 隔離工時 | Δ |
 |---|---|---|---|
-| 持有期 | 1-3 年(無上限) | 1-6 月(有上限) | **不 merge**,差一個量級 |
-| Timing 訊號 | **創 52 週新高**(market validation) | 20 週 MA + 量價(趨勢確認) | 互斥(同檔股不太可能同時在 52 週新高且剛突破 20 週 MA) |
-| 基本面門檻 | 連 5 年 EPS 正 + 殖利率穩定 | 待波段 spec 確認 | **可共用 `eps_positive_years` feature(Phase A1)** — 寫一次兩邊吃 |
-| 停損 | **無**(刻意) | 有(波段慣例) | **不要 merge** — 風控哲學相反 |
-| Paper trading | `profile='lin_enru'`(P1 方案) | `profile='swing'`(現有預設) | **共用 `strategy_profile` 欄位**(Phase D1)→ 一次改 schema 兩邊用 |
-| UI | 新 tab `🌱 存股輪轉` | 看另一報告 | 兩個各自獨立 tab,**不要互引用**(主公 mobile-first 不喜歡跳 tab) |
+| A 只做 features(無 strategy) | — | — | — |
+| **B = A + Phase B(backtest only)** | 13h | **13.5h** | +0.5h |
+| C = A + B + Phase C(加 UI) | 17h | **19.5h** | +2.5h |
+| **D = A + B + C + Phase D(完整)** | 27.5h | **33.5h** | +6h |
 
-**結論**:
-- **Phase A1**(`eps_positive_years` feature)同時對波段有用 → 兩邊先別重複寫,先 align 命名 / SQL
-- **Phase D1**(`strategy_profile` schema 欄位)如果波段也要新模式 → 兩邊一次改完
-- 其他元素**完全獨立**
+主公接受的「+10-20%」工時,**實測下來 B 幾乎沒影響(+4%),D +22%**(主因 D5/D6 兩塊獨立 snapshot + workflow)。
 
 ---
 
-## 附錄:採用建議的 spec 雛形(Phase B1 草稿)
+## Part 8：5 個 decision options(v2 重列)
 
-```python
-# src/strategies.py 新加(同 screen_high_yield_stable 風格)
+| Option | 內容 | 工時 | 風險 | 收益 | 隔離後變化 |
+|---|---|---|---|---|---|
+| **A. 全不做** | 報告當研究存檔 | 0h | 0 | 0 | 不變 |
+| **B. Phase A + B(backtest only)** | features 補齊 + screener + backtest sweep + 結果報告 | **13.5h**(原 13h) | **極低**:全部新檔,完全不動現有 code;最壞情況 ~13h 沒結果 | **中-高**:有數據決策;features 留作後續可能 reuse(但隔離原則下不會) | +0.5h(`__init__.py` setup) |
+| **C. A + B + Phase C(加 UI)** | B 全套 + 新 tab + 獨立卡片 helper | **19.5h**(原 17h) | **低-中**:加 tab(PAGES 21→22);獨立卡片要新測試 | **中**:主公能日常看到,但無 paper tracking | +2.5h(獨立 UI 卡片) |
+| **D. 完整 A+B+C+D** | 全套 + `lin_enru_trades` 表 + 獨立 evaluate + 獨立 snapshot + 獨立 cron | **33.5h**(原 27.5h) | **中**:新表但完全隔離,**不會破現有 paper_trades 任何 test**;snapshot dump 跨容器邏輯要小心 | **高**(若 alpha 真存在):完整自動化 paper portfolio | +6h(獨立 snapshot/workflow) |
+| **E. 主公另有思路** | — | — | — | — | — |
 
-DEFAULT_LIN_ENRU_PARAMS: dict[str, Any] = {
-    "eps_positive_years": 5,        # 連續 N 年 EPS > 0
-    "min_dividend_yield": 5.0,      # 殖利率 ≥ 5%
-    "consecutive_div_years": 5,     # 連續配息 ≥ 5 年
-    "near_52w_high_pct": 0.99,      # close ≥ 252 日 max × 此倍率
-    "high_lookback_days": 252,      # 約 1 年(52 週 × 5 交易日)
-}
+**為什麼仍推薦 B 而不是 C/D(隔離後論點)**:
 
+1. **隔離讓 B 風險更低** — 既然 Phase B 全部寫在新檔(`src/features/lin_enru/` + `src/strategies/lin_enru/` + `src/lin_enru_backtest.py`),**不動現有任何一行 code**。最壞情況「林恩如沒 alpha」→ 整個資料夾 5 分鐘砍掉,連 `git revert` 都不用。Phase B 本質是**無遺憾下注**(no-regret bet)。
+2. **隔離讓 D 工時 +22% 真實成本浮現** — v1 估 D 是 27.5h,看起來不誇張;隔離後 D5(獨立 snapshot)+ D6(獨立 cron)各加 ~2h,**33.5h 才是真實成本**。這個成本只在 alpha 確認後才值得付。
+3. **C 沒 paper tracking 是「半套」** — 不寫進 `lin_enru_trades` → 主公手動操作無從 track 表現。除非主公**明確說只想看每日推薦不要追蹤**,否則 C 是雞肋(做了 UI 但用不順)。
+4. **回滾優勢顯著** — 隔離架構下:
+   - Phase B 失敗:`rm -r src/features/lin_enru/ src/strategies/lin_enru/ src/lin_enru_backtest.py`
+   - Phase D 失敗:再加 `DROP TABLE lin_enru_trades`、刪 cron YAML、刪 tab from PAGES、刪 `_page_lin_enru()` 一個函式
+   - **總共 5 分鐘**,完全不影響現有 17 套策略 / `screen_long` / `paper_trades`
 
-def screen_lin_enru(
-    date: str,
-    params: dict | None = None,
-    stock_ids: list[str] | None = None,
-) -> pd.DataFrame:
-    """策略 18:林恩如選股法 — 基本面穩定 + 創 52 週新高 + 高殖利率。
-
-    AND 三條件:
-      A. 連 N 年(預設 5)年 EPS 都 > 0 — 獲利穩定
-      B. 殖利率 ≥ 5% AND 連續配息 ≥ N 年(預設 5)— 高息 + 穩配
-      C. close ≥ MAX(close, 252) × 0.99 — 創/近 52 週新高 = 市場驗證
-
-    出場(本函式只負責進場;出場在 simulate_outcome_lin_enru / paper trading):
-      - 達停利 +target_pct(預設 30%)
-      - 連 2 季 EPS ≤ 0 → 強制出
-      - 不停損
-
-    意義:林恩如波段存股派的鐵三角條件 — 基本面 + 高息 + 市場認同。
-    """
-    # 跟 screen_high_yield_stable 同 pattern:批量 SQL + 三條件 filter
-    ...
-
-
-STRATEGY_LABELS["lin_enru"] = "林恩如選股"
-```
+**反過來,直接做 C 的條件**:主公直覺超強林恩如方法可行 + 願賭 33.5h(不,**19.5h** 因為 C 不含 D)賠率。我尊重主公判斷,但會在報告開頭寫「未經 backtest 驗證」warning。
 
 ---
 
-## 給主公的決策清單
+## Part 9：跟「波段交易」task 的關係(v2:完全切割)
+
+主公拍板「不要跟其他共用」**也適用於波段 task**。新原則:
+
+| 元素 | 林恩如(本報告) | 波段(另報告) | 共用? |
+|---|---|---|---|
+| `eps_positive_years` feature | `src/features/lin_enru/eps_streak.py` 自己寫 | 波段如要,**自己寫一份在 `src/features/swing/`** | ❌ **不共用** |
+| `52_week_high` | `src/features/lin_enru/price_high.py` 自己寫 | 波段如要,自己寫 | ❌ **不共用** |
+| Paper trading 表 | `lin_enru_trades` 新表 | 波段用現有 `paper_trades`(因為波段有 stop) | ✅ **天然分開** |
+| `strategy_profile` schema 欄位 | **不加**(因為林恩如有自己的表) | 波段如有新模式需求,自己決定要不要加 | ❌ **不協調** |
+| UI | `_page_lin_enru()` 獨立 tab | 波段自己一個 tab | ❌ **天然分開** |
+| Cron | `lin-enru-daily.yml` | 波段自己一個 workflow | ❌ **天然分開** |
+
+**結論**:**兩個 task 各做各的,亮(orchestrator)也不用協調 schema 順序** — 因為兩邊根本不碰同個 schema。
+
+**對 orchestrator 的建議**:v1 寫的「先讓波段 task 確認 schema 順序」**已作廢**,兩 task 可完全 parallel 開工。
+
+---
+
+## Part 10：「不做沒意義的事」誠實檢核(v2:含隔離取捨)
+
+### 10.1 隔離架構是否反而違反「不做沒意義的事」?
+
+**重複代碼成本**:
+- `compute_consecutive_dividend_years` — 在 `screener_long._evaluate_long` 跟 `dividend_stability.py` 各一份 = **6 行邏輯重複**
+- `is_at_n_day_high` 邏輯 — `screen_volume_breakout`(20 日) + `is_at_52_week_high`(252 日) = **約 5 行邏輯重複**
+- `yearly_eps_streak` 跟 `screen_eps_acceleration` 都讀 `financials.quarterly`,但聚合方式不同(年 vs 季 YoY),**邏輯本就不同,沒重複**
+
+**總計重複 code**:~11 行 + 隔離的 `__init__.py` / module 結構 ~50 行 boilerplate ≈ **60 行**重複 / boilerplate。
+
+**心智成本**:
+- 主公未來改殖利率算法(例如除權息日後 prorate)→ 要改 2 處,容易漏一處
+- 但**隔離的本意正是「改一處不影響另一處」** — 主公可能**故意**只想升級 `screen_long` 的算法但保留林恩如的原版做對照
+- 重複是 feature 不是 bug
+
+### 10.2 對「探索性策略」隔離有意義嗎?
+
+**有意義**,理由:
+1. **林恩如方法是「賭注」不是「核心」** — 跟 17 套既有策略不同(那 17 套已 backtest + 上線 + ML 校準),林恩如還沒驗證
+2. **賭輸要能無痛砍掉** — 隔離架構下整包刪除 5 分鐘;耦合架構下要 unwind helpers / schema / snapshot 整整一下午
+3. **賭贏可漸進整合** — 若 backtest 結果好到主公想統一架構(把林恩如的 features 升級成全局共用),那是「**未來決策**」,屆時 refactor 路徑清楚:把 `src/features/lin_enru/` 改名移到 `src/features/common/`;這個搬家 1h 工時,比一開始就共用、後來發現要分,容易得多
+
+### 10.3 是否該補 「features common module」的基礎建設?
+
+**現況**:`src/features/` 整個資料夾目前**還不存在**(我前面 `Glob` 確認過,所有 src 檔案平鋪)。
+- 林恩如 Phase A 是**第一個**用 `src/features/<name>/` 這個目錄 pattern
+- **不要趁機建 `src/features/common/`** — 主公明確說「不要共用」,自己建一個沒人用的 common 違反原則
+- **未來如果波段也要 features**,各自開 `src/features/swing/`,兩者並列,**沒有 common**
+- 若未來真的要重構成共用,那是另一個專門的 refactor task
+
+### 10.4 明確結論(v2)
+
+**做**,Phase A + B(13.5h),走完全隔離架構:
+- A 階段補 3 個獨立 feature helpers
+- B 階段跑 backtest sweep + 出 GATE 結果
+- 過 GATE → 主公再拍板 C / D
+- 沒過 GATE → 5 分鐘整包砍掉,不影響現有 17 套策略 / `screen_long` / `paper_trades` / `swing` task 任何東西
+
+**隔離成本(+0.5h on Phase B,+6h on full)** 換到的**收益**:**清晰邊界 + 無痛回滾 + 跟波段 task 零協調成本**。對個人專案的探索性新策略,**隔離原則划算**。
+
+---
+
+## 給主公的決策清單(v2)
 
 請主公從以下選一:
 
-- [ ] **A. 全部不做** — 林恩如方法沒興趣,當這份報告是研究
-- [ ] **B. 只做 Phase A + B(backtest 驗證)** — **亮推薦**;6-10h,出 backtest 結果 → 再決定
-- [ ] **C. 做 A + B + C(加 UI 但不動 paper trading)** — 全套 strategy + UI 卡片,但 paper tracking 走 P3(只 backtest);15-20h
-- [ ] **D. 做完整 A + B + C + D(含 paper trading `disable_stop`)** — 全套;30-40h(2 個整天)
+- [ ] **A. 全部不做** — 林恩如方法沒興趣
+- [ ] **B. 做 Phase A + B(13.5h,隔離 backtest 驗證)** — **亮推薦**;有數據再決定下一步
+- [ ] **C. A + B + C(19.5h,加獨立 UI 但不開新表)** — 主公想日常看推薦但不追蹤
+- [ ] **D. 完整 A + B + C + D(33.5h,獨立 `lin_enru_trades` 全套)** — 主公要完整 paper portfolio
 - [ ] **E. 主公自己另一種思路** — 寫下來
 
-亮等主公拍板再開工。
+---
+
+## Appendix A:v1 → v2 變更摘要
+
+| 章節 | v1 | v2 |
+|---|---|---|
+| 架構 | 部分共用(eps feature / strategy_profile schema) | **完全隔離**(獨立 features / strategy / 表 / UI / cron) |
+| Phase D paper trading | 改 `paper_trades` 加 `strategy_profile` | **新開 `lin_enru_trades` 表**,不動 `paper_trades` |
+| Helper 抽取 | refactor `screener_long._evaluate_long` 抽 `consecutive_dividend_years` | **不抽**,林恩如自己寫一份 |
+| `52_week_high` | refactor `_evaluate_volume_breakout` 抽 `_is_n_day_high(n, tolerance)` | **不 refactor**,獨立寫 `is_at_52_week_high` |
+| Snapshot | reuse `paper_trades_snapshot.py` | **新開** `lin_enru_trades.csv` snapshot |
+| Cron | 掛 `daily-notify.yml` | **新開** `lin-enru-daily.yml` |
+| 跟波段 task 共用 | `eps_positive_years` + `strategy_profile` 共用 | **完全切割**,兩邊各做各的,並行無協調 |
+| Phase B 工時 | 13h | **13.5h**(+0.5h `__init__.py` setup) |
+| Phase D 工時 | 27.5h(total) | **33.5h**(+6h,主要 D5/D6 獨立 snapshot/workflow) |
+| 回滾成本 | 需 unwind `strategy_profile` migration + status CHECK 縮回 | **5 分鐘整包 rm + DROP TABLE**,完全不影響其他模組 |
