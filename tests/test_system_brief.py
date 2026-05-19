@@ -246,6 +246,7 @@ def test_build_system_brief_dict_shape(tmp_db):
         brief = build_system_brief(conn)
     expected_keys = {
         "generated_at", "health", "strategy_performance",
+        "trend_windows", "multiplier_attribution",
         "ml_performance", "market_state", "watchlist_today",
         "real_performance", "recommendations",
     }
