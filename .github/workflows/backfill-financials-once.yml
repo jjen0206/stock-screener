@@ -52,10 +52,12 @@ on:
         description: "Dump 完上傳到 GH Release(預設 true)"
         required: false
         default: "true"
-  schedule:
-    # 2026-05-19 P2-4a:每 30 分鐘自動跑下一批 200 檔(coverage guard 控制停)。
-    # 全市場跑滿後可手動移除此區塊(留著也是 noop)。
-    - cron: "*/30 * * * *"
+  # Schedule disabled 2026-05-19: FinMind 月配額爆 (status 402),第二批就掛 →
+  # 後續 cron fire 跑 noop 浪費 GHA runner 月 2000 min 配額。改 alert-based
+  # manual trigger:scripts/alert_quota_reset.py 每月 1 號 09:00 台北推 Telegram
+  # +Discord 提醒,主公收到後手動 dispatch 跑下一批。
+  # 重啟方法:移除這段註解,恢復 `schedule: - cron: "*/30 * * * *"` 即可。
+  # (或先用 GH UI Actions > Backfill Financials > Run workflow 手動跑。)
 
 concurrency:
   group: backfill-financials

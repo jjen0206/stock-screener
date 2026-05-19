@@ -63,11 +63,13 @@ on:
         description: "Dump 完上傳到 GH Release"
         required: false
         default: "true"
-  schedule:
-    # 2026-05-19:每小時 UTC 0 分自動跑下一批 500 檔(coverage guard 控制停)。
-    # 全市場 ~2715 檔 / 5 批 ≈ 5 hr 跑完;cron 觸發時 inputs.* 為 null,
-    # 下面所有 step 用 `inputs.X || '<fallback>'` 自動回退。
-    - cron: "0 * * * *"
+  # Schedule disabled 2026-05-19: Gemini free tier daily 1500 req 限額爆,三次
+  # 全 fail → 後續 cron fire 連續燒 GHA runner 月配額。改 alert-based manual
+  # trigger:scripts/alert_quota_reset.py 每天 00:30 台北推 Telegram + Discord
+  # (= UTC 16:30,Gemini quota 00:00 PT 重置後 ~30 min 寬限)。主公收到後手動
+  # dispatch 跑下一批 500 檔。
+  # 重啟方法:移除這段註解,恢復 `schedule: - cron: "0 * * * *"` 即可。
+  # (或先用 GH UI Actions > Backfill Company Profiles LLM > Run workflow 手動跑。)
 
 concurrency:
   group: backfill-company-profiles

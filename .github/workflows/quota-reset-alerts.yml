@@ -1,0 +1,99 @@
+name: Quota Reset Alerts (Telegram + Discord reminder)
+
+# 2026-05-19:replace 兩個 backfill workflow 的 schedule。
+#
+# 背景:
+#   - financials backfill (PR #20) schedule */30 撞 FinMind 月配額,第二批就掛
+#   - company_profiles backfill (PR #27) schedule hourly 撞 Gemini free tier
+#     daily 1500 req limit
+#   兩個的 schedule 已移除,改用本 workflow 在配額重置時推 Telegram + Discord,
+#   主公手動 GH UI dispatch 跑下一批。
+#
+# Cron 排程(GH Actions UTC):
+#   - 30 16 * * *   → 00:30 Asia/Taipei 每天   → company_profiles
+#                      (Gemini daily 1500 req 配額重置;主公指定的時段,
+#                       主公已確認該時段配額已新鮮)
+#   - 0 1 1 * *     → 09:00 Asia/Taipei 每月 1 號 → financials
+#                      (FinMind 月配額在月初重置)
+#
+# 推送目標:
+#   - Telegram (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)
+#   - Discord (DISCORD_WEBHOOK_URL)
+#
+# 停用方式:移除底下 schedule 區塊即可(或整檔刪除)。
+
+on:
+  schedule:
+    # 16:30 UTC = 00:30 Asia/Taipei (每天)— company_profiles Gemini quota
+    - cron: "30 16 * * *"
+    # 01:00 UTC = 09:00 Asia/Taipei (每月 1 號)— financials FinMind quota
+    - cron: "0 1 1 * *"
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "手動測試:推哪個 alert"
+        required: true
+        type: choice
+        options:
+          - company_profiles
+          - financials
+        default: "company_profiles"
+      dry_run:
+        description: "dry-run(不真送,只 print)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: quota-reset-alerts
+  cancel-in-progress: false
+
+jobs:
+  send-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine alert kind
+        id: kind
+        # cron 觸發看 github.event.schedule 字串對映 → kind
+        # workflow_dispatch 觸發直接讀 inputs.kind
+        run: |
+          if [ -n "${{ inputs.kind }}" ]; then
+            echo "kind=${{ inputs.kind }}" >> "$GITHUB_OUTPUT"
+            echo "[KIND] manual dispatch → ${{ inputs.kind }}"
+            exit 0
+          fi
+          case "${{ github.event.schedule }}" in
+            "30 16 * * *")  K="company_profiles" ;;
+            "0 1 1 * *")    K="financials" ;;
+            *)              echo "[KIND] 未知 schedule: ${{ github.event.schedule }}" >&2; exit 1 ;;
+          esac
+          echo "kind=$K" >> "$GITHUB_OUTPUT"
+          echo "[KIND] cron schedule '${{ github.event.schedule }}' → $K"
+
+      - name: Send quota reset alert
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS="${{ steps.kind.outputs.kind }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "Running: python scripts/alert_quota_reset.py $ARGS"
+          python scripts/alert_quota_reset.py $ARGS
