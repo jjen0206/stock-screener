@@ -33,6 +33,10 @@ CLI
     # 試水溫(1 個月)
     python scripts/backfill_institutional.py --start 2025-10-01 --end 2025-11-03
 
+    # Swing 5y backfill 模式(2026-05-19 Phase 0c-B):
+    #   institutional 5 年回補 — end 用 LATEST 自動代換成今天
+    python scripts/backfill_institutional.py --start 2021-05-19 --end LATEST
+
     # 自訂 sleep / retry
     python scripts/backfill_institutional.py --sleep 2.0 --max-retries 5
 
@@ -758,7 +762,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--end", default="2025-11-03",
-        help="終止日(ISO,含),預設 2025-11-03(institutional 既有資料前 1 日)",
+        help=(
+            "終止日(ISO,含),預設 2025-11-03(institutional 既有資料前 1 日)。"
+            "傳 'LATEST' 自動代換成今天(swing 5y backfill 用)"
+        ),
     )
     parser.add_argument(
         "--sleep", type=float, default=2.0,
@@ -807,6 +814,14 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_file_logging("backfill_institutional")
 
+    # LATEST sentinel:swing 5y backfill 用,自動代換成今天
+    if args.end.strip().upper() == "LATEST":
+        args.end = date.today().isoformat()
+        print(
+            f"[BACKFILL-INST] --end=LATEST → {args.end}",
+            flush=True,
+        )
+
     try:
         date.fromisoformat(args.start)
         date.fromisoformat(args.end)
@@ -816,6 +831,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.start > args.end:
         print("❌ --start 必須 <= --end", file=sys.stderr, flush=True)
         return 2
+
+    # 5y 大 backfill 警示(swing 模式)— 避免 emoji(Windows cp950 不吃)
+    range_days = (date.fromisoformat(args.end) - date.fromisoformat(args.start)).days
+    if range_days > 1000:
+        print(
+            f"[WARN] [BACKFILL-INST] {args.start} ~ {args.end} = {range_days} 天 "
+            f"(> 1000 天,swing 5y 模式)。預估 60-120 min,可能撞 GH "
+            f"timeout-minutes:120 -> 分段跑(每段 <= 800 天)。詳見 "
+            f"docs/swing_backfill_runbook.md",
+            flush=True,
+        )
 
     db.init_db()
     existing = existing_dates(args.start, args.end)

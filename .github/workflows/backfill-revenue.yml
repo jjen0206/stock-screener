@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       years:
-        description: "抓近幾年月營收(預設 5)"
+        description: "抓近幾年月營收(預設 5;swing 基本面 toggle 需要月營收 YoY 5 年)"
         required: false
         default: "5"
       limit:

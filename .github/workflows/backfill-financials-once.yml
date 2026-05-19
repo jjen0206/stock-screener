@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       years:
-        description: "抓近幾年季報(預設 5)"
+        description: "抓近幾年季報(預設 5;swing 基本面 toggle 需要 ROE 5 年)"
         required: false
         default: "5"
       force:

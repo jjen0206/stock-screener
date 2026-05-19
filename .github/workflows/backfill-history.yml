@@ -15,11 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: "回補幾天歷史 (預設 90)"
+        description: "回補幾天歷史 (預設 90;swing 5y backfill 填 1825 — 詳見 docs/swing_backfill_runbook.md)"
         required: false
         default: "90"
       min_existing:
-        description: "已有 >= N 天就跳過該檔 (預設 30,短線需求 10 日 + KD9)"
+        description: "已有 >= N 天就跳過該檔 (預設 30,短線需求 10 日 + KD9;swing 5y 模式填 1260)"
         required: false
         default: "30"
       limit:

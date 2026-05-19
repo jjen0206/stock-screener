@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       years:
-        description: "抓近幾年配息(預設 5)"
+        description: "抓近幾年配息(預設 5;swing backfill 用 5,長線連續配息條件需要)"
         required: false
         default: "5"
       limit:
