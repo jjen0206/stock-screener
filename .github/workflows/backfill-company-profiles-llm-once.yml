@@ -259,3 +259,53 @@ jobs:
           name: backfill-company-profiles-log
           path: logs/*-backfill_company_profiles.log
           retention-days: 14
+
+      # 失敗 alert — 不讓主公得自己去 GH UI 查為什麼掛(audit 報告 🔴 Issue #3)。
+      # 用既有 src.notifier (Telegram) + src.discord_notifier (Discord),
+      # inline 推播不依賴外部 dispatcher script,行為自包含。
+      - name: Notify on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          UNIVERSE: ${{ inputs.universe }}
+          BATCH_START: ${{ inputs.batch_start }}
+          BATCH_END: ${{ inputs.batch_end }}
+        run: |
+          python <<'PY'
+          import os
+          import sys
+
+          run_url = (
+              f"https://github.com/{os.environ['REPO']}/actions/runs/"
+              f"{os.environ['RUN_ID']}"
+          )
+          msg = (
+              "🚨 *Backfill company_profiles 失敗*\n"
+              f"batch={os.environ['BATCH_START']}:{os.environ['BATCH_END']} "
+              f"universe={os.environ['UNIVERSE']}\n"
+              "可能原因(看 log 確認):\n"
+              "• `quota_exceeded` → 等 PT midnight 重置(≈ 台北 15:00 夏令 / "
+              "16:00 冬令)\n"
+              "• API key 失效 → 檢查 GEMINI_API_KEY secret 是否過期 / "
+              "rotate / 拼錯\n"
+              "• `failed > 50%` → transient 網路或 SDK 問題\n\n"
+              f"Run log: {run_url}"
+          )
+          try:
+              from src.notifier import send_telegram_message
+              tg_ok = send_telegram_message(msg, parse_mode="Markdown")
+              print(f"[ALERT] telegram sent: {tg_ok}", flush=True)
+          except Exception as e:
+              print(f"[ALERT] telegram failed: {e}", file=sys.stderr, flush=True)
+          try:
+              from src.discord_notifier import send_discord_message
+              # Discord 用純文字(不 Markdown bold 渲染但人看得懂)
+              ds_ok = send_discord_message(msg.replace("*", ""))
+              print(f"[ALERT] discord sent: {ds_ok}", flush=True)
+          except Exception as e:
+              print(f"[ALERT] discord failed: {e}", file=sys.stderr, flush=True)
+          PY
