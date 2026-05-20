@@ -237,10 +237,14 @@ def main(argv: list[str] | None = None) -> int:
                 if status == "ok":
                     ok += 1
                 elif status == "quota_exceeded":
-                    # Gemini 配額爆 — 跟 FinMind 402 同模式,fail-fast 整批中斷
+                    # Gemini 配額爆 — 跟 FinMind 402 同模式,fail-fast 整批中斷。
+                    # Gemini quota 按 **Pacific Time midnight** 重置(非 GMT+8),
+                    # 對應台北 15:00(夏令)/ 16:00(冬令);舊訊息「GMT+8 00:00 重置」
+                    # 是錯的 — 主公看了會在當日 PT 配額內連觸發 2 次都 fail。
                     print(
                         f"[BACKFILL-CP] ⚠ Gemini quota 爆({sid}),中斷整批 — "
-                        "明天 GMT+8 00:00 重置或加 paid quota",
+                        "等 PT midnight 重置(≈ 台北 15:00 夏令 / 16:00 冬令)"
+                        "或升 paid quota",
                         file=sys.stderr, flush=True,
                     )
                     logger.warning(
