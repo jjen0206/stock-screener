@@ -58,7 +58,7 @@
 | 舊命名                          | 衝突點                                              | 新命名(本 spec 採用)     |
 |---------------------------------|----------------------------------------------------|---------------------------|
 | `lin_enru_trades`(clever-panini)| 跟主公「swing」命名不一致                          | **`swing_trades`**         |
-| `ex_dividend_swing`(實際 repo) | 已存在於 `src/strategies.py`(2026-05-13 commit)— 是短線除息事件策略,**不要跟波段混淆** | 保留原名 — 短線歸短線,不動 |
+| `ex_dividend_swing`(實際 repo) | 已存在於 `src/data_fetcher.py` / `snapshot_health.py` / `price_alerts.py` / `database.py`(除權息事件相關 ETL/notifier)— **不要跟波段混淆** | 保留原名 — 短線歸短線,不動 |
 | `paper_trades`(既有表)         | 既有短線 paper trading 用                          | 不動 — 波段走新表 `swing_trades` |
 | `_PHASE2_LAUNCH_MARKERS`        | ecstatic-pike 1.4 已澄清不存在                     | 忽略                       |
 | `swing` 模組(ecstatic-pike 草案)/ `lin_enru` 模組(clever-panini 草案)| 兩個草案各自獨立                       | **合併為單一 `src/swing/`**(本檔 1.4 目錄結構) |
